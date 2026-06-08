@@ -1,6 +1,6 @@
 [package]
 name = "desktop-ai"
-version = "4.0.0"
+version = "5.0.0"
 edition = "2021"
 description = "桌面AI - 本地大模型聊天应用 (安全性加固版)"
 
