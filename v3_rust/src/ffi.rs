@@ -55,30 +55,54 @@ type PfnBatchFree            = unsafe extern "C" fn(LlamaBatch);
 type PfnDecode              = unsafe extern "C" fn(*mut LlamaContext, LlamaBatch) -> i32;
 type PfnSampleTokenGreedy   = unsafe extern "C" fn(*mut LlamaContext, *mut LlamaToken) -> LlamaToken;
 
+// ─── DLL integrity ────────────────────────────────────
+
+const LLAMA_DLL_MIN_SIZE: u64 = 1_000_000;
+
+fn verify_dll(path: &str) -> Result<(), String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("cannot access {}: {}", path, e))?;
+    if meta.len() < LLAMA_DLL_MIN_SIZE {
+        return Err(format!("llama.dll appears corrupted (size {} < {} bytes)", meta.len(), LLAMA_DLL_MIN_SIZE));
+    }
+    Ok(())
+}
+
 // ─── Global API ───────────────────────────────────────
 
 static LLAMA_LIB: OnceCell<Library> = OnceCell::new();
 
 fn lib() -> &'static Library { LLAMA_LIB.get().expect("llama.dll not loaded") }
 
-/// Load llama.dll. Must be called once before any other function.
+/// Load llama.dll with integrity verification. Must be called once before any other function.
 pub unsafe fn init() -> Result<(), String> {
-    LLAMA_LIB.get_or_try_init(|| Library::new("llama.dll").map_err(|e| format!("load llama.dll: {}", e)))
-        .map(|_| ())
+    LLAMA_LIB.get_or_try_init(|| {
+        verify_dll("llama.dll")?;
+        Library::new("llama.dll").map_err(|e| format!("load llama.dll: {}", e))
+    }).map(|_| ())
 }
 
 macro_rules! call {
     ($name:ident, $type:ty, $($arg:expr),*) => {{
-        let sym: Symbol<$type> = unsafe { lib().get(stringify!($name).as_bytes()) }
-            .expect(concat!("missing symbol: ", stringify!($name)));
+        let sym: Symbol<$type> = match unsafe { lib().get(stringify!($name).as_bytes()) } {
+            Ok(s) => s,
+            Err(_) => {
+                log::error!("missing FFI symbol: {}", stringify!($name));
+                return Default::default();
+            }
+        };
         unsafe { sym($($arg),*) }
     }};
+}
+
+fn to_cstring_safe(s: &str) -> CString {
+    let filtered: String = s.chars().map(|c| if c == '\0' { ' ' } else { c }).collect();
+    CString::new(filtered).unwrap_or_else(|_| CString::new("").unwrap())
 }
 
 // ─── Safe wrapper functions ───────────────────────────
 
 pub unsafe fn load_model(path: &str) -> *mut LlamaModel {
-    let c_path = CString::new(path).unwrap();
+    let c_path = to_cstring_safe(path);
     let mut params = LlamaModelParams::default();
     params.use_mmap = true;
     params.use_mlock = false;
@@ -106,13 +130,14 @@ pub unsafe fn n_vocab(model: *const LlamaModel) -> i32 {
 }
 
 pub unsafe fn tokenize(model: *const LlamaModel, text: &str, add_special: bool) -> Vec<LlamaToken> {
-    let c_text = CString::new(text).unwrap();
-    let n = n_vocab(model) as usize;
-    let mut tokens = vec![0i32; text.len() + 64];
+    let c_text = to_cstring_safe(text);
+    let max_tokens = (text.len() * 2).max(256);
+    let mut tokens = vec![0i32; max_tokens];
     let count = call!(llama_tokenize, PfnTokenize,
         model, c_text.as_ptr(), text.len() as i32, tokens.as_mut_ptr(), tokens.len() as i32, add_special, true);
     if count < 0 { return vec![1, 2]; }
-    tokens.truncate(count as usize);
+    let count = (count as usize).min(tokens.len());
+    tokens.truncate(count);
     tokens
 }
 
@@ -127,9 +152,8 @@ pub unsafe fn token_to_piece(model: *const LlamaModel, token: LlamaToken) -> Str
 
 pub unsafe fn decode(ctx: *mut LlamaContext, token: LlamaToken) {
     let mut t = token;
-    let batch = call!(llama_batch_get_one, PfnBatchGetOne, &mut t, 1);
-    let n = batch.n_tokens;
-    call!(llama_decode, PfnDecode, ctx, batch);
+    let _batch = call!(llama_batch_get_one, PfnBatchGetOne, &mut t, 1);
+    call!(llama_decode, PfnDecode, ctx, _batch);
     // batch is consumed by decode, no free needed since llama_decode manages it
 }
 
