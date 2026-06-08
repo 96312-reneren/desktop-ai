@@ -333,6 +333,13 @@ impl DesktopAI {
         }
     }
 
+    fn delete_model_file(&mut self, model_id: &str) {
+        if let Some(info) = find_model(&self.config.model_catalog, model_id) {
+            let path = config::models_dir().join(&info.filename);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
     fn delete_all_models(&mut self) {
         let dir = config::models_dir();
         if dir.exists() {
@@ -449,7 +456,7 @@ impl eframe::App for DesktopAI {
             .default_width(200.0)
             .show(ctx, |ui| {
                 ui.heading("桌面AI");
-                ui.label(RichText::new("v4.0").size(10.0).color(Color32::GRAY));
+                ui.label(RichText::new("v5.0").size(10.0).color(Color32::GRAY));
                 ui.add_space(8.0);
 
                 if ui.button("+ 新对话").clicked() {
@@ -666,7 +673,9 @@ impl eframe::App for DesktopAI {
                 .collapsible(false).resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.label(RichText::new("主题").strong());
+                    ScrollArea::vertical().max_height(500.0).show(ui, |ui| {
+
+                    ui.label(RichText::new("主题外观").strong());
                     ui.horizontal(|ui| {
                         if ui.selectable_value(&mut self.config.theme, "dark".into(), "深色").clicked() {
                             apply_theme(ctx, &self.config.theme);
@@ -676,24 +685,85 @@ impl eframe::App for DesktopAI {
                         }
                     });
                     ui.add_space(8.0);
+
                     ui.label(RichText::new("字号").strong());
                     ui.add(egui::Slider::new(&mut self.config.font_size, 10..=24).text("pt"));
                     ui.add_space(8.0);
+
                     ui.label(RichText::new("上下文长度").strong());
                     ui.add(egui::Slider::new(&mut self.config.n_ctx, 512..=8192).text("tokens"));
                     ui.add_space(8.0);
 
-                    if ui.button("保存").clicked() {
-                        config::save_config(&self.config);
-                        self.show_settings = false;
-                    }
+                    ui.label(RichText::new("CPU 线程数").strong());
+                    let mut thr = self.config.n_threads.clone();
+                    egui::ComboBox::from_id_salt("threads")
+                        .selected_text(&thr)
+                        .show_ui(ui, |ui| {
+                            for opt in &["auto", "2", "4", "6", "8", "12", "16"] {
+                                ui.selectable_value(&mut thr, opt.to_string(), *opt);
+                            }
+                        });
+                    self.config.n_threads = thr;
+                    ui.add_space(8.0);
 
-                    ui.add_space(12.0);
+                    ui.label(RichText::new("系统提示词").strong());
+                    ui.add(TextEdit::multiline(&mut self.config.system_prompt)
+                        .desired_rows(2)
+                        .hint_text("You are a helpful assistant."));
+                    ui.add_space(8.0);
+
+                    // Current model info
+                    ui.separator();
+                    ui.add_space(4.0);
+                    if let Some(ref sel) = self.config.selected_model_id {
+                        if let Some(info) = find_model(&self.config.model_catalog, sel) {
+                            ui.label(RichText::new(format!("当前模型: {}", info.name))
+                                .size(12.0).color(Color32::from_rgb(76, 175, 80)));
+                        }
+                    }
+                    if ui.button("切换模型 (打开模型选择窗口)").clicked() {
+                        self.show_settings = false;
+                        self.show_model_select = true;
+                    }
+                    ui.add_space(8.0);
+
+                    // Downloaded models
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("已下载的模型").size(13.0).strong());
+                    ui.add_space(2.0);
+                    let models_dir = config::models_dir();
+                    let downloaded_list: Vec<(String, String, f64)> = self.config.model_catalog.iter()
+                        .filter_map(|m| {
+                            let path = models_dir.join(&m.filename);
+                            if path.exists() {
+                                let size_mb = std::fs::metadata(&path)
+                                    .map(|m| m.len() as f64 / 1_048_576.0).unwrap_or(0.0);
+                                Some((m.id.clone(), m.name.clone(), size_mb))
+                            } else { None }
+                        })
+                        .collect();
+                    if downloaded_list.is_empty() {
+                        ui.label(RichText::new("暂无已下载的模型")
+                            .size(11.0).color(Color32::GRAY));
+                    } else {
+                        for (id, name, size_mb) in &downloaded_list {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(format!("{}  ({:.0} MB)", name, size_mb))
+                                    .size(11.0));
+                                let model_id = id.clone();
+                                if ui.button("删除").clicked() {
+                                    self.delete_model_file(&model_id);
+                                }
+                            });
+                        }
+                    }
+                    ui.add_space(8.0);
+
                     ui.separator();
                     ui.add_space(4.0);
                     ui.label(RichText::new("数据管理").size(13.0).strong());
                     ui.add_space(4.0);
-
                     ui.horizontal(|ui| {
                         if ui.button("删除所有模型").clicked() {
                             self.confirm_action = Some(ConfirmAction::DeleteAllModels);
@@ -706,6 +776,14 @@ impl eframe::App for DesktopAI {
                     if ui.button("重置应用（删除全部数据）").clicked() {
                         self.confirm_action = Some(ConfirmAction::ResetApp);
                     }
+                    ui.add_space(12.0);
+
+                    if ui.button("保存并关闭").clicked() {
+                        config::save_config(&self.config);
+                        self.show_settings = false;
+                    }
+
+                    }); // ScrollArea
                 });
         }
 
