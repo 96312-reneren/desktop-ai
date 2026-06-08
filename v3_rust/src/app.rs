@@ -11,6 +11,16 @@ use crate::inference::{self, LlamaInference, StreamToken};
 use crate::markdown;
 use crate::model_catalog::find_model;
 
+fn apply_theme(ctx: &egui::Context, theme: &str) {
+    let mut visuals = if theme == "dark" {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
+    visuals.override_text_color = None;
+    ctx.set_visuals(visuals);
+}
+
 // ─── Download state ────────────────────────────────────
 
 struct DownloadState {
@@ -54,6 +64,15 @@ pub struct DesktopAI {
     show_settings: bool,
     status_message: String,
     error_message: Option<String>,
+    theme_applied: bool,
+    confirm_action: Option<ConfirmAction>,
+}
+
+#[derive(Clone, PartialEq)]
+enum ConfirmAction {
+    DeleteAllModels,
+    DeleteAllConversations,
+    ResetApp,
 }
 
 fn detect_hardware() -> (usize, Option<String>) {
@@ -114,6 +133,8 @@ impl DesktopAI {
             show_settings: false,
             status_message: "就绪".into(),
             error_message: None,
+            theme_applied: false,
+            confirm_action: None,
         }
     }
 
@@ -311,6 +332,41 @@ impl DesktopAI {
             self.current_conv = Conversation::new();
         }
     }
+
+    fn delete_all_models(&mut self) {
+        let dir = config::models_dir();
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        self.inference = None;
+        self.config.selected_model_id = None;
+        config::save_config(&self.config);
+        self.status_message = "所有模型已删除".into();
+    }
+
+    fn delete_all_conversations(&mut self) {
+        let dir = config::conversations_dir();
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        self.current_conv = Conversation::new();
+        self.gen = None;
+        self.status_message = "所有对话已删除".into();
+    }
+
+    fn reset_app(&mut self) {
+        let app_dir = config::app_dirs().data_dir().to_path_buf();
+        let _ = std::fs::remove_dir_all(&app_dir);
+        let config_file = config::config_path();
+        let _ = std::fs::remove_file(&config_file);
+        self.inference = None;
+        self.config = Config::default();
+        self.current_conv = Conversation::new();
+        self.gen = None;
+        self.downloads.clear();
+        self.show_settings = false;
+        self.status_message = "应用已重置。请重新选择模型。".into();
+    }
 }
 
 // ─── egui App ──────────────────────────────────────────
@@ -319,6 +375,14 @@ impl eframe::App for DesktopAI {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_all_downloads();
         self.poll_generation();
+
+        // Apply saved theme only once on startup
+        if !self.theme_applied {
+            self.theme_applied = true;
+            if self.config.theme == "light" {
+                ctx.set_visuals(egui::Visuals::light());
+            }
+        }
 
         // ─── Top bar ───────────────────────────────
         egui::TopBottomPanel::top("status").show(ctx, |ui| {
@@ -349,6 +413,7 @@ impl eframe::App for DesktopAI {
                     let icon = if self.config.theme == "dark" { "☀" } else { "🌙" };
                     if ui.button(icon).clicked() {
                         self.config.theme = if self.config.theme == "dark" { "light".into() } else { "dark".into() };
+                        apply_theme(ctx, &self.config.theme);
                         config::save_config(&self.config);
                     }
                     if ui.button("⚙").clicked() { self.show_settings = true; }
@@ -603,8 +668,12 @@ impl eframe::App for DesktopAI {
                 .show(ctx, |ui| {
                     ui.label(RichText::new("主题").strong());
                     ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.config.theme, "dark".into(), "深色");
-                        ui.selectable_value(&mut self.config.theme, "light".into(), "浅色");
+                        if ui.selectable_value(&mut self.config.theme, "dark".into(), "深色").clicked() {
+                            apply_theme(ctx, &self.config.theme);
+                        }
+                        if ui.selectable_value(&mut self.config.theme, "light".into(), "浅色").clicked() {
+                            apply_theme(ctx, &self.config.theme);
+                        }
                     });
                     ui.add_space(8.0);
                     ui.label(RichText::new("字号").strong());
@@ -618,6 +687,55 @@ impl eframe::App for DesktopAI {
                         config::save_config(&self.config);
                         self.show_settings = false;
                     }
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("数据管理").size(13.0).strong());
+                    ui.add_space(4.0);
+
+                    ui.horizontal(|ui| {
+                        if ui.button("删除所有模型").clicked() {
+                            self.confirm_action = Some(ConfirmAction::DeleteAllModels);
+                        }
+                        if ui.button("删除所有对话").clicked() {
+                            self.confirm_action = Some(ConfirmAction::DeleteAllConversations);
+                        }
+                    });
+                    ui.add_space(4.0);
+                    if ui.button("重置应用（删除全部数据）").clicked() {
+                        self.confirm_action = Some(ConfirmAction::ResetApp);
+                    }
+                });
+        }
+
+        // ─── Confirm dialog ───────────────────────
+        if let Some(ref action) = self.confirm_action.clone() {
+            let (title, msg) = match action {
+                ConfirmAction::DeleteAllModels => ("删除所有模型", "确定要删除所有已下载的模型文件吗？此操作不可恢复。"),
+                ConfirmAction::DeleteAllConversations => ("删除所有对话", "确定要删除所有对话记录吗？此操作不可恢复。"),
+                ConfirmAction::ResetApp => ("重置应用", "确定要删除所有数据（模型、对话、配置）？应用将恢复到初始状态。"),
+            };
+            egui::Window::new(title)
+                .collapsible(false).resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(msg);
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("确定").clicked() {
+                            match action {
+                                ConfirmAction::DeleteAllModels => self.delete_all_models(),
+                                ConfirmAction::DeleteAllConversations => self.delete_all_conversations(),
+                                ConfirmAction::ResetApp => self.reset_app(),
+                            }
+                            self.confirm_action = None;
+                            self.show_settings = false;
+                        }
+                        if ui.button("取消").clicked() {
+                            self.confirm_action = None;
+                        }
+                    });
                 });
         }
 
