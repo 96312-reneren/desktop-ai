@@ -11,6 +11,8 @@ pub struct ModelInfo {
     pub tags: Vec<String>,
     pub url: String,
     pub filename: String,
+    #[serde(default)]
+    pub expected_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,18 +68,34 @@ pub fn conversations_dir() -> PathBuf {
 
 pub fn load_config() -> Config {
     let path = config_path();
-    if path.exists() {
+    let mut config = if path.exists() {
         if let Ok(data) = std::fs::read_to_string(&path) {
             if let Ok(mut config) = serde_json::from_str::<Config>(&data) {
                 if config.model_catalog.is_empty() {
                     config.model_catalog = super::model_catalog::default_catalog();
                 }
-                return config;
+                config
+            } else {
+                Config::default()
             }
+        } else {
+            Config::default()
         }
+    } else {
+        let config = Config::default();
+        save_config(&config);
+        return config;
+    };
+
+    if config.font_size < 10 { config.font_size = 14; }
+    if config.font_size > 24 { config.font_size = 14; }
+    if config.n_ctx < 512 { config.n_ctx = 512; }
+    if config.n_ctx > 32768 { config.n_ctx = 4096; }
+    if config.theme != "dark" && config.theme != "light" { config.theme = "dark".into(); }
+    if config.last_conversation_id.as_deref().map(|s| s.len() > 100).unwrap_or(false) {
+        config.last_conversation_id = None;
     }
-    let config = Config::default();
-    save_config(&config);
+    if config.system_prompt.len() > 10000 { config.system_prompt = "You are a helpful assistant.".into(); }
     config
 }
 

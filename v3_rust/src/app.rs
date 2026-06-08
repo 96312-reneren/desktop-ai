@@ -5,10 +5,9 @@ use std::thread;
 use eframe::egui;
 use egui::{Color32, RichText, ScrollArea, TextEdit, vec2};
 use crate::config::{self, Config};
-use crate::conversation::{self, Conversation};
+use crate::conversation::Conversation;
 use crate::downloader::{self, DownloadMsg};
-use crate::ffi;
-use crate::inference::{LlamaInference, StreamToken};
+use crate::inference::{self, LlamaInference, StreamToken};
 use crate::markdown;
 use crate::model_catalog::find_model;
 
@@ -36,7 +35,7 @@ struct GenState {
 
 pub struct DesktopAI {
     config: Config,
-    inference: Option<LlamaInference>,
+    inference: Option<Arc<LlamaInference>>,
     current_conv: Conversation,
 
     // Chat
@@ -143,7 +142,7 @@ impl DesktopAI {
         let path_str = model_path.to_string_lossy().to_string();
         match LlamaInference::load(&path_str, n_ctx, n_threads) {
             Ok(inf) => {
-                self.inference = Some(inf);
+                self.inference = Some(Arc::new(inf));
                 self.status_message = format!("{} 就绪", info.name);
             }
             Err(e) => { self.status_message = format!("加载失败: {}", e); }
@@ -224,10 +223,13 @@ impl DesktopAI {
 
         self.current_conv.add_message("user", &text);
 
-        if self.inference.is_none() {
-            self.status_message = "模型未加载".into();
-            return;
-        }
+        let inf = match self.inference.as_ref() {
+            Some(inf) => Arc::clone(inf),
+            None => {
+                self.status_message = "模型未加载".into();
+                return;
+            }
+        };
 
         let messages = self.current_conv.context_messages(
             Some(&self.config.system_prompt), 20
@@ -236,9 +238,6 @@ impl DesktopAI {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
 
-        let (m_ptr, c_ptr) = self.inference.as_ref().unwrap().raw_ptrs();
-        let model_addr = m_ptr as usize;
-        let ctx_addr = c_ptr as usize;
         let stop = stop_flag.clone();
 
         self.gen = Some(GenState {
@@ -249,33 +248,8 @@ impl DesktopAI {
         });
 
         thread::spawn(move || {
-            let model = model_addr as *mut ffi::LlamaModel;
-            let ctx = ctx_addr as *mut ffi::LlamaContext;
-            let prompt = format_chatml(&messages);
-            unsafe {
-                let tokens = ffi::tokenize(model, &prompt, true);
-                if tokens.is_empty() {
-                    let _ = tx.send(StreamToken::Error("tokenization failed".into()));
-                    return;
-                }
-                let vocab = ffi::n_vocab(model);
-                for chunk in tokens.chunks(512) {
-                    for &t in chunk { ffi::decode(ctx, t); }
-                }
-                let mut count = 0u32;
-                loop {
-                    if stop.load(std::sync::atomic::Ordering::Relaxed) { break; }
-                    let token = ffi::sample_greedy(ctx);
-                    if token == 1 || token == 2 || token >= vocab { break; }
-                    count += 1;
-                    if count >= 2048 { break; }
-                    let piece = ffi::token_to_piece(model, token);
-                    if piece.is_empty() { break; }
-                    if tx.send(StreamToken::Text(piece)).is_err() { break; }
-                    ffi::decode(ctx, token);
-                }
-                let _ = tx.send(StreamToken::Done);
-            }
+            let prompt = inference::format_chatml(&messages);
+            inference::run_inference(inf, prompt, stop, tx, 2048);
         });
     }
 
@@ -337,17 +311,6 @@ impl DesktopAI {
             self.current_conv = Conversation::new();
         }
     }
-}
-
-// ─── ChatML Format ─────────────────────────────────────
-
-fn format_chatml(messages: &[conversation::Message]) -> String {
-    let mut s = String::new();
-    for msg in messages {
-        s.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", msg.role, msg.content));
-    }
-    s.push_str("<|im_start|>assistant\n");
-    s
 }
 
 // ─── egui App ──────────────────────────────────────────
@@ -421,7 +384,7 @@ impl eframe::App for DesktopAI {
             .default_width(200.0)
             .show(ctx, |ui| {
                 ui.heading("桌面AI");
-                ui.label(RichText::new("v3.0").size(10.0).color(Color32::GRAY));
+                ui.label(RichText::new("v4.0").size(10.0).color(Color32::GRAY));
                 ui.add_space(8.0);
 
                 if ui.button("+ 新对话").clicked() {

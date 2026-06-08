@@ -1,8 +1,8 @@
 [package]
 name = "desktop-ai"
-version = "3.0.0"
+version = "4.0.0"
 edition = "2021"
-description = "桌面AI - 本地大模型聊天应用"
+description = "桌面AI - 本地大模型聊天应用 (安全性加固版)"
 
 [dependencies]
 eframe = "0.31"
@@ -22,3 +22,9 @@ env_logger = "0.11"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_System_SystemInformation"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = "symbols"
+panic = "abort"

@@ -10,6 +10,7 @@ pub fn default_catalog() -> Vec<ModelInfo> {
             tags: vec!["超轻量".into(), "低配救星".into()],
             url: "https://hf-mirror.com/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf".into(),
             filename: "qwen2.5-0.5b-instruct-q4_k_m.gguf".into(),
+            expected_sha256: None,
         },
         ModelInfo {
             id: "qwen3-1.7b".into(),
@@ -19,6 +20,7 @@ pub fn default_catalog() -> Vec<ModelInfo> {
             tags: vec!["轻量".into(), "快速".into(), "低配首选".into()],
             url: "https://hf-mirror.com/Qwen/Qwen3-1.7B-GGUF/resolve/main/qwen3-1.7b-instruct-q4_k_m.gguf".into(),
             filename: "qwen3-1.7b-instruct-q4_k_m.gguf".into(),
+            expected_sha256: None,
         },
         ModelInfo {
             id: "qwen2.5-3b".into(),
@@ -28,6 +30,7 @@ pub fn default_catalog() -> Vec<ModelInfo> {
             tags: vec!["均衡".into(), "推荐".into()],
             url: "https://hf-mirror.com/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf".into(),
             filename: "qwen2.5-3b-instruct-q4_k_m.gguf".into(),
+            expected_sha256: None,
         },
         ModelInfo {
             id: "qwen2.5-7b".into(),
@@ -37,6 +40,7 @@ pub fn default_catalog() -> Vec<ModelInfo> {
             tags: vec!["经典".into(), "综合".into()],
             url: "https://hf-mirror.com/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf".into(),
             filename: "qwen2.5-7b-instruct-q4_k_m.gguf".into(),
+            expected_sha256: None,
         },
         ModelInfo {
             id: "qwen2.5-coder-7b".into(),
@@ -46,6 +50,7 @@ pub fn default_catalog() -> Vec<ModelInfo> {
             tags: vec!["编程".into(), "代码".into()],
             url: "https://hf-mirror.com/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf".into(),
             filename: "qwen2.5-coder-7b-instruct-q4_k_m.gguf".into(),
+            expected_sha256: None,
         },
         ModelInfo {
             id: "qwen3-8b".into(),
@@ -55,6 +60,7 @@ pub fn default_catalog() -> Vec<ModelInfo> {
             tags: vec!["最新".into(), "高性能".into()],
             url: "https://hf-mirror.com/Qwen/Qwen3-8B-GGUF/resolve/main/qwen3-8b-instruct-q4_k_m.gguf".into(),
             filename: "qwen3-8b-instruct-q4_k_m.gguf".into(),
+            expected_sha256: None,
         },
     ]
 }

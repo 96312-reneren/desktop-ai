@@ -8,7 +8,7 @@ pub fn render_markdown(ui: &mut Ui, text: &str, font_size: f32) {
     let mut list_depth = 0u32;
     let mut current_text = String::new();
     let mut current_bold = false;
-    let mut current_code = false;
+    let current_code = false;
 
     for event in parser {
         match event {

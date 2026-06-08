@@ -3,6 +3,17 @@ use chrono::Utc;
 
 use crate::config::conversations_dir;
 
+fn sanitize_id(id: &str) -> bool {
+    id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn safe_path(id: &str) -> Option<std::path::PathBuf> {
+    if !sanitize_id(id) { return None; }
+    let path = conversations_dir().join(format!("{}.json", id));
+    if !path.starts_with(conversations_dir()) { return None; }
+    Some(path)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
@@ -38,7 +49,7 @@ impl Conversation {
     }
 
     pub fn load(id: &str) -> Option<Self> {
-        let path = conversations_dir().join(format!("{}.json", id));
+        let path = safe_path(id)?;
         let data = std::fs::read_to_string(&path).ok()?;
         let conv: ConversationData = serde_json::from_str(&data).ok()?;
         Some(Self { id: conv.id, messages: conv.messages })
@@ -61,7 +72,12 @@ impl Conversation {
         };
 
         let dir = conversations_dir();
-        let path = dir.join(format!("{}.json", self.id));
+        let mut filename = String::new();
+        for c in self.id.chars() {
+            if c.is_ascii_alphanumeric() || c == '_' { filename.push(c); }
+        }
+        if filename.is_empty() { return; }
+        let path = dir.join(format!("{}.json", filename));
         if let Ok(json) = serde_json::to_string_pretty(&data) {
             std::fs::write(&path, json).ok();
         }
@@ -73,8 +89,9 @@ impl Conversation {
     }
 
     pub fn delete(id: &str) {
-        let path = conversations_dir().join(format!("{}.json", id));
-        std::fs::remove_file(&path).ok();
+        if let Some(path) = safe_path(id) {
+            std::fs::remove_file(&path).ok();
+        }
     }
 
     pub fn list_all() -> Vec<ConversationMeta> {
