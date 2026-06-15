@@ -27,7 +27,9 @@ impl ApiServer {
                     return;
                 }
             };
-            listener.set_nonblocking(true).ok();
+            if let Err(e) = listener.set_nonblocking(true) {
+                log::warn!("API server set_nonblocking failed: {}", e);
+            }
 
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 match listener.accept() {

@@ -132,7 +132,9 @@ pub fn download_model(
 
     let actual_size = fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
     if actual_size < 50_000_000 {
-        fs::remove_file(&dest).ok();
+        if let Err(e) = fs::remove_file(&dest) {
+            log::warn!("failed to remove corrupted download: {}", e);
+        }
         let _ = tx.send(DownloadMsg::Error("下载文件异常小，已删除。请检查网络后重试。".into()));
         return;
     }
