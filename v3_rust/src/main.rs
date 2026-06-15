@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod api_server;
 mod app;
 mod config;
 mod conversation;
@@ -8,6 +9,7 @@ mod ffi;
 mod inference;
 mod markdown;
 mod model_catalog;
+mod search;
 
 fn load_chinese_fonts() -> Option<Vec<u8>> {
     let font_paths = [
@@ -57,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1000.0, 680.0])
             .with_min_inner_size([750.0, 500.0])
-            .with_title("桌面AI v5.0"),
+            .with_title("桌面AI v5.1"),
         ..Default::default()
     };
 
