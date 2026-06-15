@@ -1,8 +1,8 @@
-[package]
+﻿[package]
 name = "desktop-ai"
-version = "5.1.0"
+version = "5.2.0"
 edition = "2021"
-description = "桌面AI - 本地大模型聊天应用 (API服务 + 搜索)"
+description = "妗岄潰AI - 鏈湴澶фā鍨嬭亰澶╁簲鐢?(API鏈嶅姟 + 鎼滅储)"
 
 [dependencies]
 eframe = "0.31"
@@ -28,3 +28,4 @@ opt-level = 3
 lto = true
 strip = "symbols"
 panic = "abort"
+

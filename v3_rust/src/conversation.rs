@@ -79,7 +79,9 @@ impl Conversation {
         if filename.is_empty() { return; }
         let path = dir.join(format!("{}.json", filename));
         if let Ok(json) = serde_json::to_string_pretty(&data) {
-            std::fs::write(&path, json).ok();
+            if let Err(e) = std::fs::write(&path, &json) {
+                log::warn!("failed to save conversation {}: {}", self.id, e);
+            }
         }
     }
 
@@ -90,7 +92,9 @@ impl Conversation {
 
     pub fn delete(id: &str) {
         if let Some(path) = safe_path(id) {
-            std::fs::remove_file(&path).ok();
+            if let Err(e) = std::fs::remove_file(&path) {
+                log::warn!("failed to delete conversation {}: {}", id, e);
+            }
         }
     }
 
@@ -124,5 +128,38 @@ impl Conversation {
         let start = if self.messages.len() > max { self.messages.len() - max } else { 0 };
         msgs.extend(self.messages[start..].to_vec());
         msgs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_valid_ids() {
+        assert!(sanitize_id("20250608_120000_123456"));
+        assert!(sanitize_id("abc123"));
+        assert!(!sanitize_id("../etc/passwd"));
+        assert!(!sanitize_id("C:\\Windows\\evil"));
+        assert!(!sanitize_id("a b"));
+        assert!(!sanitize_id("a.b"));
+    }
+
+    #[test]
+    fn test_new_conversation_has_valid_id() {
+        let c = Conversation::new();
+        assert!(sanitize_id(&c.id));
+        assert!(!c.id.is_empty());
+    }
+
+    #[test]
+    fn test_context_messages_truncation() {
+        let mut c = Conversation::new();
+        for i in 0..15 {
+            c.messages.push(Message { role: "user".into(), content: format!("msg{}", i) });
+        }
+        let ctx = c.context_messages(None, 5);
+        assert_eq!(ctx.len(), 5);
+        assert_eq!(ctx[0].content, "msg10");
     }
 }

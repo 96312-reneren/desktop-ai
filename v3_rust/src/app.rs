@@ -71,6 +71,7 @@ pub struct DesktopAI {
     search_loading: bool,
     search_error: Option<String>,
     search_rx: Option<mpsc::Receiver<Result<Vec<SearchResult>, String>>>,
+    conv_filter: String,
 
     // UI
     show_model_select: bool,
@@ -150,6 +151,7 @@ impl DesktopAI {
             search_loading: false,
             search_error: None,
             search_rx: None,
+            conv_filter: String::new(),
             show_model_select: false,
             show_settings: false,
             status_message: "就绪".into(),
@@ -475,6 +477,22 @@ impl eframe::App for DesktopAI {
         self.poll_generation();
         self.poll_search();
 
+        // Keyboard shortcuts
+        let input = ctx.input(|i| i.clone());
+        if input.modifiers.ctrl {
+            if input.key_pressed(egui::Key::N) {
+                self.new_conversation();
+            }
+            if input.key_pressed(egui::Key::F) {
+                self.show_search_panel = true;
+            }
+        }
+        if input.key_pressed(egui::Key::Escape) {
+            if self.show_settings { self.show_settings = false; }
+            else if self.show_model_select { self.show_model_select = false; }
+            else if self.show_search_panel { self.show_search_panel = false; }
+        }
+
         // Apply saved theme only once on startup
         if !self.theme_applied {
             self.theme_applied = true;
@@ -548,7 +566,7 @@ impl eframe::App for DesktopAI {
             .default_width(200.0)
             .show(ctx, |ui| {
                 ui.heading("桌面AI");
-                ui.label(RichText::new("v5.1").size(10.0).color(Color32::GRAY));
+                ui.label(RichText::new("v5.2").size(10.0).color(Color32::GRAY));
                 ui.add_space(8.0);
 
                 if ui.button("+ 新对话").clicked() {
@@ -558,10 +576,20 @@ impl eframe::App for DesktopAI {
                 ui.add_space(4.0);
                 ui.separator();
                 ui.label(RichText::new("对话历史").size(11.0).color(Color32::GRAY));
+                ui.add_sized(vec2(ui.available_width(), 20.0),
+                    TextEdit::singleline(&mut self.conv_filter).hint_text("搜索对话... Ctrl+F"));
+                ui.add_space(2.0);
 
-                ScrollArea::vertical().max_height(250.0).show(ui, |ui| {
+                ScrollArea::vertical().max_height(230.0).show(ui, |ui| {
                     let convs = Conversation::list_all();
+                    let filter = self.conv_filter.trim().to_lowercase();
                     for conv in &convs {
+                        if !filter.is_empty()
+                            && !conv.title.to_lowercase().contains(&filter)
+                            && !conv.id.contains(&filter)
+                        {
+                            continue;
+                        }
                         ui.horizontal(|ui| {
                             let title = if conv.title.len() > 18 {
                                 format!("{}...", &conv.title[..18])

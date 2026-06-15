@@ -41,8 +41,6 @@ pub type LlamaContext = c_void;
 
 // ─── API function pointer types ───────────────────────
 
-type PfnModelDefaultParams    = unsafe extern "C" fn() -> LlamaModelParams;
-type PfnContextDefaultParams  = unsafe extern "C" fn() -> LlamaContextParams;
 type PfnLoadModelFromFile    = unsafe extern "C" fn(*const c_char, LlamaModelParams) -> *mut LlamaModel;
 type PfnNewContextWithModel  = unsafe extern "C" fn(*mut LlamaModel, LlamaContextParams) -> *mut LlamaContext;
 type PfnFreeModel            = unsafe extern "C" fn(*mut LlamaModel);
@@ -51,7 +49,6 @@ type PfnNVocab              = unsafe extern "C" fn(*const LlamaModel) -> i32;
 type PfnTokenize            = unsafe extern "C" fn(*const LlamaModel, *const c_char, i32, *mut LlamaToken, i32, bool, bool) -> i32;
 type PfnTokenToPiece        = unsafe extern "C" fn(*const LlamaModel, LlamaToken, *mut c_char, i32, i32, bool) -> i32;
 type PfnBatchGetOne          = unsafe extern "C" fn(*mut LlamaToken, i32) -> LlamaBatch;
-type PfnBatchFree            = unsafe extern "C" fn(LlamaBatch);
 type PfnDecode              = unsafe extern "C" fn(*mut LlamaContext, LlamaBatch) -> i32;
 type PfnSampleTokenGreedy   = unsafe extern "C" fn(*mut LlamaContext, *mut LlamaToken) -> LlamaToken;
 
