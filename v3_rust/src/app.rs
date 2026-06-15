@@ -73,6 +73,7 @@ enum ConfirmAction {
     DeleteAllModels,
     DeleteAllConversations,
     ResetApp,
+    UninstallApp,
 }
 
 fn detect_hardware() -> (usize, Option<String>) {
@@ -373,6 +374,38 @@ impl DesktopAI {
         self.downloads.clear();
         self.show_settings = false;
         self.status_message = "应用已重置。请重新选择模型。".into();
+    }
+
+    fn uninstall_app(&mut self) {
+        // Delete all user data first
+        let app_dir = config::app_dirs().data_dir().to_path_buf();
+        let _ = std::fs::remove_dir_all(&app_dir);
+        let config_file = config::config_path();
+        let _ = std::fs::remove_file(&config_file);
+
+        // Schedule self-deletion via batch script
+        let exe_path = std::env::current_exe().unwrap_or_default();
+        let exe_dir = exe_path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let batch_path = exe_dir.join("_uninstall.bat");
+        if let Ok(mut f) = std::fs::File::create(&batch_path) {
+            use std::io::Write;
+            let _ = writeln!(f, "@echo off");
+            let _ = writeln!(f, "echo 桌面AI 卸载中...");
+            let _ = writeln!(f, "timeout /t 2 /nobreak >nul");
+            let _ = writeln!(f, "del /f /q \"{}\"", exe_path.display());
+            let _ = writeln!(f, "del /f /q \"{}\"", exe_dir.join("llama.dll").display());
+            let _ = writeln!(f, "del /f /q \"{}\"", batch_path.display());
+            let _ = writeln!(f, "echo 桌面AI 已卸载。");
+            let _ = writeln!(f, "timeout /t 2 /nobreak >nul");
+        }
+
+        // Launch the batch script detached and exit
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "/MIN", ""])
+            .arg(batch_path.to_string_lossy().to_string())
+            .spawn();
+
+        std::process::exit(0);
     }
 }
 
@@ -795,6 +828,16 @@ impl eframe::App for DesktopAI {
                     if ui.add(reset_btn).clicked() {
                         self.confirm_action = Some(ConfirmAction::ResetApp);
                     }
+                    ui.add_space(6.0);
+                    let uninstall_btn = egui::Button::new(
+                        RichText::new("卸载应用 (删除程序及全部数据)")
+                            .color(Color32::WHITE)
+                            .size(13.0)
+                    ).fill(Color32::from_rgb(160, 30, 30))
+                     .min_size(vec2(ui.available_width(), 28.0));
+                    if ui.add(uninstall_btn).clicked() {
+                        self.confirm_action = Some(ConfirmAction::UninstallApp);
+                    }
                     ui.add_space(12.0);
 
                     if ui.button("保存并关闭").clicked() {
@@ -812,6 +855,7 @@ impl eframe::App for DesktopAI {
                 ConfirmAction::DeleteAllModels => ("删除所有模型", "确定要删除所有已下载的模型文件吗？此操作不可恢复。", false),
                 ConfirmAction::DeleteAllConversations => ("删除所有对话", "确定要删除所有对话记录吗？此操作不可恢复。", false),
                 ConfirmAction::ResetApp => ("⚠ 重置应用", "确定要删除所有数据（模型、对话、配置）？\n应用将恢复到初始状态，所有数据将永久丢失。", true),
+                ConfirmAction::UninstallApp => ("⚠ 卸载应用", "确定要完全卸载桌面AI吗？\n\n将删除：\n• 所有已下载模型\n• 所有对话记录\n• 应用配置文件\n• 程序文件（exe + dll）\n\n此操作不可恢复！", true),
             };
             egui::Window::new(title)
                 .collapsible(false).resizable(false)
@@ -825,11 +869,20 @@ impl eframe::App for DesktopAI {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if is_danger {
+                            let (btn_text, action_copy) = match action {
+                                ConfirmAction::ResetApp => ("确定重置", ConfirmAction::ResetApp),
+                                ConfirmAction::UninstallApp => ("确定卸载", ConfirmAction::UninstallApp),
+                                _ => ("确定删除", ConfirmAction::ResetApp),
+                            };
                             let confirm_btn = egui::Button::new(
-                                RichText::new("确定删除").color(Color32::WHITE)
+                                RichText::new(btn_text).color(Color32::WHITE)
                             ).fill(Color32::from_rgb(192, 57, 43));
                             if ui.add(confirm_btn).clicked() {
-                                self.reset_app();
+                                match action_copy {
+                                    ConfirmAction::ResetApp => self.reset_app(),
+                                    ConfirmAction::UninstallApp => self.uninstall_app(),
+                                    _ => {}
+                                }
                                 self.confirm_action = None;
                                 self.show_settings = false;
                             }
