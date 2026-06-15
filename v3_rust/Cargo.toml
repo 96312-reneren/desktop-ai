@@ -1,8 +1,8 @@
 [package]
 name = "desktop-ai"
-version = "5.0.0"
+version = "5.1.0"
 edition = "2021"
-description = "桌面AI - 本地大模型聊天应用 (安全性加固版)"
+description = "桌面AI - 本地大模型聊天应用 (API服务 + 搜索)"
 
 [dependencies]
 eframe = "0.31"

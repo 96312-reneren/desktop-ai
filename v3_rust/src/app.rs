@@ -4,12 +4,14 @@ use std::thread;
 
 use eframe::egui;
 use egui::{Color32, RichText, ScrollArea, TextEdit, vec2};
+use crate::api_server::ApiServer;
 use crate::config::{self, Config};
 use crate::conversation::Conversation;
 use crate::downloader::{self, DownloadMsg};
 use crate::inference::{self, LlamaInference, StreamToken};
 use crate::markdown;
 use crate::model_catalog::find_model;
+use crate::search::{self, SearchResult};
 
 fn apply_theme(ctx: &egui::Context, theme: &str) {
     let mut visuals = if theme == "dark" {
@@ -58,6 +60,17 @@ pub struct DesktopAI {
     // Hardware info
     cpu_cores: usize,
     ram_warning: Option<String>,
+
+    // API server
+    api_server: Option<ApiServer>,
+
+    // Search
+    show_search_panel: bool,
+    search_query: String,
+    search_results: Vec<SearchResult>,
+    search_loading: bool,
+    search_error: Option<String>,
+    search_rx: Option<mpsc::Receiver<Result<Vec<SearchResult>, String>>>,
 
     // UI
     show_model_select: bool,
@@ -130,6 +143,13 @@ impl DesktopAI {
             downloads: HashMap::new(),
             cpu_cores,
             ram_warning,
+            api_server: None,
+            show_search_panel: false,
+            search_query: String::new(),
+            search_results: Vec::new(),
+            search_loading: false,
+            search_error: None,
+            search_rx: None,
             show_model_select: false,
             show_settings: false,
             status_message: "就绪".into(),
@@ -164,8 +184,18 @@ impl DesktopAI {
         let path_str = model_path.to_string_lossy().to_string();
         match LlamaInference::load(&path_str, n_ctx, n_threads) {
             Ok(inf) => {
-                self.inference = Some(Arc::new(inf));
-                self.status_message = format!("{} 就绪", info.name);
+                let inf = Arc::new(inf);
+                // Start API server if enabled
+                if self.config.api_enabled {
+                    if let Some(ref mut old) = self.api_server { old.stop(); }
+                    let port = self.config.api_port;
+                    let server = ApiServer::start(Arc::clone(&inf), port, info.name.clone());
+                    self.api_server = Some(server);
+                    self.status_message = format!("{} 就绪 | API: http://127.0.0.1:{}/v1", info.name, port);
+                } else {
+                    self.status_message = format!("{} 就绪", info.name);
+                }
+                self.inference = Some(inf);
             }
             Err(e) => { self.status_message = format!("加载失败: {}", e); }
         }
@@ -407,6 +437,34 @@ impl DesktopAI {
 
         std::process::exit(0);
     }
+
+    fn start_search(&mut self) {
+        let query = self.search_query.trim().to_string();
+        if query.is_empty() || self.search_loading { return; }
+        self.search_loading = true;
+        self.search_error = None;
+        self.search_results.clear();
+        let (tx, rx) = mpsc::channel();
+        self.search_rx = Some(rx);
+        thread::spawn(move || {
+            let _ = tx.send(search::search_duckduckgo(&query));
+        });
+    }
+
+    fn poll_search(&mut self) {
+        let rx = match self.search_rx.as_mut() {
+            Some(r) => r,
+            None => return,
+        };
+        if let Ok(result) = rx.try_recv() {
+            match result {
+                Ok(r) => self.search_results = r,
+                Err(e) => self.search_error = Some(e),
+            }
+            self.search_loading = false;
+            self.search_rx = None;
+        }
+    }
 }
 
 // ─── egui App ──────────────────────────────────────────
@@ -415,6 +473,7 @@ impl eframe::App for DesktopAI {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_all_downloads();
         self.poll_generation();
+        self.poll_search();
 
         // Apply saved theme only once on startup
         if !self.theme_applied {
@@ -489,7 +548,7 @@ impl eframe::App for DesktopAI {
             .default_width(200.0)
             .show(ctx, |ui| {
                 ui.heading("桌面AI");
-                ui.label(RichText::new("v5.0").size(10.0).color(Color32::GRAY));
+                ui.label(RichText::new("v5.1").size(10.0).color(Color32::GRAY));
                 ui.add_space(8.0);
 
                 if ui.button("+ 新对话").clicked() {
@@ -523,6 +582,7 @@ impl eframe::App for DesktopAI {
                 ui.add_space(8.0);
                 ui.separator();
                 if ui.button("切换模型").clicked() { self.show_model_select = true; }
+                if ui.button("搜索").clicked() { self.show_search_panel = !self.show_search_panel; }
             });
 
         // ─── Chat area ─────────────────────────────
@@ -700,6 +760,56 @@ impl eframe::App for DesktopAI {
                 });
         }
 
+        // ─── Search panel ──────────────────────────
+        if self.show_search_panel {
+            egui::Window::new("搜索")
+                .collapsible(false).resizable(true)
+                .anchor(egui::Align2::RIGHT_TOP, [-10.0, 30.0])
+                .default_width(350.0)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_sized(vec2(ui.available_width() - 60.0, 24.0),
+                            TextEdit::singleline(&mut self.search_query)
+                                .hint_text("输入搜索关键词..."));
+                        if (ui.button("搜索").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                            && !self.search_loading
+                        {
+                            self.start_search();
+                        }
+                    });
+
+                    if self.search_loading {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("搜索中...").color(Color32::GRAY));
+                    }
+
+                    if let Some(ref err) = self.search_error {
+                        ui.label(RichText::new(err).color(Color32::from_rgb(255, 80, 80)));
+                    }
+
+                    if !self.search_results.is_empty() {
+                        ui.separator();
+                        ui.label(RichText::new(format!("{} 条结果", self.search_results.len()))
+                            .size(11.0).color(Color32::GRAY));
+                        ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
+                            for result in &self.search_results {
+                                ui.group(|ui| {
+                                    ui.label(RichText::new(&result.title).size(12.0).strong());
+                                    if !result.url.is_empty() {
+                                        ui.label(RichText::new(&result.url).size(10.0)
+                                            .color(Color32::from_rgb(100, 180, 255)));
+                                    }
+                                    if !result.snippet.is_empty() {
+                                        ui.label(RichText::new(&result.snippet).size(11.0));
+                                    }
+                                });
+                                ui.add_space(3.0);
+                            }
+                        });
+                    }
+                });
+        }
+
         // ─── Settings ─────────────────────────────
         if self.show_settings {
             egui::Window::new("设置")
@@ -743,6 +853,35 @@ impl eframe::App for DesktopAI {
                     ui.add(TextEdit::multiline(&mut self.config.system_prompt)
                         .desired_rows(2)
                         .hint_text("You are a helpful assistant."));
+                    ui.add_space(8.0);
+
+                    // API Server
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("API 服务").size(13.0).strong());
+                    ui.checkbox(&mut self.config.api_enabled, "启用本地 API 服务 (OpenAI 兼容)");
+                    if self.config.api_enabled {
+                        ui.horizontal(|ui| {
+                            ui.label("端口:");
+                            let mut port_str = self.config.api_port.to_string();
+                            if ui.add_sized(vec2(80.0, 20.0), TextEdit::singleline(&mut port_str)).changed() {
+                                if let Ok(p) = port_str.parse() { self.config.api_port = p; }
+                            }
+                        });
+                        ui.label(RichText::new(
+                            format!("API 地址: http://127.0.0.1:{}/v1/chat/completions", self.config.api_port)
+                        ).size(10.0).color(Color32::from_rgb(100, 180, 255)));
+                        ui.label(RichText::new("支持 POST JSON, 兼容 OpenAI chat completions 格式")
+                            .size(10.0).color(Color32::GRAY));
+                    }
+                    ui.add_space(8.0);
+
+                    // Search engine
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("搜索引擎").size(13.0).strong());
+                    ui.checkbox(&mut self.config.search_enabled, "启用 DuckDuckGo 搜索");
+                    ui.label(RichText::new("搜索按钮在左侧边栏底部").size(10.0).color(Color32::GRAY));
                     ui.add_space(8.0);
 
                     // Current model info

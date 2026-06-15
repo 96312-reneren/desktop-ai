@@ -26,7 +26,15 @@ pub struct Config {
     pub system_prompt: String,
     #[serde(default)]
     pub model_catalog: Vec<ModelInfo>,
+    #[serde(default)]
+    pub api_enabled: bool,
+    #[serde(default = "default_api_port")]
+    pub api_port: u16,
+    #[serde(default)]
+    pub search_enabled: bool,
 }
+
+fn default_api_port() -> u16 { 11434 }
 
 impl Default for Config {
     fn default() -> Self {
@@ -39,6 +47,9 @@ impl Default for Config {
             selected_model_id: None,
             system_prompt: "You are a helpful assistant.".into(),
             model_catalog: super::model_catalog::default_catalog(),
+            api_enabled: false,
+            api_port: 11434,
+            search_enabled: false,
         }
     }
 }
@@ -96,6 +107,7 @@ pub fn load_config() -> Config {
         config.last_conversation_id = None;
     }
     if config.system_prompt.len() > 10000 { config.system_prompt = "You are a helpful assistant.".into(); }
+    if config.api_port < 1024 { config.api_port = 11434; }
     config
 }
 
