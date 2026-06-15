@@ -752,7 +752,10 @@ impl eframe::App for DesktopAI {
                                 ui.label(RichText::new(format!("{}  ({:.0} MB)", name, size_mb))
                                     .size(11.0));
                                 let model_id = id.clone();
-                                if ui.button("删除").clicked() {
+                                let del_btn = egui::Button::new(
+                                    RichText::new("删除").size(11.0).color(Color32::WHITE)
+                                ).fill(Color32::from_rgb(180, 60, 60));
+                                if ui.add_sized(vec2(40.0, 20.0), del_btn).clicked() {
                                     self.delete_model_file(&model_id);
                                 }
                             });
@@ -765,15 +768,31 @@ impl eframe::App for DesktopAI {
                     ui.label(RichText::new("数据管理").size(13.0).strong());
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        if ui.button("删除所有模型").clicked() {
+                        let del_models_btn = egui::Button::new(
+                            RichText::new("删除所有模型").color(Color32::WHITE).size(12.0)
+                        ).fill(Color32::from_rgb(180, 100, 60));
+                        if ui.add(del_models_btn).clicked() {
                             self.confirm_action = Some(ConfirmAction::DeleteAllModels);
                         }
-                        if ui.button("删除所有对话").clicked() {
+                        let del_convs_btn = egui::Button::new(
+                            RichText::new("删除所有对话").color(Color32::WHITE).size(12.0)
+                        ).fill(Color32::from_rgb(180, 100, 60));
+                        if ui.add(del_convs_btn).clicked() {
                             self.confirm_action = Some(ConfirmAction::DeleteAllConversations);
                         }
                     });
+                    ui.add_space(12.0);
+
+                    ui.separator();
+                    ui.label(RichText::new("⚠ 危险操作").size(12.0).color(Color32::from_rgb(255, 80, 80)));
                     ui.add_space(4.0);
-                    if ui.button("重置应用（删除全部数据）").clicked() {
+                    let reset_btn = egui::Button::new(
+                        RichText::new("重置应用 (删除全部数据)")
+                            .color(Color32::WHITE)
+                            .size(13.0)
+                    ).fill(Color32::from_rgb(192, 57, 43))
+                     .min_size(vec2(ui.available_width(), 28.0));
+                    if ui.add(reset_btn).clicked() {
                         self.confirm_action = Some(ConfirmAction::ResetApp);
                     }
                     ui.add_space(12.0);
@@ -789,26 +808,41 @@ impl eframe::App for DesktopAI {
 
         // ─── Confirm dialog ───────────────────────
         if let Some(ref action) = self.confirm_action.clone() {
-            let (title, msg) = match action {
-                ConfirmAction::DeleteAllModels => ("删除所有模型", "确定要删除所有已下载的模型文件吗？此操作不可恢复。"),
-                ConfirmAction::DeleteAllConversations => ("删除所有对话", "确定要删除所有对话记录吗？此操作不可恢复。"),
-                ConfirmAction::ResetApp => ("重置应用", "确定要删除所有数据（模型、对话、配置）？应用将恢复到初始状态。"),
+            let (title, msg, is_danger) = match action {
+                ConfirmAction::DeleteAllModels => ("删除所有模型", "确定要删除所有已下载的模型文件吗？此操作不可恢复。", false),
+                ConfirmAction::DeleteAllConversations => ("删除所有对话", "确定要删除所有对话记录吗？此操作不可恢复。", false),
+                ConfirmAction::ResetApp => ("⚠ 重置应用", "确定要删除所有数据（模型、对话、配置）？\n应用将恢复到初始状态，所有数据将永久丢失。", true),
             };
             egui::Window::new(title)
                 .collapsible(false).resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.label(msg);
+                    if is_danger {
+                        ui.label(RichText::new(msg).color(Color32::from_rgb(255, 80, 80)));
+                    } else {
+                        ui.label(msg);
+                    }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("确定").clicked() {
-                            match action {
-                                ConfirmAction::DeleteAllModels => self.delete_all_models(),
-                                ConfirmAction::DeleteAllConversations => self.delete_all_conversations(),
-                                ConfirmAction::ResetApp => self.reset_app(),
+                        if is_danger {
+                            let confirm_btn = egui::Button::new(
+                                RichText::new("确定删除").color(Color32::WHITE)
+                            ).fill(Color32::from_rgb(192, 57, 43));
+                            if ui.add(confirm_btn).clicked() {
+                                self.reset_app();
+                                self.confirm_action = None;
+                                self.show_settings = false;
                             }
-                            self.confirm_action = None;
-                            self.show_settings = false;
+                        } else {
+                            if ui.button("确定").clicked() {
+                                match action {
+                                    ConfirmAction::DeleteAllModels => self.delete_all_models(),
+                                    ConfirmAction::DeleteAllConversations => self.delete_all_conversations(),
+                                    _ => {}
+                                }
+                                self.confirm_action = None;
+                                self.show_settings = false;
+                            }
                         }
                         if ui.button("取消").clicked() {
                             self.confirm_action = None;
