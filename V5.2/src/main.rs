@@ -1,0 +1,86 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod api_server;
+mod app;
+mod config;
+mod conversation;
+mod downloader;
+mod ffi;
+mod inference;
+mod markdown;
+mod model_catalog;
+mod search;
+
+fn load_chinese_fonts() -> Option<Vec<u8>> {
+    let font_paths = [
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\msyhbd.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
+        r"C:\Windows\Fonts\simsun.ttc",
+        r"C:\Windows\Fonts\NotoSansCJKsc-VF.otf",
+    ];
+
+    for path in &font_paths {
+        if let Ok(data) = std::fs::read(path) {
+            log::info!("Loaded font: {}", path);
+            return Some(data);
+        }
+    }
+
+    log::warn!("No Chinese font found, CJK characters may not render");
+    None
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp_millis()
+        .init();
+
+    // Ensure llama.dll is accessible
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_default();
+
+    for path in &[
+        std::path::PathBuf::from("llama.dll"),
+        exe_dir.join("llama.dll"),
+    ] {
+        if path.exists() {
+            std::env::set_current_dir(path.parent().unwrap_or(&exe_dir)).ok();
+            break;
+        }
+    }
+
+    // Pre-load Chinese font
+    let chinese_font = load_chinese_fonts();
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1000.0, 680.0])
+            .with_min_inner_size([750.0, 500.0])
+            .with_title("桌面AI v5.2"),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "桌面AI",
+        options,
+        Box::new(move |cc| {
+            // Register Chinese font
+            if let Some(ref font_data) = chinese_font {
+                let mut fonts = egui::FontDefinitions::default();
+                let font_data = egui::FontData::from_owned(font_data.clone());
+                fonts.font_data.insert("chinese".into(), std::sync::Arc::new(font_data));
+                // Make Chinese font the default proportional font only
+                fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap()
+                    .insert(0, "chinese".into());
+                // Keep monospace as-is for code blocks
+                cc.egui_ctx.set_fonts(fonts);
+            }
+            Ok(Box::new(app::DesktopAI::new()))
+        }),
+    )?;
+
+    Ok(())
+}
