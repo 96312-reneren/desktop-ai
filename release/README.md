@@ -1,30 +1,26 @@
-# 桌面AI v5.0 — 完整功能版
+# 桌面AI v5.3 — RAG增强版
 
-> 双击运行，本地 AI 对话。**~8 MB 双文件分发，毫秒启动。**
+> 双击运行，本地 AI 对话。**~6.5 MB 双文件分发，毫秒启动。**
 
-## v5 更新
+## v5.3 新功能: 搜索增强RAG
 
-### 安全性加固 (继承自 v4)
-- CString空字节防护、Arc生命周期管理(UAF修复)、路径遍历修复
-- 下载完整性验证、DLL校验、配置边界检查
-- Release: LTO+strip+panic=abort
+开启「搜索引擎」后，每次发送消息时自动调用 DuckDuckGo 搜索用户问题，将
+搜索结果注入到 LLM 的上下文 prompt 中，实现本地 RAG (检索增强生成)。
 
-### 新功能
-- **主题实时切换**：点击即生效，启动自动应用
-- **设置全面升级**：
-  - CPU 线程数选择 (auto / 2-16)
-  - 系统提示词编辑器
-  - 已下载模型列表 + 单独删除
-  - 切换模型快捷入口
-- **数据管理**：
-  - 删除所有模型 / 删除所有对话 / 重置应用
-  - 所有危险操作二次确认
+**工作原理:**
+1. 用户发送消息
+2. 自动搜索 DuckDuckGo (不阻塞 UI)
+3. 搜索结果格式化为系统提示注入 prompt
+4. LLM 基于实时搜索结果回答问题
+
+**状态栏显示 "RAG" 标识表示搜索增强已启用。**
 
 ## 快速开始
 
 1. 确保 `桌面AI.exe` 和 `llama.dll` 在同一目录
 2. 双击 `桌面AI.exe`
-3. 选择模型 → 下载 → 自动加载 → 对话
+3. 设置中开启「搜索引擎」
+4. 选择模型 → 对话
 
 ## 6 款可选模型
 
@@ -40,8 +36,8 @@
 ## 系统要求
 
 - Windows 10/11 64-bit
-- VC++ Redistributable (https://aka.ms/vs/17/release/vc_redist.x64.exe)
+- VC++ Redistributable
 
 ## 技术栈
 
-Rust 1.96 + egui/eframe + llama.cpp FFI + pulldown-cmark + reqwest
+Rust 1.96 + egui/eframe + llama.cpp FFI + pulldown-cmark + reqwest + DuckDuckGo

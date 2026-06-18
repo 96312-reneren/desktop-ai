@@ -285,12 +285,14 @@ impl DesktopAI {
             }
         };
 
-        let messages = self.current_conv.context_messages(
+        let mut messages = self.current_conv.context_messages(
             Some(&self.config.system_prompt), 20
         );
         let conv_id = self.current_conv.id.clone();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
+        let do_search = self.config.search_enabled;
+        let user_query = text.clone();
 
         let stop = stop_flag.clone();
 
@@ -302,6 +304,31 @@ impl DesktopAI {
         });
 
         thread::spawn(move || {
+            // RAG: inject DuckDuckGo search results if enabled
+            if do_search {
+                if let Ok(results) = search::search_duckduckgo(&user_query) {
+                    if !results.is_empty() {
+                        let mut ctx = String::from("以下是网络搜索结果，请优先基于这些信息回答。如果搜索结果不相关，请如实告知用户。\n\n");
+                        for (i, r) in results.iter().take(5).enumerate() {
+                            ctx.push_str(&format!("[结果{}] {}\n", i + 1, r.title));
+                            if !r.snippet.is_empty() {
+                                ctx.push_str(&format!("    摘要: {}\n", r.snippet));
+                            }
+                            if !r.url.is_empty() {
+                                ctx.push_str(&format!("    来源: {}\n", r.url));
+                            }
+                            ctx.push('\n');
+                        }
+                        ctx.push_str(&format!("---\n用户问题: {}\n", user_query));
+                        // Insert search context as a system message before the conversation
+                        messages.insert(0, crate::conversation::Message {
+                            role: "system".into(),
+                            content: ctx,
+                        });
+                    }
+                }
+            }
+
             let prompt = inference::format_chatml(&messages);
             inference::run_inference(inf, prompt, stop, tx, 2048);
         });
@@ -526,6 +553,12 @@ impl eframe::App for DesktopAI {
                     }
                 }
 
+                if self.config.search_enabled {
+                    ui.label(RichText::new(" | RAG")
+                        .size(11.0)
+                        .color(Color32::from_rgb(100, 200, 255)));
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let icon = if self.config.theme == "dark" { "☀" } else { "🌙" };
                     if ui.button(icon).clicked() {
@@ -566,7 +599,7 @@ impl eframe::App for DesktopAI {
             .default_width(200.0)
             .show(ctx, |ui| {
                 ui.heading("桌面AI");
-                ui.label(RichText::new("v5.2").size(10.0).color(Color32::GRAY));
+                ui.label(RichText::new("v5.3").size(10.0).color(Color32::GRAY));
                 ui.add_space(8.0);
 
                 if ui.button("+ 新对话").clicked() {
