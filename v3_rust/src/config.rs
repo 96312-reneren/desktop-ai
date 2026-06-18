@@ -32,6 +32,8 @@ pub struct Config {
     pub api_port: u16,
     #[serde(default)]
     pub search_enabled: bool,
+    #[serde(default)]
+    pub kb_enabled: bool,
 }
 
 fn default_api_port() -> u16 { 11434 }
@@ -50,6 +52,7 @@ impl Default for Config {
             api_enabled: false,
             api_port: 11434,
             search_enabled: false,
+            kb_enabled: false,
         }
     }
 }
@@ -73,6 +76,12 @@ pub fn models_dir() -> PathBuf {
 
 pub fn conversations_dir() -> PathBuf {
     let dir = app_dirs().data_dir().join("conversations");
+    std::fs::create_dir_all(&dir).ok();
+    dir
+}
+
+pub fn kb_dir() -> PathBuf {
+    let dir = app_dirs().data_dir().join("knowledge_base");
     std::fs::create_dir_all(&dir).ok();
     dir
 }

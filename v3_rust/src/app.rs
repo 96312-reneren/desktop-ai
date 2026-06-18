@@ -12,6 +12,7 @@ use crate::inference::{self, LlamaInference, StreamToken};
 use crate::markdown;
 use crate::model_catalog::find_model;
 use crate::search::{self, SearchResult};
+use crate::vector_store::VectorStore;
 
 fn apply_theme(ctx: &egui::Context, theme: &str) {
     let mut visuals = if theme == "dark" {
@@ -63,6 +64,12 @@ pub struct DesktopAI {
 
     // API server
     api_server: Option<ApiServer>,
+
+    // Knowledge base
+    vector_store: VectorStore,
+    show_kb_panel: bool,
+    kb_title: String,
+    kb_content: String,
 
     // Search
     show_search_panel: bool,
@@ -134,6 +141,7 @@ impl DesktopAI {
         };
 
         let (cpu_cores, ram_warning) = detect_hardware();
+        let vector_store = VectorStore::new(&config::kb_dir());
 
         Self {
             config,
@@ -145,6 +153,10 @@ impl DesktopAI {
             cpu_cores,
             ram_warning,
             api_server: None,
+            vector_store,
+            show_kb_panel: false,
+            kb_title: String::new(),
+            kb_content: String::new(),
             show_search_panel: false,
             search_query: String::new(),
             search_results: Vec::new(),
@@ -197,9 +209,48 @@ impl DesktopAI {
                 } else {
                     self.status_message = format!("{} 就绪", info.name);
                 }
+
+                // Setup embedding engine for knowledge base
+                if self.config.kb_enabled {
+                    match crate::embedding::EmbeddingEngine::load(&path_str, 2048, n_threads) {
+                        Ok(engine) => {
+                            self.vector_store.set_engine(engine);
+                        }
+                        Err(e) => {
+                            log::warn!("embedding engine failed: {}", e);
+                        }
+                    }
+                }
+
                 self.inference = Some(inf);
             }
             Err(e) => { self.status_message = format!("加载失败: {}", e); }
+        }
+    }
+
+    fn add_document_to_kb(&mut self) {
+        let title = self.kb_title.trim().to_string();
+        let content = self.kb_content.trim().to_string();
+        if title.is_empty() || content.is_empty() { return; }
+        if !self.vector_store.has_engine() {
+            self.error_message = Some("知识库需要先加载模型。请先选择一个模型。".into());
+            return;
+        }
+        match self.vector_store.add_document(&title, &content, 512, 64) {
+            Ok(()) => {
+                self.kb_title.clear();
+                self.kb_content.clear();
+                self.status_message = format!("已添加文档: {}", title);
+            }
+            Err(e) => {
+                self.error_message = Some(format!("添加失败: {}", e));
+            }
+        }
+    }
+
+    fn delete_kb_document(&mut self, id: &str) {
+        if let Err(e) = self.vector_store.delete_document(id) {
+            self.error_message = Some(format!("删除失败: {}", e));
         }
     }
 
@@ -292,7 +343,24 @@ impl DesktopAI {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
         let do_search = self.config.search_enabled;
+        let do_kb = self.config.kb_enabled && self.vector_store.has_engine();
         let user_query = text.clone();
+
+        // Run KB retrieval synchronously (embedding pass ~200ms)
+        let kb_context = if do_kb {
+            match self.vector_store.search(&user_query, 3) {
+                Ok(results) => {
+                    let mut ctx = String::from("以下是本地知识库中的相关内容：\n\n");
+                    for (i, (chunk, score)) in results.iter().enumerate() {
+                        ctx.push_str(&format!("[片段{} 相似度{:.0}%] {}\n\n", i+1, score*100.0, chunk));
+                    }
+                    Some(ctx)
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
 
         let stop = stop_flag.clone();
 
@@ -304,6 +372,14 @@ impl DesktopAI {
         });
 
         thread::spawn(move || {
+            // Inject knowledge base context if available
+            if let Some(ref kb) = kb_context {
+                messages.insert(0, crate::conversation::Message {
+                    role: "system".into(),
+                    content: kb.clone(),
+                });
+            }
+
             // RAG: inject DuckDuckGo search results if enabled
             if do_search {
                 if let Ok(results) = search::search_duckduckgo(&user_query) {
@@ -553,8 +629,11 @@ impl eframe::App for DesktopAI {
                     }
                 }
 
-                if self.config.search_enabled {
-                    ui.label(RichText::new(" | RAG")
+                if self.config.search_enabled || self.config.kb_enabled {
+                    let tag = if self.config.kb_enabled && self.config.search_enabled { " | RAG+KB" }
+                        else if self.config.kb_enabled { " | KB" }
+                        else { " | RAG" };
+                    ui.label(RichText::new(tag)
                         .size(11.0)
                         .color(Color32::from_rgb(100, 200, 255)));
                 }
@@ -599,7 +678,7 @@ impl eframe::App for DesktopAI {
             .default_width(200.0)
             .show(ctx, |ui| {
                 ui.heading("桌面AI");
-                ui.label(RichText::new("v5.3").size(10.0).color(Color32::GRAY));
+                ui.label(RichText::new("v5.4").size(10.0).color(Color32::GRAY));
                 ui.add_space(8.0);
 
                 if ui.button("+ 新对话").clicked() {
@@ -644,6 +723,7 @@ impl eframe::App for DesktopAI {
                 ui.separator();
                 if ui.button("切换模型").clicked() { self.show_model_select = true; }
                 if ui.button("搜索").clicked() { self.show_search_panel = !self.show_search_panel; }
+                if ui.button("知识库").clicked() { self.show_kb_panel = !self.show_kb_panel; }
             });
 
         // ─── Chat area ─────────────────────────────
@@ -871,6 +951,54 @@ impl eframe::App for DesktopAI {
                 });
         }
 
+        // ─── Knowledge Base panel ────────────────────
+        if self.show_kb_panel {
+            egui::Window::new("知识库")
+                .collapsible(false).resizable(true)
+                .anchor(egui::Align2::RIGHT_TOP, [-10.0, 30.0])
+                .default_width(380.0)
+                .show(ctx, |ui| {
+                    ui.label(RichText::new("添加文档").strong());
+                    ui.add_sized(vec2(ui.available_width(), 20.0),
+                        TextEdit::singleline(&mut self.kb_title).hint_text("文档标题"));
+                    ui.add_sized(vec2(ui.available_width(), 80.0),
+                        TextEdit::multiline(&mut self.kb_content).hint_text("粘贴文档内容..."));
+                    if ui.button("添加文档 (自动分块+向量化)").clicked() {
+                        self.add_document_to_kb();
+                    }
+                    ui.add_space(8.0);
+
+                    ui.separator();
+                    ui.label(RichText::new("已索引文档").size(13.0).strong());
+                    let docs = self.vector_store.documents().to_vec();
+                    if docs.is_empty() {
+                        ui.label(RichText::new("暂无文档。添加文档后会自动分块和向量化。")
+                            .size(11.0).color(Color32::GRAY));
+                    } else {
+                        ScrollArea::vertical().max_height(250.0).show(ui, |ui| {
+                            for doc in &docs {
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(&doc.title).size(12.0).strong());
+                                        if ui.button("删除").clicked() {
+                                            let id = doc.id.clone();
+                                            self.delete_kb_document(&id);
+                                        }
+                                    });
+                                    ui.label(RichText::new(format!("{} 个分块 | 创建: {}", doc.chunks.len(), &doc.created_at[..10]))
+                                        .size(10.0).color(Color32::GRAY));
+                                });
+                                ui.add_space(2.0);
+                            }
+                        });
+                    }
+
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("提示: 开启知识库后，每次对话会自动检索相关片段注入上下文。")
+                        .size(10.0).color(Color32::GRAY));
+                });
+        }
+
         // ─── Settings ─────────────────────────────
         if self.show_settings {
             egui::Window::new("设置")
@@ -943,6 +1071,8 @@ impl eframe::App for DesktopAI {
                     ui.label(RichText::new("搜索引擎").size(13.0).strong());
                     ui.checkbox(&mut self.config.search_enabled, "启用 DuckDuckGo 搜索");
                     ui.label(RichText::new("搜索按钮在左侧边栏底部").size(10.0).color(Color32::GRAY));
+                    ui.checkbox(&mut self.config.kb_enabled, "启用本地知识库 (RAG)");
+                    ui.label(RichText::new("加载模型后可用。自动检索相关片段注入对话。").size(10.0).color(Color32::GRAY));
                     ui.add_space(8.0);
 
                     // Current model info
