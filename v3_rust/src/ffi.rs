@@ -51,6 +51,9 @@ type PfnTokenToPiece        = unsafe extern "C" fn(*const LlamaModel, LlamaToken
 type PfnBatchGetOne          = unsafe extern "C" fn(*mut LlamaToken, i32) -> LlamaBatch;
 type PfnDecode              = unsafe extern "C" fn(*mut LlamaContext, LlamaBatch) -> i32;
 type PfnSampleTokenGreedy   = unsafe extern "C" fn(*mut LlamaContext, *mut LlamaToken) -> LlamaToken;
+type PfnNEmbd              = unsafe extern "C" fn(*const LlamaModel) -> i32;
+type PfnGetEmbeddingsIth   = unsafe extern "C" fn(*mut LlamaContext, i32) -> *mut f32;
+type PfnFreeContext         = unsafe extern "C" fn(*mut LlamaContext);
 
 // ─── DLL integrity ────────────────────────────────────
 
@@ -158,4 +161,31 @@ pub unsafe fn sample_greedy(ctx: *mut LlamaContext) -> LlamaToken {
     let mut tok: LlamaToken = 0;
     call!(llama_sample_token_greedy, PfnSampleTokenGreedy, ctx, &mut tok);
     tok
+}
+
+// ─── Embedding ──────────────────────────────────────────
+
+pub unsafe fn new_embedding_context(model: *mut LlamaModel, n_ctx: u32, n_threads: u32) -> *mut LlamaContext {
+    let mut params = LlamaContextParams::default();
+    params.n_ctx = n_ctx;
+    params.n_batch = 512;
+    params.n_ubatch = 512;
+    params.n_seq_max = 1;
+    params.n_threads = n_threads;
+    params.n_threads_batch = n_threads;
+    params.embeddings = true;
+    params.no_perf = true;
+    call!(llama_new_context_with_model, PfnNewContextWithModel, model, params)
+}
+
+pub unsafe fn n_embd(model: *const LlamaModel) -> i32 {
+    call!(llama_n_embd, PfnNEmbd, model)
+}
+
+pub unsafe fn get_embeddings_ith(ctx: *mut LlamaContext, i: i32) -> *mut f32 {
+    call!(llama_get_embeddings_ith, PfnGetEmbeddingsIth, ctx, i)
+}
+
+pub unsafe fn free_embd_context(ctx: *mut LlamaContext) {
+    call!(llama_free, PfnFreeContext, ctx);
 }
