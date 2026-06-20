@@ -246,31 +246,49 @@ impl DesktopAI {
             self.error_message = Some("需要先加载模型才能使用知识库".into());
             return;
         }
-        // Use the title field as file path input
-        let filepath = self.kb_title.trim().to_string();
-        if filepath.is_empty() {
-            self.error_message = Some("请在标题栏输入文件路径".into());
-            return;
-        }
-        let path = std::path::PathBuf::from(&filepath);
-        if !path.exists() {
-            self.error_message = Some(format!("文件不存在: {}", filepath));
-            return;
-        }
+        // Try file dialog first; fall back to path from title field
+        let path = if let Some(p) = rfd::FileDialog::new()
+            .add_filter("文档", &["txt", "md", "pdf"])
+            .add_filter("所有文件", &["*"])
+            .pick_file()
+        {
+            p
+        } else {
+            let filepath = self.kb_title.trim().to_string();
+            if filepath.is_empty() { return; }
+            let p = std::path::PathBuf::from(&filepath);
+            if !p.exists() {
+                self.error_message = Some(format!("文件不存在: {}", filepath));
+                return;
+            }
+            p
+        };
 
         let filename = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
 
+        self.kb_title.clear();
         self.kb_indexing = true;
         self.kb_index_progress = 0.0;
         self.kb_index_status = "读取文件...".into();
 
-        let content = match std::fs::read_to_string(&path) {
-            Ok(t) => t,
-            Err(e) => {
-                self.kb_indexing = false;
-                self.error_message = Some(format!("读取失败(仅支持txt/md): {}", e));
-                return;
-            }
+        let content = match ext.as_str() {
+            "pdf" => match pdf_extract::extract_text(&path) {
+                Ok(t) => t,
+                Err(e) => {
+                    self.kb_indexing = false;
+                    self.error_message = Some(format!("PDF解析失败: {}", e));
+                    return;
+                }
+            },
+            _ => match std::fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(e) => {
+                    self.kb_indexing = false;
+                    self.error_message = Some(format!("读取失败: {}", e));
+                    return;
+                }
+            },
         };
 
         if content.len() > 2_000_000 {
@@ -284,7 +302,6 @@ impl DesktopAI {
 
         match self.vector_store.add_document(&filename, &content, 512, 64) {
             Ok(()) => {
-                self.kb_title.clear();
                 self.kb_index_progress = 1.0;
                 self.kb_index_status = format!("已添加: {}", filename);
                 self.status_message = format!("已索引文档: {}", filename);
@@ -1110,7 +1127,7 @@ impl eframe::App for DesktopAI {
 
                     ui.add_space(4.0);
                     ui.label(RichText::new(
-                        "提示: 开启知识库后自动检索。支持 txt/md 文件；PDF 需添加 pdf-extract crate。")
+                        "提示: 开启知识库后自动检索注入上下文。支持 txt/md/pdf，文件大小 <2MB。")
                         .size(10.0).color(Color32::GRAY));
                     }); // ScrollArea
                 });
