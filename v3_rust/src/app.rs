@@ -336,7 +336,7 @@ impl DesktopAI {
             }
         };
 
-        let mut messages = self.current_conv.context_messages(
+        let messages = self.current_conv.context_messages(
             Some(&self.config.system_prompt), 20
         );
         let conv_id = self.current_conv.id.clone();
@@ -346,18 +346,14 @@ impl DesktopAI {
         let do_kb = self.config.kb_enabled && self.vector_store.has_engine();
         let user_query = text.clone();
 
-        // Run KB retrieval synchronously (embedding pass ~200ms)
-        let kb_context = if do_kb {
-            match self.vector_store.search(&user_query, 3) {
-                Ok(results) => {
-                    let mut ctx = String::from("以下是本地知识库中的相关内容：\n\n");
-                    for (i, (chunk, score)) in results.iter().enumerate() {
-                        ctx.push_str(&format!("[片段{} 相似度{:.0}%] {}\n\n", i+1, score*100.0, chunk));
-                    }
-                    Some(ctx)
-                }
-                Err(_) => None,
-            }
+        // ── Step 1: embed query on UI thread (fast, ~100ms) ──
+        let kb_data = if do_kb {
+            self.vector_store.documents_snapshot()
+        } else {
+            Vec::new()
+        };
+        let query_vec = if do_kb {
+            self.vector_store.embed_query(&user_query).ok()
         } else {
             None
         };
@@ -372,40 +368,51 @@ impl DesktopAI {
         });
 
         thread::spawn(move || {
-            // Inject knowledge base context if available
-            if let Some(ref kb) = kb_context {
-                messages.insert(0, crate::conversation::Message {
-                    role: "system".into(),
-                    content: kb.clone(),
-                });
-            }
+            // ── Step 2: KB vector search in inference thread ──
+            let kb_context = if let Some(ref qv) = query_vec {
+                if !kb_data.is_empty() {
+                    let results = crate::vector_store::search_by_vector(&kb_data, qv, 3);
+                    if !results.is_empty() {
+                        let mut ctx = String::new();
+                        for (i, (chunk, score)) in results.iter().enumerate() {
+                            ctx.push_str(&format!(
+                                "[文档片段{} 相似度{:.0}%]\n{}\n\n",
+                                i + 1, score * 100.0, chunk
+                            ));
+                        }
+                        Some(ctx)
+                    } else { None }
+                } else { None }
+            } else { None };
 
-            // RAG: inject DuckDuckGo search results if enabled
-            if do_search {
+            // ── Step 3: DuckDuckGo search in inference thread ──
+            let search_context = if do_search {
                 if let Ok(results) = search::search_duckduckgo(&user_query) {
                     if !results.is_empty() {
-                        let mut ctx = String::from("以下是网络搜索结果，请优先基于这些信息回答。如果搜索结果不相关，请如实告知用户。\n\n");
+                        let mut ctx = String::new();
                         for (i, r) in results.iter().take(5).enumerate() {
                             ctx.push_str(&format!("[结果{}] {}\n", i + 1, r.title));
                             if !r.snippet.is_empty() {
-                                ctx.push_str(&format!("    摘要: {}\n", r.snippet));
+                                ctx.push_str(&format!("  摘要: {}\n", r.snippet));
                             }
                             if !r.url.is_empty() {
-                                ctx.push_str(&format!("    来源: {}\n", r.url));
+                                ctx.push_str(&format!("  来源: {}\n", r.url));
                             }
                             ctx.push('\n');
                         }
-                        ctx.push_str(&format!("---\n用户问题: {}\n", user_query));
-                        // Insert search context as a system message before the conversation
-                        messages.insert(0, crate::conversation::Message {
-                            role: "system".into(),
-                            content: ctx,
-                        });
-                    }
-                }
-            }
+                        Some(ctx)
+                    } else { None }
+                } else { None }
+            } else { None };
 
-            let prompt = inference::format_chatml(&messages);
+            // ── Step 4: assemble prompt with RAG context ──
+            let prompt = inference::build_rag_prompt(
+                &messages,
+                kb_context.as_deref(),
+                search_context.as_deref(),
+            );
+
+            // ── Step 5: run inference ──
             inference::run_inference(inf, prompt, stop, tx, 2048);
         });
     }
@@ -678,7 +685,7 @@ impl eframe::App for DesktopAI {
             .default_width(200.0)
             .show(ctx, |ui| {
                 ui.heading("桌面AI");
-                ui.label(RichText::new("v5.4").size(10.0).color(Color32::GRAY));
+                ui.label(RichText::new("v5.5").size(10.0).color(Color32::GRAY));
                 ui.add_space(8.0);
 
                 if ui.button("+ 新对话").clicked() {

@@ -85,11 +85,55 @@ pub fn run_inference(
     }
 }
 
+#[allow(dead_code)]
 pub fn format_chatml(messages: &[crate::conversation::Message]) -> String {
     let mut s = String::new();
     for msg in messages {
         s.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", msg.role, msg.content));
     }
+    s.push_str("<|im_start|>assistant\n");
+    s
+}
+
+/// Build a RAG-augmented ChatML prompt.
+/// Injects kb_context and/or search_context between the system prompt and the conversation history.
+pub fn build_rag_prompt(
+    base_messages: &[crate::conversation::Message],
+    kb_context: Option<&str>,
+    search_context: Option<&str>,
+) -> String {
+    let mut s = String::new();
+
+    // 1. System message (if exists)
+    let has_system = base_messages.first().map(|m| m.role == "system").unwrap_or(false);
+
+    if has_system {
+        let sys = &base_messages[0];
+        let mut sys_content = sys.content.clone();
+
+        // Inject KB context into system prompt
+        if let Some(kb) = kb_context {
+            sys_content.push_str("\n\n---\n以下为参考文档：\n\n");
+            sys_content.push_str(kb);
+            sys_content.push_str("\n---\n请基于以上文档回答用户问题。如果文档不包含相关信息，请如实说明。");
+        }
+
+        // Inject search context into system prompt
+        if let Some(search) = search_context {
+            sys_content.push_str("\n\n---\n以下为网络搜索结果：\n\n");
+            sys_content.push_str(search);
+            sys_content.push_str("\n---\n请优先基于这些搜索结果回答。");
+        }
+
+        s.push_str(&format!("<|im_start|>system\n{}<|im_end|>\n", sys_content));
+    }
+
+    // 2. Remaining messages (skip system if already handled)
+    let start = if has_system { 1 } else { 0 };
+    for msg in &base_messages[start..] {
+        s.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", msg.role, msg.content));
+    }
+
     s.push_str("<|im_start|>assistant\n");
     s
 }

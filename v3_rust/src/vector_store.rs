@@ -78,22 +78,20 @@ impl VectorStore {
         self.save()
     }
 
+    #[allow(dead_code)]
     pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<(String, f32)>, String> {
         let engine = self.engine.as_ref().ok_or("embedding engine not loaded")?;
         let query_vec = engine.embed(query);
+        Ok(search_by_vector(&self.data.documents, &query_vec, top_k))
+    }
 
-        let mut scored: Vec<(String, f32)> = Vec::new();
+    pub fn embed_query(&self, query: &str) -> Result<Vec<f32>, String> {
+        let engine = self.engine.as_ref().ok_or("embedding engine not loaded")?;
+        Ok(engine.embed(query))
+    }
 
-        for doc in &self.data.documents {
-            for chunk in &doc.chunks {
-                let sim = cosine_similarity(&query_vec, &chunk.embedding);
-                scored.push((chunk.text.clone(), sim));
-            }
-        }
-
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(top_k);
-        Ok(scored)
+    pub fn documents_snapshot(&self) -> Vec<StoredDocument> {
+        self.data.documents.clone()
     }
 
     fn save(&self) -> Result<(), String> {
@@ -114,4 +112,17 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     });
     if na <= 0.0 || nb <= 0.0 { return 0.0; }
     dot / (na.sqrt() * nb.sqrt())
+}
+
+pub fn search_by_vector(docs: &[StoredDocument], query_vec: &[f32], top_k: usize) -> Vec<(String, f32)> {
+    let mut scored: Vec<(String, f32)> = Vec::new();
+    for doc in docs {
+        for chunk in &doc.chunks {
+            let sim = cosine_similarity(query_vec, &chunk.embedding);
+            scored.push((chunk.text.clone(), sim));
+        }
+    }
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(top_k);
+    scored
 }
