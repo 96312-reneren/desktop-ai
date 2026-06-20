@@ -9,6 +9,13 @@ pub struct StoredChunk {
     pub embedding: Vec<f32>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub chunk: String,
+    pub score: f32,
+    pub source: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredDocument {
     pub id: String,
@@ -79,7 +86,7 @@ impl VectorStore {
     }
 
     #[allow(dead_code)]
-    pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<(String, f32)>, String> {
+    pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>, String> {
         let engine = self.engine.as_ref().ok_or("embedding engine not loaded")?;
         let query_vec = engine.embed(query);
         Ok(search_by_vector(&self.data.documents, &query_vec, top_k))
@@ -114,15 +121,16 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (na.sqrt() * nb.sqrt())
 }
 
-pub fn search_by_vector(docs: &[StoredDocument], query_vec: &[f32], top_k: usize) -> Vec<(String, f32)> {
-    let mut scored: Vec<(String, f32)> = Vec::new();
+pub fn search_by_vector(docs: &[StoredDocument], query_vec: &[f32], top_k: usize) -> Vec<SearchHit> {
+    let mut scored: Vec<(String, f32, String)> = Vec::new();
     for doc in docs {
+        let source = if doc.title.len() > 40 { format!("{}...", &doc.title[..40]) } else { doc.title.clone() };
         for chunk in &doc.chunks {
             let sim = cosine_similarity(query_vec, &chunk.embedding);
-            scored.push((chunk.text.clone(), sim));
+            scored.push((chunk.text.clone(), sim, source.clone()));
         }
     }
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(top_k);
-    scored
+    scored.into_iter().map(|(chunk, score, source)| SearchHit { chunk, score, source }).collect()
 }

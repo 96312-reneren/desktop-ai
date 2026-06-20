@@ -70,6 +70,9 @@ pub struct DesktopAI {
     show_kb_panel: bool,
     kb_title: String,
     kb_content: String,
+    kb_indexing: bool,
+    kb_index_progress: f32,
+    kb_index_status: String,
 
     // Search
     show_search_panel: bool,
@@ -157,6 +160,9 @@ impl DesktopAI {
             show_kb_panel: false,
             kb_title: String::new(),
             kb_content: String::new(),
+            kb_indexing: false,
+            kb_index_progress: 0.0,
+            kb_index_status: String::new(),
             show_search_panel: false,
             search_query: String::new(),
             search_results: Vec::new(),
@@ -228,30 +234,93 @@ impl DesktopAI {
         }
     }
 
-    fn add_document_to_kb(&mut self) {
+    fn delete_kb_document(&mut self, id: &str) {
+        if let Err(e) = self.vector_store.delete_document(id) {
+            self.error_message = Some(format!("删除失败: {}", e));
+        }
+    }
+
+    fn pick_and_index_file(&mut self) {
+        if self.kb_indexing { return; }
+        if !self.vector_store.has_engine() {
+            self.error_message = Some("需要先加载模型才能使用知识库".into());
+            return;
+        }
+        // Use the title field as file path input
+        let filepath = self.kb_title.trim().to_string();
+        if filepath.is_empty() {
+            self.error_message = Some("请在标题栏输入文件路径".into());
+            return;
+        }
+        let path = std::path::PathBuf::from(&filepath);
+        if !path.exists() {
+            self.error_message = Some(format!("文件不存在: {}", filepath));
+            return;
+        }
+
+        let filename = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+
+        self.kb_indexing = true;
+        self.kb_index_progress = 0.0;
+        self.kb_index_status = "读取文件...".into();
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.kb_indexing = false;
+                self.error_message = Some(format!("读取失败(仅支持txt/md): {}", e));
+                return;
+            }
+        };
+
+        if content.len() > 2_000_000 {
+            self.kb_indexing = false;
+            self.error_message = Some("文件过大(>2MB)，请截取关键部分后重试".into());
+            return;
+        }
+
+        self.kb_index_progress = 0.3;
+        self.kb_index_status = format!("分块中... ({:.0} 字符)", content.len() as f64);
+
+        match self.vector_store.add_document(&filename, &content, 512, 64) {
+            Ok(()) => {
+                self.kb_title.clear();
+                self.kb_index_progress = 1.0;
+                self.kb_index_status = format!("已添加: {}", filename);
+                self.status_message = format!("已索引文档: {}", filename);
+            }
+            Err(e) => {
+                self.error_message = Some(format!("索引失败: {}", e));
+            }
+        }
+        self.kb_indexing = false;
+    }
+
+    fn paste_and_index_text(&mut self) {
         let title = self.kb_title.trim().to_string();
         let content = self.kb_content.trim().to_string();
         if title.is_empty() || content.is_empty() { return; }
         if !self.vector_store.has_engine() {
-            self.error_message = Some("知识库需要先加载模型。请先选择一个模型。".into());
+            self.error_message = Some("需要先加载模型才能使用知识库".into());
             return;
         }
+        self.kb_indexing = true;
+        self.kb_index_progress = 0.1;
+        self.kb_index_status = "正在向量化...".into();
+
         match self.vector_store.add_document(&title, &content, 512, 64) {
             Ok(()) => {
                 self.kb_title.clear();
                 self.kb_content.clear();
+                self.kb_index_progress = 1.0;
+                self.kb_index_status = "完成".into();
                 self.status_message = format!("已添加文档: {}", title);
             }
             Err(e) => {
                 self.error_message = Some(format!("添加失败: {}", e));
             }
         }
-    }
-
-    fn delete_kb_document(&mut self, id: &str) {
-        if let Err(e) = self.vector_store.delete_document(id) {
-            self.error_message = Some(format!("删除失败: {}", e));
-        }
+        self.kb_indexing = false;
     }
 
     // ─── Concurrent downloads ──────────────────────────
@@ -374,10 +443,10 @@ impl DesktopAI {
                     let results = crate::vector_store::search_by_vector(&kb_data, qv, 3);
                     if !results.is_empty() {
                         let mut ctx = String::new();
-                        for (i, (chunk, score)) in results.iter().enumerate() {
+                        for (i, hit) in results.iter().enumerate() {
                             ctx.push_str(&format!(
-                                "[文档片段{} 相似度{:.0}%]\n{}\n\n",
-                                i + 1, score * 100.0, chunk
+                                "[参考{} 来源: {} 相似度{:.0}%]\n{}\n\n",
+                                i + 1, hit.source, hit.score * 100.0, hit.chunk
                             ));
                         }
                         Some(ctx)
@@ -685,7 +754,7 @@ impl eframe::App for DesktopAI {
             .default_width(200.0)
             .show(ctx, |ui| {
                 ui.heading("桌面AI");
-                ui.label(RichText::new("v5.5").size(10.0).color(Color32::GRAY));
+                ui.label(RichText::new("v5.6").size(10.0).color(Color32::GRAY));
                 ui.add_space(8.0);
 
                 if ui.button("+ 新对话").clicked() {
@@ -963,15 +1032,46 @@ impl eframe::App for DesktopAI {
             egui::Window::new("知识库")
                 .collapsible(false).resizable(true)
                 .anchor(egui::Align2::RIGHT_TOP, [-10.0, 30.0])
-                .default_width(380.0)
+                .default_width(400.0)
                 .show(ctx, |ui| {
-                    ui.label(RichText::new("添加文档").strong());
-                    ui.add_sized(vec2(ui.available_width(), 20.0),
-                        TextEdit::singleline(&mut self.kb_title).hint_text("文档标题"));
-                    ui.add_sized(vec2(ui.available_width(), 80.0),
-                        TextEdit::multiline(&mut self.kb_content).hint_text("粘贴文档内容..."));
-                    if ui.button("添加文档 (自动分块+向量化)").clicked() {
-                        self.add_document_to_kb();
+                    ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
+                    ui.label(RichText::new("添加文档").size(13.0).strong());
+                    ui.add_space(4.0);
+
+                    // File input via path
+                    ui.label(RichText::new("从文件载入 (txt/md):").size(11.0).color(Color32::GRAY));
+                    ui.add_sized(vec2(ui.available_width(), 18.0),
+                        TextEdit::singleline(&mut self.kb_title).hint_text("文件路径，如: C:\\docs\\readme.txt"));
+                    if ui.add_sized(vec2(ui.available_width(), 24.0),
+                        egui::Button::new("载入文件 (分块+向量化)")
+                    ).clicked() {
+                        self.pick_and_index_file();
+                    }
+                    ui.add_space(4.0);
+
+                    // Indexing progress
+                    if self.kb_indexing {
+                        ui.add(egui::ProgressBar::new(self.kb_index_progress)
+                            .desired_width(ui.available_width())
+                            .text(&self.kb_index_status));
+                        ui.add_space(2.0);
+                    }
+
+                    // Manual paste
+                    ui.label(RichText::new("或粘贴文本:").size(11.0).color(Color32::GRAY));
+                    ui.add_sized(vec2(ui.available_width(), 18.0),
+                        TextEdit::singleline(&mut self.kb_title).hint_text("文档标题或文件路径"));
+                    ui.add_sized(vec2(ui.available_width(), 60.0),
+                        TextEdit::multiline(&mut self.kb_content).hint_text("粘贴内容..."));
+                    if ui.add_sized(vec2(ui.available_width(), 26.0),
+                        egui::Button::new("添加文本 (分块+向量化)")
+                    ).clicked() {
+                        if self.kb_content.trim().is_empty() {
+                            // No content in paste area - try file load
+                            self.pick_and_index_file();
+                        } else {
+                            self.paste_and_index_text();
+                        }
                     }
                     ui.add_space(8.0);
 
@@ -979,20 +1079,28 @@ impl eframe::App for DesktopAI {
                     ui.label(RichText::new("已索引文档").size(13.0).strong());
                     let docs = self.vector_store.documents().to_vec();
                     if docs.is_empty() {
-                        ui.label(RichText::new("暂无文档。添加文档后会自动分块和向量化。")
+                        ui.label(RichText::new("暂无文档。通过上方按钮选择文件或粘贴文本。")
                             .size(11.0).color(Color32::GRAY));
                     } else {
-                        ScrollArea::vertical().max_height(250.0).show(ui, |ui| {
+                        ui.label(RichText::new(format!("共 {} 个文档", docs.len()))
+                            .size(11.0).color(Color32::GRAY));
+                        ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                             for doc in &docs {
+                                let total_chars: usize = doc.chunks.iter().map(|c| c.text.len()).sum();
                                 ui.group(|ui| {
                                     ui.horizontal(|ui| {
-                                        ui.label(RichText::new(&doc.title).size(12.0).strong());
+                                        let title = if doc.title.len() > 30 {
+                                            format!("{}...", &doc.title[..30])
+                                        } else { doc.title.clone() };
+                                        ui.label(RichText::new(&title).size(12.0).strong());
                                         if ui.button("删除").clicked() {
                                             let id = doc.id.clone();
                                             self.delete_kb_document(&id);
                                         }
                                     });
-                                    ui.label(RichText::new(format!("{} 个分块 | 创建: {}", doc.chunks.len(), &doc.created_at[..10]))
+                                    ui.label(RichText::new(
+                                        format!("{} 分块, {} 字符 | {}",
+                                            doc.chunks.len(), total_chars, &doc.created_at[..10]))
                                         .size(10.0).color(Color32::GRAY));
                                 });
                                 ui.add_space(2.0);
@@ -1001,8 +1109,10 @@ impl eframe::App for DesktopAI {
                     }
 
                     ui.add_space(4.0);
-                    ui.label(RichText::new("提示: 开启知识库后，每次对话会自动检索相关片段注入上下文。")
+                    ui.label(RichText::new(
+                        "提示: 开启知识库后自动检索。支持 txt/md 文件；PDF 需添加 pdf-extract crate。")
                         .size(10.0).color(Color32::GRAY));
+                    }); // ScrollArea
                 });
         }
 
