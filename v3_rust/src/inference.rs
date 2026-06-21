@@ -17,9 +17,17 @@ unsafe impl Sync for LlamaInference {}
 
 impl LlamaInference {
     pub fn load(model_path: &str, n_ctx: u32, n_threads: u32) -> Result<Self, String> {
+        Self::load_ex(model_path, n_ctx, n_threads, 0)
+    }
+
+    pub fn load_ex(model_path: &str, n_ctx: u32, n_threads: u32, gpu_layers: i32) -> Result<Self, String> {
         unsafe { ffi::init()?; }
 
-        let model = unsafe { ffi::load_model(model_path) };
+        let model = if gpu_layers > 0 {
+            unsafe { ffi::load_model_gpu(model_path, gpu_layers) }
+        } else {
+            unsafe { ffi::load_model(model_path) }
+        };
         if model.is_null() { return Err("failed to load model".into()); }
 
         let ctx = unsafe { ffi::new_context(model, n_ctx, n_threads) };
