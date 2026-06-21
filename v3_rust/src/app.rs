@@ -70,6 +70,7 @@ pub struct DesktopAI {
     show_kb_panel: bool,
     kb_title: String,
     kb_content: String,
+    kb_url: String,
     kb_indexing: bool,
     kb_index_progress: f32,
     kb_index_status: String,
@@ -160,6 +161,7 @@ impl DesktopAI {
             show_kb_panel: false,
             kb_title: String::new(),
             kb_content: String::new(),
+            kb_url: String::new(),
             kb_indexing: false,
             kb_index_progress: 0.0,
             kb_index_status: String::new(),
@@ -335,6 +337,41 @@ impl DesktopAI {
             }
             Err(e) => {
                 self.error_message = Some(format!("添加失败: {}", e));
+            }
+        }
+        self.kb_indexing = false;
+    }
+
+    fn crawl_url_to_kb(&mut self) {
+        if self.kb_indexing { return; }
+        let url = self.kb_url.trim().to_string();
+        if url.is_empty() { return; }
+        if !self.vector_store.has_engine() {
+            self.error_message = Some("需要先加载模型才能使用知识库".into());
+            return;
+        }
+        self.kb_indexing = true;
+        self.kb_index_progress = 0.0;
+        self.kb_index_status = format!("正在爬取: {}", url);
+
+        match crate::crawler::crawl_url(&url) {
+            Ok(page) => {
+                self.kb_index_progress = 0.4;
+                self.kb_index_status = format!("清洗完成: {} 字符", page.text_size);
+                match self.vector_store.add_document(&page.title, &page.text, 512, 64) {
+                    Ok(()) => {
+                        self.kb_url.clear();
+                        self.kb_index_progress = 1.0;
+                        self.kb_index_status = format!("已添加: {}", page.title);
+                        self.status_message = format!("已爬取: {} ({:.0}K)", page.title, page.text_size as f64 / 1024.0);
+                    }
+                    Err(e) => {
+                        self.error_message = Some(format!("索引失败: {}", e));
+                    }
+                }
+            }
+            Err(e) => {
+                self.error_message = Some(format!("爬取失败: {}", e));
             }
         }
         self.kb_indexing = false;
@@ -771,7 +808,7 @@ impl eframe::App for DesktopAI {
             .default_width(200.0)
             .show(ctx, |ui| {
                 ui.heading("桌面AI");
-                ui.label(RichText::new("v5.6").size(10.0).color(Color32::GRAY));
+                ui.label(RichText::new("v5.7").size(10.0).color(Color32::GRAY));
                 ui.add_space(8.0);
 
                 if ui.button("+ 新对话").clicked() {
@@ -1066,6 +1103,19 @@ impl eframe::App for DesktopAI {
                     }
                     ui.add_space(4.0);
 
+                    // Web crawl
+                    ui.label(RichText::new("从网页爬取:").size(11.0).color(Color32::GRAY));
+                    ui.horizontal(|ui| {
+                        ui.add_sized(vec2(ui.available_width() - 60.0, 20.0),
+                            TextEdit::singleline(&mut self.kb_url).hint_text("https://..."));
+                        if ui.add_sized(vec2(56.0, 22.0),
+                            egui::Button::new("爬取")
+                        ).clicked() {
+                            self.crawl_url_to_kb();
+                        }
+                    });
+                    ui.add_space(4.0);
+
                     // Indexing progress
                     if self.kb_indexing {
                         ui.add(egui::ProgressBar::new(self.kb_index_progress)
@@ -1127,7 +1177,7 @@ impl eframe::App for DesktopAI {
 
                     ui.add_space(4.0);
                     ui.label(RichText::new(
-                        "提示: 开启知识库后自动检索注入上下文。支持 txt/md/pdf，文件大小 <2MB。")
+                        "提示: 支持文件(txt/md/pdf/html)、粘贴文本、网页爬取。所有输入均经清洗管道转为纯文本后索引。")
                         .size(10.0).color(Color32::GRAY));
                     }); // ScrollArea
                 });
