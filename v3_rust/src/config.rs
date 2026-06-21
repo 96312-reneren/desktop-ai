@@ -34,6 +34,8 @@ pub struct Config {
     pub search_enabled: bool,
     #[serde(default)]
     pub kb_enabled: bool,
+    #[serde(default)]
+    pub gpu_layers: i32,
 }
 
 fn default_api_port() -> u16 { 11434 }
@@ -53,6 +55,7 @@ impl Default for Config {
             api_port: 11434,
             search_enabled: false,
             kb_enabled: false,
+            gpu_layers: 0,
         }
     }
 }
@@ -117,6 +120,8 @@ pub fn load_config() -> Config {
     }
     if config.system_prompt.len() > 10000 { config.system_prompt = "You are a helpful assistant.".into(); }
     if config.api_port < 1024 { config.api_port = 11434; }
+    if config.gpu_layers < 0 { config.gpu_layers = 0; }
+    if config.gpu_layers > 999 { config.gpu_layers = 0; }
     config
 }
 

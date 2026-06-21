@@ -61,6 +61,7 @@ pub struct DesktopAI {
     // Hardware info
     cpu_cores: usize,
     ram_warning: Option<String>,
+    gpu_info: Vec<GpuInfo>,
 
     // API server
     api_server: Option<ApiServer>,
@@ -137,6 +138,45 @@ fn get_total_ram_gb() -> f64 {
 #[cfg(not(windows))]
 fn get_total_ram_gb() -> f64 { 0.0 }
 
+#[derive(Clone, Debug)]
+pub struct GpuInfo {
+    pub name: String,
+    pub vram_gb: f64,
+}
+
+#[cfg(windows)]
+fn detect_gpus() -> Vec<GpuInfo> {
+    // Use WMIC to query GPU information
+    let output = std::process::Command::new("wmic")
+        .args(["path", "Win32_VideoController", "get", "Name,AdapterRAM", "/format:csv"])
+        .output();
+    match output {
+        Ok(out) => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let mut gpus = Vec::new();
+            for line in text.lines().skip(2) {
+                let line = line.trim();
+                if line.is_empty() { continue; }
+                // Format: Node,Name,AdapterRAM
+                let parts: Vec<&str> = line.split(',').collect();
+                if parts.len() >= 3 {
+                    let name = parts[1].trim().to_string();
+                    let ram_bytes: u64 = parts[2].trim().parse().unwrap_or(0);
+                    let vram = ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                    if vram > 0.0 && !name.is_empty() && !name.contains("Microsoft Basic") {
+                        gpus.push(GpuInfo { name, vram_gb: vram });
+                    }
+                }
+            }
+            gpus
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(not(windows))]
+fn detect_gpus() -> Vec<GpuInfo> { Vec::new() }
+
 impl DesktopAI {
     pub fn new() -> Self {
         let config = config::load_config();
@@ -147,6 +187,7 @@ impl DesktopAI {
         };
 
         let (cpu_cores, ram_warning) = detect_hardware();
+        let gpu_info = detect_gpus();
         let vector_store = VectorStore::new(&config::kb_dir());
 
         Self {
@@ -158,6 +199,7 @@ impl DesktopAI {
             downloads: HashMap::new(),
             cpu_cores,
             ram_warning,
+            gpu_info,
             api_server: None,
             vector_store,
             show_kb_panel: false,
@@ -207,19 +249,21 @@ impl DesktopAI {
             self.config.n_threads.parse().unwrap_or(4)
         };
 
+        let gpu_layers = self.config.gpu_layers;
         let path_str = model_path.to_string_lossy().to_string();
-        match LlamaInference::load(&path_str, n_ctx, n_threads) {
+        match LlamaInference::load_ex(&path_str, n_ctx, n_threads, gpu_layers) {
             Ok(inf) => {
                 let inf = Arc::new(inf);
+                let gpu_tag = if gpu_layers > 0 { format!(" [GPU {}层]", gpu_layers) } else { String::new() };
                 // Start API server if enabled
                 if self.config.api_enabled {
                     if let Some(ref mut old) = self.api_server { old.stop(); }
                     let port = self.config.api_port;
                     let server = ApiServer::start(Arc::clone(&inf), port, info.name.clone());
                     self.api_server = Some(server);
-                    self.status_message = format!("{} 就绪 | API: http://127.0.0.1:{}/v1", info.name, port);
+                    self.status_message = format!("{} 就绪{} | API: http://127.0.0.1:{}/v1", info.name, gpu_tag, port);
                 } else {
-                    self.status_message = format!("{} 就绪", info.name);
+                    self.status_message = format!("{} 就绪{}", info.name, gpu_tag);
                 }
 
                 // Setup embedding engine for knowledge base
@@ -999,6 +1043,10 @@ impl eframe::App for DesktopAI {
                     // Hardware info
                     ui.label(RichText::new(format!("你的设备: {} 核 CPU", self.cpu_cores))
                         .size(11.0).color(Color32::GRAY));
+                    for gpu in &self.gpu_info {
+                        ui.label(RichText::new(format!("显卡: {} ({:.1} GB VRAM)", gpu.name, gpu.vram_gb))
+                            .size(11.0).color(Color32::GRAY));
+                    }
                     if let Some(ref warn) = self.ram_warning {
                         ui.label(RichText::new(warn).size(11.0).color(Color32::from_rgb(255, 200, 50)));
                     }
@@ -1268,6 +1316,31 @@ impl eframe::App for DesktopAI {
                             }
                         });
                     self.config.n_threads = thr;
+                    ui.add_space(8.0);
+
+                    ui.label(RichText::new("GPU 加速").strong());
+                    let mut gl = self.config.gpu_layers;
+                    ui.horizontal(|ui| {
+                        ui.label("层数:");
+                        if ui.add(egui::DragValue::new(&mut gl).range(0..=999).speed(1)).changed() {
+                            gl = gl.max(0);
+                        }
+                        if ui.button("自动").clicked() {
+                            gl = if self.gpu_info.is_empty() { 0 } else { 99 };
+                        }
+                    });
+                    if gl > 0 {
+                        ui.label(RichText::new(format!("将 {} 层模型卸载到 GPU (需重启模型)", gl))
+                            .size(10.0).color(Color32::from_rgb(100, 200, 255)));
+                        if !self.gpu_info.is_empty() {
+                            ui.label(RichText::new(format!("检测到 {} GPU, {:.1}GB VRAM", self.gpu_info[0].name, self.gpu_info[0].vram_gb))
+                                .size(10.0).color(Color32::GRAY));
+                        }
+                    } else {
+                        ui.label(RichText::new("使用纯 CPU 推理 (0 = CPU)")
+                            .size(10.0).color(Color32::GRAY));
+                    }
+                    self.config.gpu_layers = gl;
                     ui.add_space(8.0);
 
                     ui.label(RichText::new("系统提示词").strong());

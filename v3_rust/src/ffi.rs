@@ -110,6 +110,15 @@ pub unsafe fn load_model(path: &str) -> *mut LlamaModel {
     call!(llama_load_model_from_file, PfnLoadModelFromFile, c_path.as_ptr(), params)
 }
 
+pub unsafe fn load_model_gpu(path: &str, n_gpu_layers: i32) -> *mut LlamaModel {
+    let c_path = to_cstring_safe(path);
+    let mut params = LlamaModelParams::default();
+    params.use_mmap = true;
+    params.use_mlock = false;
+    params.n_gpu_layers = n_gpu_layers;
+    call!(llama_load_model_from_file, PfnLoadModelFromFile, c_path.as_ptr(), params)
+}
+
 pub unsafe fn new_context(model: *mut LlamaModel, n_ctx: u32, n_threads: u32) -> *mut LlamaContext {
     let mut params = LlamaContextParams::default();
     params.n_ctx = n_ctx;
