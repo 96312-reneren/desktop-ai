@@ -11,6 +11,7 @@ use crate::downloader::{self, DownloadMsg};
 use crate::inference::{self, LlamaInference, StreamToken};
 use crate::markdown;
 use crate::model_catalog::find_model;
+use crate::sandbox::Sandbox;
 use crate::search::{self, SearchResult};
 use crate::vector_store::VectorStore;
 
@@ -68,6 +69,7 @@ pub struct DesktopAI {
 
     // Knowledge base
     vector_store: VectorStore,
+    sandbox: Sandbox,
     show_kb_panel: bool,
     kb_title: String,
     kb_content: String,
@@ -189,6 +191,7 @@ impl DesktopAI {
         let (cpu_cores, ram_warning) = detect_hardware();
         let gpu_info = detect_gpus();
         let vector_store = VectorStore::new(&config::kb_dir());
+        let sandbox = Sandbox::new(config::sandbox_dir());
 
         Self {
             config,
@@ -202,6 +205,7 @@ impl DesktopAI {
             gpu_info,
             api_server: None,
             vector_store,
+            sandbox,
             show_kb_panel: false,
             kb_title: String::new(),
             kb_content: String::new(),
@@ -1269,6 +1273,36 @@ impl eframe::App for DesktopAI {
                                 ui.add_space(2.0);
                             }
                         });
+                    }
+
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.label(RichText::new("AI 工作区 (沙盒)").size(13.0).strong());
+                    ui.label(RichText::new(
+                        format!("路径: {}", self.sandbox.root_path().display())
+                    ).size(9.0).color(Color32::GRAY));
+
+                    if let Ok(entries) = self.sandbox.list("") {
+                        if entries.is_empty() {
+                            ui.label(RichText::new("工作区为空。AI 生成的回答可保存到此。")
+                                .size(11.0).color(Color32::GRAY));
+                        } else {
+                            ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                                for entry in &entries {
+                                    ui.horizontal(|ui| {
+                                        let icon = if entry.is_dir { " " } else { " " };
+                                        let color = if entry.is_dir {
+                                            Color32::from_rgb(100, 180, 255)
+                                        } else {
+                                            Color32::from_rgb(200, 200, 200)
+                                        };
+                                        let preview = entry.name.clone();
+                                        ui.label(RichText::new(format!("{}{}", icon, preview))
+                                            .size(11.0).color(color));
+                                    });
+                                }
+                            });
+                        }
                     }
 
                     ui.add_space(4.0);

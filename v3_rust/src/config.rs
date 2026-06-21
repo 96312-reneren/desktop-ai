@@ -89,6 +89,12 @@ pub fn kb_dir() -> PathBuf {
     dir
 }
 
+pub fn sandbox_dir() -> PathBuf {
+    let dir = app_dirs().data_dir().join("sandbox");
+    std::fs::create_dir_all(&dir).ok();
+    dir
+}
+
 pub fn load_config() -> Config {
     let path = config_path();
     let mut config = if path.exists() {
