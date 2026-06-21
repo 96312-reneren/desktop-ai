@@ -1034,9 +1034,10 @@ impl eframe::App for DesktopAI {
         // ─── Search panel ──────────────────────────
         if self.show_search_panel {
             egui::Window::new("搜索")
-                .collapsible(false).resizable(true)
-                .anchor(egui::Align2::RIGHT_TOP, [-10.0, 30.0])
+                .collapsible(false).resizable(false)
+                .anchor(egui::Align2::RIGHT_TOP, [0.0, 30.0])
                 .default_width(350.0)
+                .max_width(450.0)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.add_sized(vec2(ui.available_width() - 60.0, 24.0),
@@ -1084,11 +1085,24 @@ impl eframe::App for DesktopAI {
         // ─── Knowledge Base panel ────────────────────
         if self.show_kb_panel {
             egui::Window::new("知识库")
-                .collapsible(false).resizable(true)
-                .anchor(egui::Align2::RIGHT_TOP, [-10.0, 30.0])
-                .default_width(400.0)
+                .collapsible(false).resizable(false)
+                .anchor(egui::Align2::RIGHT_TOP, [0.0, 30.0])
+                .default_width(420.0)
+                .max_width(500.0)
                 .show(ctx, |ui| {
-                    ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
+                    // Close button at top
+                    ui.horizontal(|ui| {
+                        ui.heading(RichText::new("知识库").size(14.0));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(RichText::new("✕").size(14.0).color(Color32::from_rgb(200, 80, 80))).clicked() {
+                                self.show_kb_panel = false;
+                            }
+                        });
+                    });
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    ScrollArea::vertical().max_height(500.0).show(ui, |ui| {
                     ui.label(RichText::new("添加文档").size(13.0).strong());
                     ui.add_space(4.0);
 
@@ -1134,7 +1148,6 @@ impl eframe::App for DesktopAI {
                         egui::Button::new("添加文本 (分块+向量化)")
                     ).clicked() {
                         if self.kb_content.trim().is_empty() {
-                            // No content in paste area - try file load
                             self.pick_and_index_file();
                         } else {
                             self.paste_and_index_text();
@@ -1151,7 +1164,7 @@ impl eframe::App for DesktopAI {
                     } else {
                         ui.label(RichText::new(format!("共 {} 个文档", docs.len()))
                             .size(11.0).color(Color32::GRAY));
-                        ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                        ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                             for doc in &docs {
                                 let total_chars: usize = doc.chunks.iter().map(|c| c.text.len()).sum();
                                 ui.group(|ui| {
