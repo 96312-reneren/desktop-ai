@@ -302,7 +302,7 @@ impl DesktopAI {
         self.kb_index_progress = 0.3;
         self.kb_index_status = format!("分块中... ({:.0} 字符)", content.len() as f64);
 
-        match self.vector_store.add_document(&filename, &content, 512, 64) {
+        match self.vector_store.add_document(&filename, &content, 500, 50) {
             Ok(()) => {
                 self.kb_index_progress = 1.0;
                 self.kb_index_status = format!("已添加: {}", filename);
