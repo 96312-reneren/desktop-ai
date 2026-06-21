@@ -13,6 +13,7 @@ mod ffi;
 mod inference;
 mod markdown;
 mod model_catalog;
+mod sandbox;
 mod search;
 mod vector_store;
 
