@@ -71,9 +71,11 @@ pub struct DesktopAI {
     kb_title: String,
     kb_content: String,
     kb_url: String,
+    kb_crawl_depth: u32,
     kb_indexing: bool,
     kb_index_progress: f32,
     kb_index_status: String,
+    kb_crawl_stop: Option<Arc<AtomicBool>>,
 
     // Search
     show_search_panel: bool,
@@ -162,9 +164,11 @@ impl DesktopAI {
             kb_title: String::new(),
             kb_content: String::new(),
             kb_url: String::new(),
+            kb_crawl_depth: 1,
             kb_indexing: false,
             kb_index_progress: 0.0,
             kb_index_status: String::new(),
+            kb_crawl_stop: None,
             show_search_panel: false,
             search_query: String::new(),
             search_results: Vec::new(),
@@ -350,29 +354,52 @@ impl DesktopAI {
             self.error_message = Some("需要先加载模型才能使用知识库".into());
             return;
         }
+        let depth = self.kb_crawl_depth.max(1).min(3);
+
+        self.kb_crawl_stop = None;
         self.kb_indexing = true;
         self.kb_index_progress = 0.0;
-        self.kb_index_status = format!("正在爬取: {}", url);
+        self.kb_index_status = if depth > 1 {
+            format!("深度爬取(≤{}层): {}", depth, url)
+        } else {
+            format!("正在爬取: {}", url)
+        };
 
-        match crate::crawler::crawl_url(&url) {
-            Ok(page) => {
-                self.kb_index_progress = 0.4;
-                self.kb_index_status = format!("清洗完成: {} 字符", page.text_size);
-                match self.vector_store.add_document(&page.title, &page.text, 512, 64) {
-                    Ok(()) => {
-                        self.kb_url.clear();
-                        self.kb_index_progress = 1.0;
-                        self.kb_index_status = format!("已添加: {}", page.title);
-                        self.status_message = format!("已爬取: {} ({:.0}K)", page.title, page.text_size as f64 / 1024.0);
+        let results = if depth > 1 {
+            let config = crate::crawler::CrawlConfig {
+                max_depth: depth,
+                max_pages: 15,
+                ..Default::default()
+            };
+            crate::crawler::crawl_with_depth(&url, config)
+        } else {
+            vec![crate::crawler::crawl_url(&url)]
+        };
+
+        let mut added = 0usize;
+        for result in &results {
+            match result {
+                Ok(page) => {
+                    self.kb_index_progress = (added as f32 / results.len() as f32).min(0.9);
+                    self.kb_index_status = format!("索引 {}/{}: {}", added + 1, results.len(), &page.title[..page.title.len().min(30)]);
+                    if let Err(e) = self.vector_store.add_document(&page.title, &page.text, 500, 50) {
+                        log::warn!("索引失败 {}: {}", page.title, e);
                     }
-                    Err(e) => {
-                        self.error_message = Some(format!("索引失败: {}", e));
-                    }
+                    added += 1;
+                }
+                Err(e) => {
+                    log::warn!("爬取失败: {}", e);
                 }
             }
-            Err(e) => {
-                self.error_message = Some(format!("爬取失败: {}", e));
-            }
+        }
+
+        if added > 0 {
+            self.kb_url.clear();
+            self.kb_index_progress = 1.0;
+            self.kb_index_status = format!("完成: {} 个文档已索引", added);
+            self.status_message = format!("已爬取 {} 个文档", added);
+        } else {
+            self.error_message = Some("未爬取到有效内容。请检查URL是否正确。".into());
         }
         self.kb_indexing = false;
     }
@@ -1120,9 +1147,17 @@ impl eframe::App for DesktopAI {
                     // Web crawl
                     ui.label(RichText::new("从网页爬取:").size(11.0).color(Color32::GRAY));
                     ui.horizontal(|ui| {
-                        ui.add_sized(vec2(ui.available_width() - 60.0, 20.0),
+                        ui.add_sized(vec2(ui.available_width() - 100.0, 20.0),
                             TextEdit::singleline(&mut self.kb_url).hint_text("https://..."));
-                        if ui.add_sized(vec2(56.0, 22.0),
+                        ui.label("层数:");
+                        if ui.add(egui::DragValue::new(&mut self.kb_crawl_depth)
+                            .range(1..=3).speed(0)
+                        ).changed() {
+                            self.kb_crawl_depth = self.kb_crawl_depth.max(1).min(3);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.add_sized(vec2(ui.available_width() - 12.0, 22.0),
                             egui::Button::new("爬取")
                         ).clicked() {
                             self.crawl_url_to_kb();
