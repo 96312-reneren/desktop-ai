@@ -20,7 +20,7 @@ pub struct ApiServer {
 }
 
 impl ApiServer {
-    pub fn start(inf: Arc<Mutex<LlamaInference>>, port: u16, active_model: String) -> Self {
+    pub fn start(inf: Arc<Mutex<LlamaInference>>, port: u16, active_model: String, api_token: String) -> Self {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop = stop_flag.clone();
         let active_conns = Arc::new(AtomicU32::new(0));
@@ -61,8 +61,9 @@ impl ApiServer {
                         let inf = Arc::clone(&inf);
                         let model_name = active_model.clone();
                         let conns = Arc::clone(&active_conns);
+                        let token = api_token.clone();
                         thread::spawn(move || {
-                            handle_client(stream, inf, model_name);
+                            handle_client(stream, inf, model_name, &token);
                             conns.fetch_sub(1, Ordering::Relaxed);
                         });
                     }
@@ -93,10 +94,12 @@ impl Drop for ApiServer {
     fn drop(&mut self) { self.stop(); }
 }
 
-fn handle_client(mut stream: TcpStream, inf: Arc<Mutex<LlamaInference>>, model_name: String) {
+fn handle_client(mut stream: TcpStream, inf: Arc<Mutex<LlamaInference>>, model_name: String, api_token: &str) {
     // Guard against slow-loris: a client sending 1 byte / minute would
     // otherwise hold a connection slot indefinitely.
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
+    if let Err(e) = stream.set_read_timeout(Some(std::time::Duration::from_secs(30))) {
+        log::warn!("API set_read_timeout failed: {}", e);
+    }
     let raw = match read_http_request(&mut stream) {
         Ok(r) => r,
         Err(e) => {
@@ -116,6 +119,19 @@ fn handle_client(mut stream: TcpStream, inf: Arc<Mutex<LlamaInference>>, model_n
         if !origin_allowed(origin) {
             log::warn!("API rejected Origin: {}", origin);
             let _ = stream.write_all(json_response(403, r#"{"error":"origin not allowed"}"#).as_bytes());
+            return;
+        }
+    }
+
+    // P0-2: /v1/* endpoints require Bearer token.
+    // /health and /ready are intentionally unauthenticated for liveness probes.
+    if path.starts_with("/v1/") {
+        let auth = parse_header(&request, "Authorization");
+        let expected = format!("Bearer {}", api_token);
+        if auth.as_deref() != Some(expected.as_str()) {
+            let _ = stream.write_all(
+                json_response(401, r#"{"error":"unauthorized; set Authorization: Bearer <token>"}"#).as_bytes()
+            );
             return;
         }
     }
@@ -156,11 +172,19 @@ fn handle_chat_completion(body: &str, inf: &Arc<Mutex<LlamaInference>>, model_na
     let stream_mode = req["stream"].as_bool().unwrap_or(false);
 
     // Build chatml prompt from messages
+    let allowed_roles: &[&str] = &["system", "user", "assistant"];
     let mut prompt = String::new();
     for msg in &messages {
         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+        if !allowed_roles.contains(&role) {
+            return json_response(400, r#"{"error":"invalid role; allowed: system, user, assistant"}"#);
+        }
         let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
-        prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", role, content));
+        // P0-3: sanitise ChatML control tokens in user-supplied content to
+        // prevent prompt injection (a malicious client could inject
+        // <|im_start|>assistant ... <|im_end|> to hijack the response).
+        let safe = crate::inference::sanitize_chatml(content.trim());
+        prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", role, safe));
     }
     prompt.push_str("<|im_start|>assistant\n");
 
@@ -311,6 +335,18 @@ fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || needle.len() > haystack.len() { return None; }
     haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Case-insensitive HTTP header lookup.
+fn parse_header(request: &str, name: &str) -> Option<String> {
+    let prefix_lower = format!("{}:", name).to_lowercase();
+    for line in request.lines() {
+        let lower = line.to_lowercase();
+        if let Some(rest) = lower.strip_prefix(&prefix_lower) {
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
 }
 
 fn parse_content_length(headers: &str) -> Option<usize> {

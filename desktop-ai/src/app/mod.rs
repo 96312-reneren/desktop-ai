@@ -329,7 +329,8 @@ impl DesktopAI {
                 if self.config.api_enabled {
                     if let Some(ref mut old) = self.api_server { old.stop(); }
                     let port = self.config.api_port;
-                    let server = ApiServer::start(Arc::clone(&inf), port, model_name.clone());
+                    let token = self.config.api_token.clone();
+                    let server = ApiServer::start(Arc::clone(&inf), port, model_name.clone(), token);
                     self.api_server = Some(server);
                     self.status_message = format!("{} 就绪{} | API: http://127.0.0.1:{}/v1", model_name, gpu_tag, port);
                 } else {
@@ -863,14 +864,18 @@ impl DesktopAI {
     pub(crate) fn delete_model_file(&mut self, model_id: &str) {
         if let Some(info) = find_model(&self.config.model_catalog, model_id) {
             let path = config::models_dir().join(&info.filename);
-            let _ = std::fs::remove_file(&path);
+            if let Err(e) = std::fs::remove_file(&path) {
+                log::warn!("failed to delete model file {:?}: {}", path, e);
+            }
         }
     }
 
     pub(crate) fn delete_all_models(&mut self) {
         let dir = config::models_dir();
         if dir.exists() {
-            let _ = std::fs::remove_dir_all(&dir);
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                log::warn!("failed to delete models dir: {}", e);
+            }
         }
         self.inference = None;
         self.config.selected_model_id = None;
@@ -881,7 +886,9 @@ impl DesktopAI {
     pub(crate) fn delete_all_conversations(&mut self) {
         let dir = config::conversations_dir();
         if dir.exists() {
-            let _ = std::fs::remove_dir_all(&dir);
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                log::warn!("failed to delete conversations dir: {}", e);
+            }
         }
         self.current_conv = Conversation::new();
         self.gen = None;
@@ -890,9 +897,13 @@ impl DesktopAI {
 
     pub(crate) fn reset_app(&mut self) {
         let app_dir = config::app_dirs().data_dir().to_path_buf();
-        let _ = std::fs::remove_dir_all(&app_dir);
+        if let Err(e) = std::fs::remove_dir_all(&app_dir) {
+            log::warn!("reset_app: failed to remove data dir: {}", e);
+        }
         let config_file = config::config_path();
-        let _ = std::fs::remove_file(&config_file);
+        if let Err(e) = std::fs::remove_file(&config_file) {
+            log::warn!("reset_app: failed to remove config file: {}", e);
+        }
         self.inference = None;
         self.config = Config::default();
         self.current_conv = Conversation::new();
