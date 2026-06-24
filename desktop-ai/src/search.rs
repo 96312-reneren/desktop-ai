@@ -14,14 +14,13 @@ pub fn search_duckduckgo(query: &str) -> Result<Vec<SearchResult>, String> {
         .map_err(|e| format!("client: {}", e))?;
 
     let url = format!("https://html.duckduckgo.com/html/?q={}", urlencoding(query));
-    let resp = client.get(&url).send()
-        .map_err(|e| {
-            if e.is_timeout() {
-                "搜索超时，请稍后再试".into()
-            } else {
-                format!("搜索失败: {}", e)
-            }
-        })?;
+    let resp = client.get(&url).send().map_err(|e| {
+        if e.is_timeout() {
+            "搜索超时，请稍后再试".into()
+        } else {
+            format!("搜索失败: {}", e)
+        }
+    })?;
 
     let status = resp.status().as_u16();
     if status == 429 {
@@ -31,8 +30,7 @@ pub fn search_duckduckgo(query: &str) -> Result<Vec<SearchResult>, String> {
         return Err(format!("搜索服务异常 (HTTP {})", status));
     }
 
-    let html = resp.text()
-        .map_err(|e| format!("读取失败: {}", e))?;
+    let html = resp.text().map_err(|e| format!("读取失败: {}", e))?;
 
     parse_ddg_html(&html)
 }
@@ -71,7 +69,8 @@ fn parse_ddg_html(html: &str) -> Result<Vec<SearchResult>, String> {
         let block_start = search_from + start;
         let block = &html[block_start..];
 
-        let block_end = block.find(r#"class="result result--"#)
+        let block_end = block
+            .find(r#"class="result result--"#)
             .or_else(|| block.find(r#"<div class="nav-link"#))
             .unwrap_or(block.len());
 
@@ -107,7 +106,9 @@ fn parse_ddg_html(html: &str) -> Result<Vec<SearchResult>, String> {
         }
 
         search_from = block_start + block.len().min(1);
-        if results.len() >= 5 { break; }
+        if results.len() >= 5 {
+            break;
+        }
     }
 
     if results.is_empty() {
@@ -135,6 +136,10 @@ fn strip_html(s: &str) -> String {
             _ => {}
         }
     }
-    result.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-        .replace("&quot;", "\"").replace("&#x27;", "'")
+    result
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
 }

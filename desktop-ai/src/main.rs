@@ -69,9 +69,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(ref font_data) = chinese_font {
                 let mut fonts = egui::FontDefinitions::default();
                 let font_data = egui::FontData::from_owned(font_data.clone());
-                fonts.font_data.insert("chinese".into(), std::sync::Arc::new(font_data));
+                fonts
+                    .font_data
+                    .insert("chinese".into(), std::sync::Arc::new(font_data));
                 // Make Chinese font the default proportional font only
-                fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap()
+                fonts
+                    .families
+                    .get_mut(&egui::FontFamily::Proportional)
+                    .unwrap()
                     .insert(0, "chinese".into());
                 // Keep monospace as-is for code blocks
                 cc.egui_ctx.set_fonts(fonts);

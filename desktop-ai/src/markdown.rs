@@ -170,11 +170,7 @@ impl State {
                 if indent > 0.0 {
                     ui.add_space(indent);
                 }
-                ui.label(
-                    RichText::new("• ")
-                        .size(self.font_size)
-                        .strong(),
-                );
+                ui.label(RichText::new("• ").size(self.font_size).strong());
             }
             Tag::Link { dest_url, .. } => {
                 self.flush(ui);
@@ -262,11 +258,7 @@ impl State {
                 self.link_active = false;
                 let text = std::mem::take(&mut self.link_buf);
                 let url = std::mem::take(&mut self.link_url);
-                let display = if text.is_empty() {
-                    url.clone()
-                } else {
-                    text
-                };
+                let display = if text.is_empty() { url.clone() } else { text };
                 ui.hyperlink_to(display, url);
             }
             TagEnd::Image => {}
@@ -275,11 +267,13 @@ impl State {
                 self.render_table(ui);
             }
             TagEnd::TableHead => {
-                self.table_rows.push(std::mem::take(&mut self.table_cur_row));
+                self.table_rows
+                    .push(std::mem::take(&mut self.table_cur_row));
                 self.table_is_head = false;
             }
             TagEnd::TableRow => {
-                self.table_rows.push(std::mem::take(&mut self.table_cur_row));
+                self.table_rows
+                    .push(std::mem::take(&mut self.table_cur_row));
             }
             TagEnd::TableCell => {
                 self.table_cur_row

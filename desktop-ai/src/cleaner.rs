@@ -44,14 +44,22 @@ fn html_to_text(html: &str) -> String {
                     in_style = true;
                 } else if tl == "/style" {
                     in_style = false;
-                } else if tl == "p" || tl == "/p" || tl == "br" || tl == "br/" || tl.starts_with("br ") {
+                } else if tl == "p"
+                    || tl == "/p"
+                    || tl == "br"
+                    || tl == "br/"
+                    || tl.starts_with("br ")
+                {
                     if !prev_was_newline {
                         output.push('\n');
                         prev_was_newline = true;
                     }
                 } else if tl.starts_with("h") && tl.len() == 2
-                    || tl == "li" || tl == "/li"
-                    || tl == "tr" || tl == "/tr" || tl == "/div"
+                    || tl == "li"
+                    || tl == "/li"
+                    || tl == "tr"
+                    || tl == "/tr"
+                    || tl == "/div"
                 {
                     output.push('\n');
                 }

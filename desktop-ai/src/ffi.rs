@@ -4,57 +4,103 @@ use std::ffi::{c_char, c_void, CStr, CString};
 
 // ─── C types ──────────────────────────────────────────
 
-#[repr(C)] #[derive(Clone)]
+#[repr(C)]
+#[derive(Clone)]
 pub struct LlamaModelParams {
-    pub n_gpu_layers: i32, pub split_mode: i32, pub main_gpu: i32,
+    pub n_gpu_layers: i32,
+    pub split_mode: i32,
+    pub main_gpu: i32,
     pub tensor_split: *const f32,
-    pub progress_callback: *const c_void, pub progress_callback_user_data: *const c_void,
+    pub progress_callback: *const c_void,
+    pub progress_callback_user_data: *const c_void,
     pub kv_overrides: *const c_void,
-    pub vocab_only: bool, pub use_mmap: bool, pub use_mlock: bool, pub check_tensors: bool,
+    pub vocab_only: bool,
+    pub use_mmap: bool,
+    pub use_mlock: bool,
+    pub check_tensors: bool,
 }
 
-impl Default for LlamaModelParams { fn default() -> Self { unsafe { std::mem::zeroed() } } }
+impl Default for LlamaModelParams {
+    fn default() -> Self {
+        unsafe { std::mem::zeroed() }
+    }
+}
 
-#[repr(C)] #[derive(Clone)]
+#[repr(C)]
+#[derive(Clone)]
 pub struct LlamaContextParams {
-    pub seed: u32, pub n_ctx: u32, pub n_batch: u32, pub n_ubatch: u32,
-    pub n_seq_max: u32, pub n_threads: u32, pub n_threads_batch: u32,
-    pub rope_scaling_type: i32, pub pooling_type: i32,
-    pub rope_freq_base: f32, pub rope_freq_scale: f32,
-    pub yarn_ext_factor: f32, pub yarn_attn_factor: f32,
-    pub yarn_beta_fast: f32, pub yarn_beta_slow: f32, pub yarn_orig_ctx: u32,
+    pub seed: u32,
+    pub n_ctx: u32,
+    pub n_batch: u32,
+    pub n_ubatch: u32,
+    pub n_seq_max: u32,
+    pub n_threads: u32,
+    pub n_threads_batch: u32,
+    pub rope_scaling_type: i32,
+    pub pooling_type: i32,
+    pub rope_freq_base: f32,
+    pub rope_freq_scale: f32,
+    pub yarn_ext_factor: f32,
+    pub yarn_attn_factor: f32,
+    pub yarn_beta_fast: f32,
+    pub yarn_beta_slow: f32,
+    pub yarn_orig_ctx: u32,
     pub defrag_thold: f32,
-    pub logits_all: bool, pub embeddings: bool, pub offload_kqv: bool,
-    pub flash_attn: bool, pub no_perf: bool,
+    pub logits_all: bool,
+    pub embeddings: bool,
+    pub offload_kqv: bool,
+    pub flash_attn: bool,
+    pub no_perf: bool,
 }
 
-impl Default for LlamaContextParams { fn default() -> Self { unsafe { std::mem::zeroed() } } }
+impl Default for LlamaContextParams {
+    fn default() -> Self {
+        unsafe { std::mem::zeroed() }
+    }
+}
 
 pub type LlamaToken = i32;
 pub type LlamaModel = c_void;
 pub type LlamaContext = c_void;
 
-#[repr(C)] pub struct LlamaBatch {
-    pub n_tokens: i32, pub token: *mut LlamaToken, pub embd: *mut f32,
-    pub pos: *mut i32, pub n_seq_id: *mut i32, pub seq_id: *mut *mut i32, pub logits: *mut i8,
+#[repr(C)]
+pub struct LlamaBatch {
+    pub n_tokens: i32,
+    pub token: *mut LlamaToken,
+    pub embd: *mut f32,
+    pub pos: *mut i32,
+    pub n_seq_id: *mut i32,
+    pub seq_id: *mut *mut i32,
+    pub logits: *mut i8,
 }
 
 // ─── API function pointer types ───────────────────────
 
-type PfnLoadModelFromFile    = unsafe extern "C" fn(*const c_char, LlamaModelParams) -> *mut LlamaModel;
-type PfnNewContextWithModel  = unsafe extern "C" fn(*mut LlamaModel, LlamaContextParams) -> *mut LlamaContext;
-type PfnFreeModel            = unsafe extern "C" fn(*mut LlamaModel);
-type PfnFree                = unsafe extern "C" fn(*mut LlamaContext);
-type PfnNVocab              = unsafe extern "C" fn(*const LlamaModel) -> i32;
-type PfnTokenize            = unsafe extern "C" fn(*const LlamaModel, *const c_char, i32, *mut LlamaToken, i32, bool, bool) -> i32;
-type PfnTokenToPiece        = unsafe extern "C" fn(*const LlamaModel, LlamaToken, *mut c_char, i32, i32, bool) -> i32;
-type PfnBatchGetOne          = unsafe extern "C" fn(*mut LlamaToken, i32) -> LlamaBatch;
-type PfnDecode              = unsafe extern "C" fn(*mut LlamaContext, LlamaBatch) -> i32;
-type PfnSampleTokenGreedy   = unsafe extern "C" fn(*mut LlamaContext, *mut LlamaToken) -> LlamaToken;
-type PfnNEmbd              = unsafe extern "C" fn(*const LlamaModel) -> i32;
-type PfnGetEmbeddingsIth   = unsafe extern "C" fn(*mut LlamaContext, i32) -> *mut f32;
-type PfnFreeContext         = unsafe extern "C" fn(*mut LlamaContext);
-type PfnPrintSystemInfo      = unsafe extern "C" fn() -> *const c_char;
+type PfnLoadModelFromFile =
+    unsafe extern "C" fn(*const c_char, LlamaModelParams) -> *mut LlamaModel;
+type PfnNewContextWithModel =
+    unsafe extern "C" fn(*mut LlamaModel, LlamaContextParams) -> *mut LlamaContext;
+type PfnFreeModel = unsafe extern "C" fn(*mut LlamaModel);
+type PfnFree = unsafe extern "C" fn(*mut LlamaContext);
+type PfnNVocab = unsafe extern "C" fn(*const LlamaModel) -> i32;
+type PfnTokenize = unsafe extern "C" fn(
+    *const LlamaModel,
+    *const c_char,
+    i32,
+    *mut LlamaToken,
+    i32,
+    bool,
+    bool,
+) -> i32;
+type PfnTokenToPiece =
+    unsafe extern "C" fn(*const LlamaModel, LlamaToken, *mut c_char, i32, i32, bool) -> i32;
+type PfnBatchGetOne = unsafe extern "C" fn(*mut LlamaToken, i32) -> LlamaBatch;
+type PfnDecode = unsafe extern "C" fn(*mut LlamaContext, LlamaBatch) -> i32;
+type PfnSampleTokenGreedy = unsafe extern "C" fn(*mut LlamaContext, *mut LlamaToken) -> LlamaToken;
+type PfnNEmbd = unsafe extern "C" fn(*const LlamaModel) -> i32;
+type PfnGetEmbeddingsIth = unsafe extern "C" fn(*mut LlamaContext, i32) -> *mut f32;
+type PfnFreeContext = unsafe extern "C" fn(*mut LlamaContext);
+type PfnPrintSystemInfo = unsafe extern "C" fn() -> *const c_char;
 
 // ─── DLL integrity ────────────────────────────────────
 
@@ -63,7 +109,11 @@ const LLAMA_DLL_MIN_SIZE: u64 = 1_000_000;
 fn verify_dll(path: &str) -> Result<(), String> {
     let meta = std::fs::metadata(path).map_err(|e| format!("cannot access {}: {}", path, e))?;
     if meta.len() < LLAMA_DLL_MIN_SIZE {
-        return Err(format!("llama.dll appears corrupted (size {} < {} bytes)", meta.len(), LLAMA_DLL_MIN_SIZE));
+        return Err(format!(
+            "llama.dll appears corrupted (size {} < {} bytes)",
+            meta.len(),
+            LLAMA_DLL_MIN_SIZE
+        ));
     }
     Ok(())
 }
@@ -72,7 +122,9 @@ fn verify_dll(path: &str) -> Result<(), String> {
 
 static LLAMA_LIB: OnceCell<Library> = OnceCell::new();
 
-fn lib() -> &'static Library { LLAMA_LIB.get().expect("llama.dll not loaded") }
+fn lib() -> &'static Library {
+    LLAMA_LIB.get().expect("llama.dll not loaded")
+}
 
 /// Load llama.dll with integrity verification. Must be called once before any other function.
 ///
@@ -87,13 +139,15 @@ fn lib() -> &'static Library { LLAMA_LIB.get().expect("llama.dll not loaded") }
 /// This function must be called exactly once before any other FFI function.
 /// The DLL is loaded into a global static and shared across all subsequent calls.
 pub unsafe fn init() -> Result<(), String> {
-    LLAMA_LIB.get_or_try_init(|| {
-        verify_dll("llama.dll")?;
-        let lib = Library::new("llama.dll")
-            .map_err(|e| format!("加载 llama.dll 失败: {}", e))?;
-        check_dll_version(&lib)?;
-        Ok(lib)
-    }).map(|_| ())
+    LLAMA_LIB
+        .get_or_try_init(|| {
+            verify_dll("llama.dll")?;
+            let lib =
+                Library::new("llama.dll").map_err(|e| format!("加载 llama.dll 失败: {}", e))?;
+            check_dll_version(&lib)?;
+            Ok(lib)
+        })
+        .map(|_| ())
 }
 
 /// Probe the freshly loaded DLL by calling `llama_print_system_info`.
@@ -101,12 +155,12 @@ pub unsafe fn init() -> Result<(), String> {
 /// string, the DLL is considered incompatible — the user must re-download the
 /// complete package.
 fn check_dll_version(lib: &Library) -> Result<(), String> {
-    let sym: Symbol<PfnPrintSystemInfo> = unsafe {
-        lib.get(b"llama_print_system_info")
-    }.map_err(|_| {
-        "llama.dll 缺少关键符号 (llama_print_system_info)，\
-         版本可能不兼容，请重新下载完整包".to_string()
-    })?;
+    let sym: Symbol<PfnPrintSystemInfo> =
+        unsafe { lib.get(b"llama_print_system_info") }.map_err(|_| {
+            "llama.dll 缺少关键符号 (llama_print_system_info)，\
+         版本可能不兼容，请重新下载完整包"
+                .to_string()
+        })?;
 
     let ptr = unsafe { sym() };
     if ptr.is_null() {
@@ -159,7 +213,12 @@ pub unsafe fn load_model(path: &str) -> *mut LlamaModel {
         n_gpu_layers: 0,
         ..LlamaModelParams::default()
     };
-    call!(llama_load_model_from_file, PfnLoadModelFromFile, c_path.as_ptr(), params)
+    call!(
+        llama_load_model_from_file,
+        PfnLoadModelFromFile,
+        c_path.as_ptr(),
+        params
+    )
 }
 
 /// # Safety
@@ -174,7 +233,12 @@ pub unsafe fn load_model_gpu(path: &str, n_gpu_layers: i32) -> *mut LlamaModel {
         n_gpu_layers,
         ..LlamaModelParams::default()
     };
-    call!(llama_load_model_from_file, PfnLoadModelFromFile, c_path.as_ptr(), params)
+    call!(
+        llama_load_model_from_file,
+        PfnLoadModelFromFile,
+        c_path.as_ptr(),
+        params
+    )
 }
 
 /// # Safety
@@ -193,19 +257,28 @@ pub unsafe fn new_context(model: *mut LlamaModel, n_ctx: u32, n_threads: u32) ->
         no_perf: true,
         ..LlamaContextParams::default()
     };
-    call!(llama_new_context_with_model, PfnNewContextWithModel, model, params)
+    call!(
+        llama_new_context_with_model,
+        PfnNewContextWithModel,
+        model,
+        params
+    )
 }
 
 /// # Safety
 ///
 /// `model` must be a valid pointer from [`load_model`] or [`load_model_gpu`].
 /// After this call the pointer is invalid and must not be used again.
-pub unsafe fn free_model(model: *mut LlamaModel) { call!(llama_free_model, PfnFreeModel, model); }
+pub unsafe fn free_model(model: *mut LlamaModel) {
+    call!(llama_free_model, PfnFreeModel, model);
+}
 /// # Safety
 ///
 /// `ctx` must be a valid pointer from [`new_context`] or [`new_embedding_context`].
 /// After this call the pointer is invalid.
-pub unsafe fn free_context(ctx: *mut LlamaContext) { call!(llama_free, PfnFree, ctx); }
+pub unsafe fn free_context(ctx: *mut LlamaContext) {
+    call!(llama_free, PfnFree, ctx);
+}
 
 /// # Safety
 ///
@@ -222,9 +295,20 @@ pub unsafe fn tokenize(model: *const LlamaModel, text: &str, add_special: bool) 
     let c_text = to_cstring_safe(text);
     let max_tokens = (text.len() * 2).max(256);
     let mut tokens = vec![0i32; max_tokens];
-    let count = call!(llama_tokenize, PfnTokenize,
-        model, c_text.as_ptr(), text.len() as i32, tokens.as_mut_ptr(), tokens.len() as i32, add_special, true);
-    if count < 0 { return vec![1, 2]; }
+    let count = call!(
+        llama_tokenize,
+        PfnTokenize,
+        model,
+        c_text.as_ptr(),
+        text.len() as i32,
+        tokens.as_mut_ptr(),
+        tokens.len() as i32,
+        add_special,
+        true
+    );
+    if count < 0 {
+        return vec![1, 2];
+    }
     let count = (count as usize).min(tokens.len());
     tokens.truncate(count);
     tokens
@@ -235,11 +319,26 @@ pub unsafe fn tokenize(model: *const LlamaModel, text: &str, add_special: bool) 
 /// `model` must be a valid pointer. `token` must be a valid llama token ID.
 pub unsafe fn token_to_piece(model: *const LlamaModel, token: LlamaToken) -> String {
     let mut buf = vec![0i8; 512];
-    let len = call!(llama_token_to_piece, PfnTokenToPiece,
-        model, token, buf.as_mut_ptr() as *mut c_char, buf.len() as i32, 0, true);
-    if len <= 0 { return String::new(); }
-    CStr::from_bytes_until_nul(std::slice::from_raw_parts(buf.as_ptr() as *const u8, len as usize))
-        .unwrap_or_default().to_string_lossy().into_owned()
+    let len = call!(
+        llama_token_to_piece,
+        PfnTokenToPiece,
+        model,
+        token,
+        buf.as_mut_ptr() as *mut c_char,
+        buf.len() as i32,
+        0,
+        true
+    );
+    if len <= 0 {
+        return String::new();
+    }
+    CStr::from_bytes_until_nul(std::slice::from_raw_parts(
+        buf.as_ptr() as *const u8,
+        len as usize,
+    ))
+    .unwrap_or_default()
+    .to_string_lossy()
+    .into_owned()
 }
 
 /// # Safety
@@ -258,7 +357,12 @@ pub unsafe fn decode(ctx: *mut LlamaContext, token: LlamaToken) {
 /// `ctx` must be a valid context pointer.
 pub unsafe fn sample_greedy(ctx: *mut LlamaContext) -> LlamaToken {
     let mut tok: LlamaToken = 0;
-    call!(llama_sample_token_greedy, PfnSampleTokenGreedy, ctx, &mut tok);
+    call!(
+        llama_sample_token_greedy,
+        PfnSampleTokenGreedy,
+        ctx,
+        &mut tok
+    );
     tok
 }
 
@@ -268,7 +372,11 @@ pub unsafe fn sample_greedy(ctx: *mut LlamaContext) -> LlamaToken {
 ///
 /// `model` must be a valid pointer. The returned context has `embeddings=true`
 /// and must be freed with [`free_embd_context`].
-pub unsafe fn new_embedding_context(model: *mut LlamaModel, n_ctx: u32, n_threads: u32) -> *mut LlamaContext {
+pub unsafe fn new_embedding_context(
+    model: *mut LlamaModel,
+    n_ctx: u32,
+    n_threads: u32,
+) -> *mut LlamaContext {
     let params = LlamaContextParams {
         n_ctx,
         n_batch: 512,
@@ -280,7 +388,12 @@ pub unsafe fn new_embedding_context(model: *mut LlamaModel, n_ctx: u32, n_thread
         no_perf: true,
         ..LlamaContextParams::default()
     };
-    call!(llama_new_context_with_model, PfnNewContextWithModel, model, params)
+    call!(
+        llama_new_context_with_model,
+        PfnNewContextWithModel,
+        model,
+        params
+    )
 }
 
 /// # Safety
@@ -374,13 +487,21 @@ mod tests {
         // On 64-bit: i32=4, bool=1, ptr=8. With alignment padding.
         let sz = std::mem::size_of::<LlamaModelParams>();
         // Must be > 0 and a sane size (llama.cpp 层直接通过值传递)
-        assert!(sz >= 30 && sz <= 128, "LlamaModelParams size insane: {}", sz);
+        assert!(
+            sz >= 30 && sz <= 128,
+            "LlamaModelParams size insane: {}",
+            sz
+        );
     }
 
     #[test]
     fn llama_context_params_is_correctly_sized() {
         let sz = std::mem::size_of::<LlamaContextParams>();
-        assert!(sz >= 50 && sz <= 256, "LlamaContextParams size insane: {}", sz);
+        assert!(
+            sz >= 50 && sz <= 256,
+            "LlamaContextParams size insane: {}",
+            sz
+        );
     }
 
     #[test]
@@ -401,7 +522,10 @@ mod tests {
         let raw = &p as *const _ as *const u8;
         let sz = std::mem::size_of::<LlamaModelParams>();
         let slice = unsafe { std::slice::from_raw_parts(raw, sz) };
-        assert!(slice.iter().all(|&b| b == 0), "ModelParams default must be zeroed");
+        assert!(
+            slice.iter().all(|&b| b == 0),
+            "ModelParams default must be zeroed"
+        );
     }
 
     #[test]
@@ -410,7 +534,10 @@ mod tests {
         let raw = &p as *const _ as *const u8;
         let sz = std::mem::size_of::<LlamaContextParams>();
         let slice = unsafe { std::slice::from_raw_parts(raw, sz) };
-        assert!(slice.iter().all(|&b| b == 0), "ContextParams default must be zeroed");
+        assert!(
+            slice.iter().all(|&b| b == 0),
+            "ContextParams default must be zeroed"
+        );
     }
 
     // ─── DLL integrity verification ─────────────────────

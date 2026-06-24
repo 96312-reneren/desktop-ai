@@ -39,13 +39,22 @@ impl VectorStore {
     pub fn new(store_dir: &std::path::Path) -> Self {
         let path = store_dir.join("vector_store.json");
         let data = if path.exists() {
-            std::fs::read_to_string(&path).ok()
+            std::fs::read_to_string(&path)
+                .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or(VectorStoreData { documents: Vec::new() })
+                .unwrap_or(VectorStoreData {
+                    documents: Vec::new(),
+                })
         } else {
-            VectorStoreData { documents: Vec::new() }
+            VectorStoreData {
+                documents: Vec::new(),
+            }
         };
-        Self { path, data, engine: None }
+        Self {
+            path,
+            data,
+            engine: None,
+        }
     }
 
     /// Install an embedding backend.
@@ -60,21 +69,36 @@ impl VectorStore {
         self.engine = Some(engine);
     }
 
-    pub fn has_engine(&self) -> bool { self.engine.is_some() }
+    pub fn has_engine(&self) -> bool {
+        self.engine.is_some()
+    }
 
-    pub fn documents(&self) -> &[StoredDocument] { &self.data.documents }
+    pub fn documents(&self) -> &[StoredDocument] {
+        &self.data.documents
+    }
 
-    pub fn add_document(&mut self, title: &str, text: &str, chunk_size: usize, overlap: usize) -> Result<(), String> {
+    pub fn add_document(
+        &mut self,
+        title: &str,
+        text: &str,
+        chunk_size: usize,
+        overlap: usize,
+    ) -> Result<(), String> {
         let engine = self.engine.as_ref().ok_or("embedding engine not loaded")?;
         let chunks = crate::chunker::chunk_text(text, chunk_size, overlap);
-        if chunks.is_empty() { return Err("no content to index".into()); }
+        if chunks.is_empty() {
+            return Err("no content to index".into());
+        }
 
         let id = format!("doc_{}", chrono::Utc::now().timestamp_millis());
         let mut stored_chunks = Vec::new();
 
         for chunk in &chunks {
             let vec = engine.embed(chunk);
-            stored_chunks.push(StoredChunk { text: chunk.clone(), embedding: vec });
+            stored_chunks.push(StoredChunk {
+                text: chunk.clone(),
+                embedding: vec,
+            });
         }
 
         self.data.documents.push(StoredDocument {
@@ -113,7 +137,8 @@ impl VectorStore {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
         }
-        let json = serde_json::to_string_pretty(&self.data).map_err(|e| format!("serialize: {}", e))?;
+        let json =
+            serde_json::to_string_pretty(&self.data).map_err(|e| format!("serialize: {}", e))?;
         std::fs::write(&self.path, &json).map_err(|e| format!("write: {}", e))?;
         Ok(())
     }
@@ -121,18 +146,34 @@ impl VectorStore {
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let n = a.len().min(b.len());
-    if n == 0 { return 0.0; }
-    let (dot, na, nb) = a.iter().zip(b.iter()).take(n).fold((0.0f32, 0.0f32, 0.0f32), |(d, a2, b2), (x, y)| {
-        (d + x * y, a2 + x * x, b2 + y * y)
-    });
-    if na <= 0.0 || nb <= 0.0 { return 0.0; }
+    if n == 0 {
+        return 0.0;
+    }
+    let (dot, na, nb) = a
+        .iter()
+        .zip(b.iter())
+        .take(n)
+        .fold((0.0f32, 0.0f32, 0.0f32), |(d, a2, b2), (x, y)| {
+            (d + x * y, a2 + x * x, b2 + y * y)
+        });
+    if na <= 0.0 || nb <= 0.0 {
+        return 0.0;
+    }
     dot / (na.sqrt() * nb.sqrt())
 }
 
-pub fn search_by_vector(docs: &[StoredDocument], query_vec: &[f32], top_k: usize) -> Vec<SearchHit> {
+pub fn search_by_vector(
+    docs: &[StoredDocument],
+    query_vec: &[f32],
+    top_k: usize,
+) -> Vec<SearchHit> {
     let mut scored: Vec<(String, f32, String)> = Vec::new();
     for doc in docs {
-        let source = if doc.title.len() > 40 { format!("{}...", &doc.title[..40]) } else { doc.title.clone() };
+        let source = if doc.title.len() > 40 {
+            format!("{}...", &doc.title[..40])
+        } else {
+            doc.title.clone()
+        };
         for chunk in &doc.chunks {
             let sim = cosine_similarity(query_vec, &chunk.embedding);
             scored.push((chunk.text.clone(), sim, source.clone()));
@@ -140,5 +181,12 @@ pub fn search_by_vector(docs: &[StoredDocument], query_vec: &[f32], top_k: usize
     }
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(top_k);
-    scored.into_iter().map(|(chunk, score, source)| SearchHit { chunk, score, source }).collect()
+    scored
+        .into_iter()
+        .map(|(chunk, score, source)| SearchHit {
+            chunk,
+            score,
+            source,
+        })
+        .collect()
 }

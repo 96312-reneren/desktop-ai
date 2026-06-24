@@ -1,15 +1,13 @@
-mod sidebar;
 mod chat;
-mod settings;
-mod model_select;
 mod kb_panel;
+mod model_select;
+mod settings;
+mod sidebar;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, atomic::AtomicBool, mpsc};
+use std::sync::{atomic::AtomicBool, mpsc, Arc, Mutex};
 use std::thread;
 
-use eframe::egui;
-use egui::{Color32, RichText};
 use crate::api_server::ApiServer;
 use crate::config::{self, Config};
 use crate::conversation::Conversation;
@@ -18,6 +16,8 @@ use crate::inference::{self, LlamaInference, StreamToken};
 use crate::model_catalog::find_model;
 use crate::sandbox::Sandbox;
 use crate::vector_store::VectorStore;
+use eframe::egui;
+use egui::{Color32, RichText};
 
 pub(crate) fn apply_theme(ctx: &egui::Context, theme: &str) {
     let mut visuals = if theme == "dark" {
@@ -146,9 +146,15 @@ fn detect_hardware() -> (usize, Option<String>) {
 
     let ram_gb = get_total_ram_gb();
     let warning = if ram_gb > 0.0 && ram_gb < 4.0 {
-        Some(format!("⚠ 检测到内存仅 {:.1} GB，建议只使用 0.5B 或 1.7B 模型。大模型会严重卡顿或无法加载。", ram_gb))
+        Some(format!(
+            "⚠ 检测到内存仅 {:.1} GB，建议只使用 0.5B 或 1.7B 模型。大模型会严重卡顿或无法加载。",
+            ram_gb
+        ))
     } else if ram_gb > 0.0 && ram_gb < 8.0 {
-        Some(format!("ℹ 检测到内存 {:.1} GB，可使用 3B 以下的模型。7B+ 模型需要 8GB 以上内存。", ram_gb))
+        Some(format!(
+            "ℹ 检测到内存 {:.1} GB，可使用 3B 以下的模型。7B+ 模型需要 8GB 以上内存。",
+            ram_gb
+        ))
     } else {
         None
     };
@@ -159,9 +165,12 @@ fn detect_hardware() -> (usize, Option<String>) {
 fn get_total_ram_gb() -> f64 {
     use std::mem;
     unsafe {
-        let mut mem_status: windows_sys::Win32::System::SystemInformation::MEMORYSTATUSEX = mem::zeroed();
-        mem_status.dwLength = mem::size_of::<windows_sys::Win32::System::SystemInformation::MEMORYSTATUSEX>() as u32;
-        if windows_sys::Win32::System::SystemInformation::GlobalMemoryStatusEx(&mut mem_status) != 0 {
+        let mut mem_status: windows_sys::Win32::System::SystemInformation::MEMORYSTATUSEX =
+            mem::zeroed();
+        mem_status.dwLength =
+            mem::size_of::<windows_sys::Win32::System::SystemInformation::MEMORYSTATUSEX>() as u32;
+        if windows_sys::Win32::System::SystemInformation::GlobalMemoryStatusEx(&mut mem_status) != 0
+        {
             mem_status.ullTotalPhys as f64 / (1024.0 * 1024.0 * 1024.0)
         } else {
             0.0
@@ -170,7 +179,9 @@ fn get_total_ram_gb() -> f64 {
 }
 
 #[cfg(not(windows))]
-fn get_total_ram_gb() -> f64 { 0.0 }
+fn get_total_ram_gb() -> f64 {
+    0.0
+}
 
 #[derive(Clone, Debug)]
 pub struct GpuInfo {
@@ -181,7 +192,13 @@ pub struct GpuInfo {
 #[cfg(windows)]
 fn detect_gpus() -> Vec<GpuInfo> {
     let output = std::process::Command::new("wmic")
-        .args(["path", "Win32_VideoController", "get", "Name,AdapterRAM", "/format:csv"])
+        .args([
+            "path",
+            "Win32_VideoController",
+            "get",
+            "Name,AdapterRAM",
+            "/format:csv",
+        ])
         .output();
     match output {
         Ok(out) => {
@@ -189,14 +206,19 @@ fn detect_gpus() -> Vec<GpuInfo> {
             let mut gpus = Vec::new();
             for line in text.lines().skip(2) {
                 let line = line.trim();
-                if line.is_empty() { continue; }
+                if line.is_empty() {
+                    continue;
+                }
                 let parts: Vec<&str> = line.split(',').collect();
                 if parts.len() >= 3 {
                     let name = parts[1].trim().to_string();
                     let ram_bytes: u64 = parts[2].trim().parse().unwrap_or(0);
                     let vram = ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
                     if vram > 0.0 && !name.is_empty() && !name.contains("Microsoft Basic") {
-                        gpus.push(GpuInfo { name, vram_gb: vram });
+                        gpus.push(GpuInfo {
+                            name,
+                            vram_gb: vram,
+                        });
                     }
                 }
             }
@@ -207,7 +229,9 @@ fn detect_gpus() -> Vec<GpuInfo> {
 }
 
 #[cfg(not(windows))]
-fn detect_gpus() -> Vec<GpuInfo> { Vec::new() }
+fn detect_gpus() -> Vec<GpuInfo> {
+    Vec::new()
+}
 
 #[allow(clippy::new_without_default)]
 impl DesktopAI {
@@ -264,10 +288,14 @@ impl DesktopAI {
         }
     }
 
-    pub(crate) fn is_generating(&self) -> bool { self.gen.is_some() }
+    pub(crate) fn is_generating(&self) -> bool {
+        self.gen.is_some()
+    }
 
     pub(crate) fn load_selected_model(&mut self) {
-        if self.model_load.is_some() { return; }
+        if self.model_load.is_some() {
+            return;
+        }
         let model_id = match &self.config.selected_model_id {
             Some(id) => id.clone(),
             None => return,
@@ -277,12 +305,16 @@ impl DesktopAI {
             None => return,
         };
         let model_path = config::models_dir().join(&info.filename);
-        if !model_path.exists() { return; }
+        if !model_path.exists() {
+            return;
+        }
 
         self.status_message = format!("加载 {}...", info.name);
         let n_ctx = self.config.n_ctx;
         let n_threads = if self.config.n_threads == "auto" {
-            std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4)
+            std::thread::available_parallelism()
+                .map(|n| n.get() as u32)
+                .unwrap_or(4)
         } else {
             self.config.n_threads.parse().unwrap_or(4)
         };
@@ -297,18 +329,32 @@ impl DesktopAI {
         thread::spawn(move || {
             match LlamaInference::load_ex(&path_str, n_ctx, n_threads, gpu_layers) {
                 Ok(inf) => {
-                    let gpu_tag = if gpu_layers > 0 { format!(" [GPU {}层]", gpu_layers) } else { String::new() };
+                    let gpu_tag = if gpu_layers > 0 {
+                        format!(" [GPU {}层]", gpu_layers)
+                    } else {
+                        String::new()
+                    };
                     let embedding = if kb_enabled {
                         match crate::embedding::EmbeddingEngine::load(&path_str, 2048, n_threads) {
                             Ok(e) => Some(e),
-                            Err(e) => { log::warn!("embedding engine failed: {}", e); None }
+                            Err(e) => {
+                                log::warn!("embedding engine failed: {}", e);
+                                None
+                            }
                         }
-                    } else { None };
+                    } else {
+                        None
+                    };
                     let _ = tx.send(ModelLoadResult::Loaded {
-                        inference: inf, embedding, model_name, gpu_tag,
+                        inference: inf,
+                        embedding,
+                        model_name,
+                        gpu_tag,
                     });
                 }
-                Err(e) => { let _ = tx.send(ModelLoadResult::Error(e)); }
+                Err(e) => {
+                    let _ = tx.send(ModelLoadResult::Error(e));
+                }
             }
         });
     }
@@ -324,15 +370,26 @@ impl DesktopAI {
         };
         self.model_load = None;
         match result {
-            ModelLoadResult::Loaded { inference, embedding, model_name, gpu_tag } => {
+            ModelLoadResult::Loaded {
+                inference,
+                embedding,
+                model_name,
+                gpu_tag,
+            } => {
                 let inf: Arc<Mutex<LlamaInference>> = Arc::new(Mutex::new(inference));
                 if self.config.api_enabled {
-                    if let Some(ref mut old) = self.api_server { old.stop(); }
+                    if let Some(ref mut old) = self.api_server {
+                        old.stop();
+                    }
                     let port = self.config.api_port;
                     let token = self.config.api_token.clone();
-                    let server = ApiServer::start(Arc::clone(&inf), port, model_name.clone(), token);
+                    let server =
+                        ApiServer::start(Arc::clone(&inf), port, model_name.clone(), token);
                     self.api_server = Some(server);
-                    self.status_message = format!("{} 就绪{} | API: http://127.0.0.1:{}/v1", model_name, gpu_tag, port);
+                    self.status_message = format!(
+                        "{} 就绪{} | API: http://127.0.0.1:{}/v1",
+                        model_name, gpu_tag, port
+                    );
                 } else {
                     self.status_message = format!("{} 就绪{}", model_name, gpu_tag);
                 }
@@ -354,7 +411,9 @@ impl DesktopAI {
     }
 
     pub(crate) fn pick_and_index_file(&mut self) {
-        if self.kb_indexing { return; }
+        if self.kb_indexing {
+            return;
+        }
         if !self.vector_store.has_engine() {
             self.error_message = Some("需要先加载模型才能使用知识库".into());
             return;
@@ -366,7 +425,9 @@ impl DesktopAI {
             p
         } else {
             let filepath = self.kb_title.trim().to_string();
-            if filepath.is_empty() { return; }
+            if filepath.is_empty() {
+                return;
+            }
             let p = std::path::PathBuf::from(&filepath);
             if !p.exists() {
                 self.error_message = Some(format!("文件不存在: {}", filepath));
@@ -375,15 +436,18 @@ impl DesktopAI {
             p
         };
 
-        let filename = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let filename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
 
         // ── File type whitelist ──
         if !matches!(ext.as_str(), "txt" | "md" | "pdf") {
-            self.error_message = Some(format!(
-                "不支持的文件类型 .{} — 仅支持 .txt .md .pdf",
-                ext
-            ));
+            self.error_message = Some(format!("不支持的文件类型 .{} — 仅支持 .txt .md .pdf", ext));
             return;
         }
 
@@ -443,10 +507,7 @@ impl DesktopAI {
             }
             self.kb_index_progress = 1.0;
             self.kb_index_status = "完成".into();
-            self.status_message = format!(
-                "文档较长，已自动切分为 {}/{} 段索引",
-                added, total,
-            );
+            self.status_message = format!("文档较长，已自动切分为 {}/{} 段索引", added, total,);
         } else {
             self.kb_index_progress = 0.3;
             self.kb_index_status = format!("分块中... ({:.0} 字符)", char_count as f64);
@@ -467,7 +528,9 @@ impl DesktopAI {
     pub(crate) fn paste_and_index_text(&mut self) {
         let title = self.kb_title.trim().to_string();
         let content = self.kb_content.trim().to_string();
-        if title.is_empty() || content.is_empty() { return; }
+        if title.is_empty() || content.is_empty() {
+            return;
+        }
         if !self.vector_store.has_engine() {
             self.error_message = Some("需要先加载模型才能使用知识库".into());
             return;
@@ -493,10 +556,7 @@ impl DesktopAI {
             self.kb_content.clear();
             self.kb_index_progress = 1.0;
             self.kb_index_status = "完成".into();
-            self.status_message = format!(
-                "文档较长，已自动切分为 {}/{} 段索引",
-                added, total,
-            );
+            self.status_message = format!("文档较长，已自动切分为 {}/{} 段索引", added, total,);
         } else {
             self.kb_index_status = "正在向量化...".into();
             match self.vector_store.add_document(&title, &content, 512, 64) {
@@ -516,9 +576,13 @@ impl DesktopAI {
     }
 
     pub(crate) fn crawl_url_to_kb(&mut self) {
-        if self.kb_indexing { return; }
+        if self.kb_indexing {
+            return;
+        }
         let url = self.kb_url.trim().to_string();
-        if url.is_empty() { return; }
+        if url.is_empty() {
+            return;
+        }
         if !self.vector_store.has_engine() {
             self.error_message = Some("需要先加载模型才能使用知识库".into());
             return;
@@ -550,8 +614,16 @@ impl DesktopAI {
             match result {
                 Ok(page) => {
                     self.kb_index_progress = (added as f32 / results.len() as f32).min(0.9);
-                    self.kb_index_status = format!("索引 {}/{}: {}", added + 1, results.len(), &page.title[..page.title.len().min(30)]);
-                    if let Err(e) = self.vector_store.add_document(&page.title, &page.text, 500, 50) {
+                    self.kb_index_status = format!(
+                        "索引 {}/{}: {}",
+                        added + 1,
+                        results.len(),
+                        &page.title[..page.title.len().min(30)]
+                    );
+                    if let Err(e) = self
+                        .vector_store
+                        .add_document(&page.title, &page.text, 500, 50)
+                    {
                         log::warn!("索引失败 {}: {}", page.title, e);
                     }
                     added += 1;
@@ -568,7 +640,8 @@ impl DesktopAI {
             self.kb_index_status = format!("完成: {} 个文档已索引", added);
             self.status_message = format!("已爬取 {} 个文档", added);
         } else {
-            self.error_message = Some("未爬取到有效内容。页面可能需 JavaScript 渲染，或 URL 不正确。".into());
+            self.error_message =
+                Some("未爬取到有效内容。页面可能需 JavaScript 渲染，或 URL 不正确。".into());
         }
         self.kb_indexing = false;
     }
@@ -576,7 +649,9 @@ impl DesktopAI {
     // ─── Concurrent downloads ──────────────────────────
 
     pub(crate) fn start_download(&mut self, model_id: &str) {
-        if self.downloads.contains_key(model_id) { return; }
+        if self.downloads.contains_key(model_id) {
+            return;
+        }
 
         let info = match find_model(&self.config.model_catalog, model_id) {
             Some(i) => i.clone(),
@@ -589,12 +664,15 @@ impl DesktopAI {
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
 
-        self.downloads.insert(model_id.to_string(), DownloadState {
-            progress: 0.0,
-            status: "连接中...".into(),
-            rx,
-            cancel: cancel.clone(),
-        });
+        self.downloads.insert(
+            model_id.to_string(),
+            DownloadState {
+                progress: 0.0,
+                status: "连接中...".into(),
+                rx,
+                cancel: cancel.clone(),
+            },
+        );
 
         thread::spawn(move || {
             downloader::download_model(&url, dest, cancel, tx, expected_sha256.as_deref());
@@ -614,13 +692,28 @@ impl DesktopAI {
         for (id, ds) in self.downloads.iter_mut() {
             while let Ok(msg) = ds.rx.try_recv() {
                 match msg {
-                    DownloadMsg::Progress { percent, downloaded_mb, total_mb } => {
+                    DownloadMsg::Progress {
+                        percent,
+                        downloaded_mb,
+                        total_mb,
+                    } => {
                         ds.progress = percent as f32 / 100.0;
-                        ds.status = format!("{:.0}% ({:.0}/{:.0}MB)", percent as f64, downloaded_mb, total_mb);
+                        ds.status = format!(
+                            "{:.0}% ({:.0}/{:.0}MB)",
+                            percent as f64, downloaded_mb, total_mb
+                        );
                     }
-                    DownloadMsg::Status(s) => { ds.status = s; }
-                    DownloadMsg::Done => { finished.push(id.clone()); break; }
-                    DownloadMsg::Error(e) => { errors.push((id.clone(), e)); break; }
+                    DownloadMsg::Status(s) => {
+                        ds.status = s;
+                    }
+                    DownloadMsg::Done => {
+                        finished.push(id.clone());
+                        break;
+                    }
+                    DownloadMsg::Error(e) => {
+                        errors.push((id.clone(), e));
+                        break;
+                    }
                 }
             }
         }
@@ -640,9 +733,13 @@ impl DesktopAI {
     // ─── Generation ────────────────────────────────────
 
     pub(crate) fn send_message(&mut self) {
-        if self.is_generating() { return; }
+        if self.is_generating() {
+            return;
+        }
         let text = self.input_text.trim().to_string();
-        if text.is_empty() { return; }
+        if text.is_empty() {
+            return;
+        }
         self.input_text.clear();
 
         self.current_conv.add_message("user", &text);
@@ -655,9 +752,9 @@ impl DesktopAI {
             }
         };
 
-        let messages = self.current_conv.context_messages(
-            Some(&self.config.system_prompt), 20
-        );
+        let messages = self
+            .current_conv
+            .context_messages(Some(&self.config.system_prompt), 20);
         let conv_id = self.current_conv.id.clone();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
@@ -694,13 +791,22 @@ impl DesktopAI {
                         for (i, hit) in results.iter().enumerate() {
                             ctx.push_str(&format!(
                                 "[参考{} 来源: {} 相似度{:.0}%]\n{}\n\n",
-                                i + 1, hit.source, hit.score * 100.0, hit.chunk
+                                i + 1,
+                                hit.source,
+                                hit.score * 100.0,
+                                hit.chunk
                             ));
                         }
                         Some(ctx)
-                    } else { None }
-                } else { None }
-            } else { None };
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             let search_context = if do_search {
                 if let Ok(results) = crate::search::search_duckduckgo(&user_query) {
@@ -717,9 +823,15 @@ impl DesktopAI {
                             ctx.push('\n');
                         }
                         Some(ctx)
-                    } else { None }
-                } else { None }
-            } else { None };
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             let prompt = inference::build_rag_prompt(
                 &messages,
@@ -734,7 +846,8 @@ impl DesktopAI {
 
     pub(crate) fn stop_generation(&mut self) {
         if let Some(ref gen) = self.gen {
-            gen.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            gen.stop_flag
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -751,11 +864,7 @@ impl DesktopAI {
                     gen.pending_text.push_str(&t);
                     // Repetition detector: if the last 50 characters are
                     // identical the model is stuck in a token loop.
-                    let window: Vec<char> = gen.pending_text
-                        .chars()
-                        .rev()
-                        .take(50)
-                        .collect();
+                    let window: Vec<char> = gen.pending_text.chars().rev().take(50).collect();
                     if window.len() == 50 && window.iter().all(|&c| c == window[0]) {
                         gen.stop_flag
                             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -765,7 +874,10 @@ impl DesktopAI {
                         break;
                     }
                 }
-                StreamToken::Done => { done = true; break; }
+                StreamToken::Done => {
+                    done = true;
+                    break;
+                }
                 StreamToken::Error(e) => {
                     gen.pending_text.push_str(&format!("\n\n*[错误: {}]*", e));
                     done = true;
@@ -920,7 +1032,10 @@ impl DesktopAI {
         let _ = std::fs::remove_file(&config_file);
 
         let exe_path = std::env::current_exe().unwrap_or_default();
-        let exe_dir = exe_path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let exe_dir = exe_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
         let batch_path = exe_dir.join("_uninstall.bat");
         if let Ok(mut f) = std::fs::File::create(&batch_path) {
             use std::io::Write;
@@ -944,7 +1059,9 @@ impl DesktopAI {
 
     pub(crate) fn start_search(&mut self) {
         let query = self.search_query.trim().to_string();
-        if query.is_empty() || self.search_loading { return; }
+        if query.is_empty() || self.search_loading {
+            return;
+        }
         self.search_loading = true;
         self.search_error = None;
         self.search_results.clear();
@@ -972,7 +1089,7 @@ impl DesktopAI {
 }
 
 // ─── egui App ──────────────────────────────────────────
- 
+
 impl eframe::App for DesktopAI {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_model_load();
@@ -991,9 +1108,13 @@ impl eframe::App for DesktopAI {
             }
         }
         if input.key_pressed(egui::Key::Escape) {
-            if self.show_settings { self.show_settings = false; }
-            else if self.show_model_select { self.show_model_select = false; }
-            else if self.show_search_panel { self.show_search_panel = false; }
+            if self.show_settings {
+                self.show_settings = false;
+            } else if self.show_model_select {
+                self.show_model_select = false;
+            } else if self.show_search_panel {
+                self.show_search_panel = false;
+            }
         }
 
         // Apply saved theme only once on startup
@@ -1030,22 +1151,38 @@ impl eframe::App for DesktopAI {
                 }
 
                 if self.config.search_enabled || self.config.kb_enabled {
-                    let tag = if self.config.kb_enabled && self.config.search_enabled { " | RAG+KB" }
-                        else if self.config.kb_enabled { " | KB" }
-                        else { " | RAG" };
-                    ui.label(RichText::new(tag)
-                        .size(11.0)
-                        .color(Color32::from_rgb(100, 200, 255)));
+                    let tag = if self.config.kb_enabled && self.config.search_enabled {
+                        " | RAG+KB"
+                    } else if self.config.kb_enabled {
+                        " | KB"
+                    } else {
+                        " | RAG"
+                    };
+                    ui.label(
+                        RichText::new(tag)
+                            .size(11.0)
+                            .color(Color32::from_rgb(100, 200, 255)),
+                    );
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let icon = if self.config.theme == "dark" { "☀" } else { "🌙" };
+                    let icon = if self.config.theme == "dark" {
+                        "☀"
+                    } else {
+                        "🌙"
+                    };
                     if ui.button(icon).clicked() {
-                        self.config.theme = if self.config.theme == "dark" { "light".into() } else { "dark".into() };
+                        self.config.theme = if self.config.theme == "dark" {
+                            "light".into()
+                        } else {
+                            "dark".into()
+                        };
                         apply_theme(ctx, &self.config.theme);
                         config::save_config(&self.config);
                     }
-                    if ui.button("⚙").clicked() { self.show_settings = true; }
+                    if ui.button("⚙").clicked() {
+                        self.show_settings = true;
+                    }
                 });
             });
 
@@ -1056,9 +1193,11 @@ impl eframe::App for DesktopAI {
                     if let Some(info) = find_model(&self.config.model_catalog, id) {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(&info.name).size(11.0));
-                            ui.add(egui::ProgressBar::new(ds.progress)
-                                .desired_width(150.0)
-                                .text(&ds.status));
+                            ui.add(
+                                egui::ProgressBar::new(ds.progress)
+                                    .desired_width(150.0)
+                                    .text(&ds.status),
+                            );
                             if ui.button("取消").clicked() {
                                 to_cancel.push(id.clone());
                             }
@@ -1092,7 +1231,8 @@ impl eframe::App for DesktopAI {
         // ─── Model select window ───────────────────
         if self.show_model_select {
             egui::Window::new("选择模型")
-                .collapsible(false).resizable(false)
+                .collapsible(false)
+                .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     self.render_model_select(ui);
@@ -1102,7 +1242,8 @@ impl eframe::App for DesktopAI {
         // ─── Search panel ──────────────────────────
         if self.show_search_panel {
             egui::Window::new("搜索")
-                .collapsible(false).resizable(false)
+                .collapsible(false)
+                .resizable(false)
                 .anchor(egui::Align2::RIGHT_TOP, [0.0, 30.0])
                 .default_width(350.0)
                 .max_width(450.0)
@@ -1114,7 +1255,8 @@ impl eframe::App for DesktopAI {
         // ─── Knowledge Base panel ────────────────────
         if self.show_kb_panel {
             egui::Window::new("知识库")
-                .collapsible(false).resizable(false)
+                .collapsible(false)
+                .resizable(false)
                 .anchor(egui::Align2::RIGHT_TOP, [0.0, 30.0])
                 .default_width(420.0)
                 .max_width(500.0)
@@ -1126,7 +1268,8 @@ impl eframe::App for DesktopAI {
         // ─── Settings ─────────────────────────────
         if self.show_settings {
             egui::Window::new("设置")
-                .collapsible(false).resizable(false)
+                .collapsible(false)
+                .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     self.render_settings(ctx, ui);
@@ -1142,7 +1285,8 @@ impl eframe::App for DesktopAI {
                 ConfirmAction::UninstallApp => ("⚠ 卸载应用", "确定要完全卸载桌面AI吗？\n\n将删除：\n• 所有已下载模型\n• 所有对话记录\n• 应用配置文件\n• 程序文件（exe + dll）\n\n此操作不可恢复！", true),
             };
             egui::Window::new(title)
-                .collapsible(false).resizable(false)
+                .collapsible(false)
+                .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     if is_danger {
@@ -1155,12 +1299,14 @@ impl eframe::App for DesktopAI {
                         if is_danger {
                             let (btn_text, action_copy) = match action {
                                 ConfirmAction::ResetApp => ("确定重置", ConfirmAction::ResetApp),
-                                ConfirmAction::UninstallApp => ("确定卸载", ConfirmAction::UninstallApp),
+                                ConfirmAction::UninstallApp => {
+                                    ("确定卸载", ConfirmAction::UninstallApp)
+                                }
                                 _ => ("确定删除", ConfirmAction::ResetApp),
                             };
-                            let confirm_btn = egui::Button::new(
-                                RichText::new(btn_text).color(Color32::WHITE)
-                            ).fill(Color32::from_rgb(192, 57, 43));
+                            let confirm_btn =
+                                egui::Button::new(RichText::new(btn_text).color(Color32::WHITE))
+                                    .fill(Color32::from_rgb(192, 57, 43));
                             if ui.add(confirm_btn).clicked() {
                                 match action_copy {
                                     ConfirmAction::ResetApp => self.reset_app(),
@@ -1174,7 +1320,9 @@ impl eframe::App for DesktopAI {
                             if ui.button("确定").clicked() {
                                 match action {
                                     ConfirmAction::DeleteAllModels => self.delete_all_models(),
-                                    ConfirmAction::DeleteAllConversations => self.delete_all_conversations(),
+                                    ConfirmAction::DeleteAllConversations => {
+                                        self.delete_all_conversations()
+                                    }
                                     _ => {}
                                 }
                                 self.confirm_action = None;
@@ -1190,11 +1338,15 @@ impl eframe::App for DesktopAI {
 
         // ─── Error toast ───────────────────────────
         if let Some(ref err) = self.error_message.clone() {
-            egui::Window::new("错误").collapsible(false).resizable(false)
+            egui::Window::new("错误")
+                .collapsible(false)
+                .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     ui.label(err);
-                    if ui.button("确定").clicked() { self.error_message = None; }
+                    if ui.button("确定").clicked() {
+                        self.error_message = None;
+                    }
                 });
         }
 

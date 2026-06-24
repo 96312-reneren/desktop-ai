@@ -7,7 +7,9 @@ pub fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> 
     let mut current = String::new();
 
     for sent in &sentences {
-        if sent.is_empty() { continue; }
+        if sent.is_empty() {
+            continue;
+        }
 
         if char_len(&current) + char_len(sent) > chunk_size && !current.is_empty() {
             chunks.push(current.trim().to_string());
@@ -38,7 +40,9 @@ pub fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> 
     chunks
 }
 
-fn char_len(s: &str) -> usize { s.chars().count() }
+fn char_len(s: &str) -> usize {
+    s.chars().count()
+}
 
 fn split_sentences(text: &str) -> Vec<String> {
     let mut sentences = Vec::new();
@@ -76,16 +80,22 @@ fn split_sentences(text: &str) -> Vec<String> {
 }
 
 fn build_overlap(chunks: &[String], overlap: usize) -> String {
-    if overlap == 0 || chunks.is_empty() { return String::new(); }
+    if overlap == 0 || chunks.is_empty() {
+        return String::new();
+    }
     let prev = &chunks[chunks.len() - 1];
     let cc = char_len(prev);
-    if cc <= overlap { return prev.clone(); }
+    if cc <= overlap {
+        return prev.clone();
+    }
     prev.chars().skip(cc - overlap).collect()
 }
 
 fn find_split_point(text: &str, max_chars: usize) -> usize {
     let indices: Vec<(usize, char)> = text.char_indices().collect();
-    if indices.len() <= max_chars { return text.len(); }
+    if indices.len() <= max_chars {
+        return text.len();
+    }
 
     for &(i, ch) in indices[..max_chars].iter().rev() {
         if matches!(ch, '。' | '！' | '？' | '.' | '!' | '?' | '\n') {
@@ -93,9 +103,14 @@ fn find_split_point(text: &str, max_chars: usize) -> usize {
         }
     }
     for &(i, ch) in indices[..max_chars].iter().rev() {
-        if ch == ' ' { return i + 1; }
+        if ch == ' ' {
+            return i + 1;
+        }
     }
-    indices.get(max_chars - 1).map(|&(i, ch)| i + ch.len_utf8()).unwrap_or(text.len())
+    indices
+        .get(max_chars - 1)
+        .map(|&(i, ch)| i + ch.len_utf8())
+        .unwrap_or(text.len())
 }
 
 #[cfg(test)]
