@@ -1,4 +1,0 @@
-customtkinter>=5.2.0
-llama-cpp-python>=0.2.0
-requests>=2.28.0
-markdown2>=2.4.0

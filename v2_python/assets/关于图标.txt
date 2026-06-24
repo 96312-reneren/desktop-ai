@@ -1,7 +1,0 @@
-QwenDesk 资源文件夹
-请将应用程序图标文件 icon.ico 放在此目录中，打包时会自动使用。
-图标建议尺寸：256x256，支持多分辨率 ICO 格式。
-
-可用的图标生成工具：
-- https://www.icoconverter.com/
-- https://convertio.co/png-ico/

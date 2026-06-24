@@ -1,0 +1,20 @@
+# Build artifacts
+*.exe
+*.pdb
+*.lib
+*.exp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+System Volume Information/
+
+# Test temp dirs
+**/desktop_ai_*_test/
