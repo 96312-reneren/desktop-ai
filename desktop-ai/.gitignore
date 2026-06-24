@@ -1,0 +1,12 @@
+# Rust build output
+/target
+
+# Build artifacts (except runtime dependency llama.dll)
+*.lib
+*.exe
+*.pdb
+
+# Logs and editor files
+*.log
+.vscode/
+.idea/
