@@ -36,9 +36,24 @@ pub struct Config {
     pub kb_enabled: bool,
     #[serde(default)]
     pub gpu_layers: i32,
+    #[serde(default = "default_api_token")]
+    pub api_token: String,
 }
 
 fn default_api_port() -> u16 { 11434 }
+
+fn default_api_token() -> String {
+    // P0-2: generate a random-ish token on first startup so the API is
+    // not wide-open. The token is written to config.json and stays stable
+    // across restarts. If the user deletes config.json a new token is
+    // generated.
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("da-{:016x}", nanos)
+}
 
 /// Maximum chat-input graphemes (NOT bytes). Enforced via
 /// `TextEdit::char_limit` + a visual truncation hint in `chat.rs`.
@@ -72,6 +87,7 @@ impl Default for Config {
             search_enabled: false,
             kb_enabled: false,
             gpu_layers: 0,
+            api_token: default_api_token(),
         }
     }
 }

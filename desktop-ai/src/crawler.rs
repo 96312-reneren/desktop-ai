@@ -102,13 +102,49 @@ fn extract_host(url: &str) -> Option<&str> {
 }
 
 fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    // Single decimal integer: http://2130706433/ → 127.0.0.1
+    if let Ok(n) = s.parse::<u64>() {
+        if n <= u32::MAX as u64 {
+            let b = (n >> 24) as u8;
+            let c = ((n >> 16) & 0xff) as u8;
+            let d = ((n >> 8) & 0xff) as u8;
+            let e = (n & 0xff) as u8;
+            return Some([b, c, d, e]);
+        }
+    }
+    // Hex: 0x7f000001
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        if let Ok(n) = u64::from_str_radix(hex, 16) {
+            if n <= u32::MAX as u64 {
+                let b = (n >> 24) as u8;
+                let c = ((n >> 16) & 0xff) as u8;
+                let d = ((n >> 8) & 0xff) as u8;
+                let e = (n & 0xff) as u8;
+                return Some([b, c, d, e]);
+            }
+        }
+    }
+    // Dotted notation: each octet may be decimal, hex, or octal
     let parts: Vec<&str> = s.split('.').collect();
     if parts.len() != 4 { return None; }
     let mut out = [0u8; 4];
     for (i, p) in parts.iter().enumerate() {
-        out[i] = p.parse().ok()?;
+        out[i] = parse_octet(p)?;
     }
     Some(out)
+}
+
+/// Parse one IPv4 octet, accepting decimal, hex (0x prefix), and
+/// octal (0 prefix — e.g. 0177 = 127).
+fn parse_octet(s: &str) -> Option<u8> {
+    if s.is_empty() { return None; }
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        return u8::from_str_radix(hex, 16).ok();
+    }
+    if s.len() > 1 && s.starts_with('0') {
+        return u8::from_str_radix(s, 8).ok();
+    }
+    s.parse().ok()
 }
 
 fn is_private_ipv4(ip: [u8; 4]) -> bool {
@@ -147,49 +183,85 @@ fn read_local_file(path: &str) -> Result<(String, String), String> {
 
 fn fetch_url(url: &str, cfg: &CrawlConfig) -> Result<(String, String), String> {
     if is_stopped(cfg) { return Err("已取消".into()); }
+    // SSRF: validate the initial URL before the first request.
+    if is_ssrf_url(url) {
+        return Err("禁止访问内网或回环地址".into());
+    }
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(cfg.timeout_secs))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopAI/5.7")
+        // P0-5: disable auto-redirect so we can re-validate each hop.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("连接失败: {}", e))?;
 
-    // Exponential backoff on 429 (rate-limit) and 503 (overload).
-    let mut attempt = 0u32;
-    let response = loop {
-        match client.get(url).send() {
-            Ok(r) => {
-                let s = r.status().as_u16();
-                if (s == 429 || s == 503) && attempt < 3 {
-                    attempt += 1;
-                    let wait = Duration::from_millis(1000u64.saturating_mul(1 << attempt));
-                    std::thread::sleep(wait);
-                    continue;
+    let mut current_url = url.to_string();
+    let mut hops: u32 = 0;
+    let max_hops: u32 = 5;
+
+    loop {
+        if is_stopped(cfg) { return Err("已取消".into()); }
+        if hops >= max_hops { return Err("重定向次数过多".into()); }
+
+        // Exponential backoff on 429 / 503.
+        let mut attempt = 0u32;
+        let response = loop {
+            match client.get(&current_url).send() {
+                Ok(r) => {
+                    let s = r.status().as_u16();
+                    if (s == 429 || s == 503) && attempt < 3 {
+                        attempt += 1;
+                        let wait = Duration::from_millis(1000u64.saturating_mul(1 << attempt));
+                        std::thread::sleep(wait);
+                        continue;
+                    }
+                    break r;
                 }
-                break r;
+                Err(e) => return Err(format!("请求失败: {}", e)),
             }
-            Err(e) => return Err(format!("请求失败: {}", e)),
+        };
+
+        let status = response.status();
+
+        // Handle redirects manually — re-validate the target before following.
+        if status.is_redirection() {
+            let location = response.headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .ok_or("重定向缺少 Location 头".to_string())?;
+
+            // Resolve relative Location against the current URL.
+            let next = resolve_url(location.trim(), &current_url);
+            if is_ssrf_url(&next) {
+                return Err(format!(
+                    "重定向目标指向内网地址，已拦截: {} → {}",
+                    current_url, next,
+                ));
+            }
+            current_url = next;
+            hops += 1;
+            continue;
         }
-    };
 
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("HTTP {}", status.as_u16()));
+        if !status.is_success() {
+            return Err(format!("HTTP {}", status.as_u16()));
+        }
+
+        let content_type = response.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+
+        let raw = response.text()
+            .map_err(|e| format!("读取失败: {}", e))?;
+
+        if raw.len() > cfg.max_size_per_page {
+            return Err(format!("页面过大(>{:.0}MB)", cfg.max_size_per_page as f64 / 1e6));
+        }
+
+        return Ok((content_type, raw));
     }
-
-    let content_type = response.headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-
-    let raw = response.text()
-        .map_err(|e| format!("读取失败: {}", e))?;
-
-    if raw.len() > cfg.max_size_per_page {
-        return Err(format!("页面过大(>{:.0}MB)", cfg.max_size_per_page as f64 / 1e6));
-    }
-
-    Ok((content_type, raw))
 }
 
 fn is_html_content(ct: &str) -> bool {
@@ -277,6 +349,12 @@ pub fn crawl_url(src: &str) -> Result<CrawledPage, String> {
 
 fn crawl_single(src: &str, cfg: &CrawlConfig) -> Result<(CrawledPage, String), String> {
     if is_stopped(cfg) { return Err("已取消".into()); }
+    // P0-4: the seed URL itself must pass SSRF validation — the old code
+    // only checked extracted sub-links, allowing a direct crawl of
+    // `http://127.0.0.1` or `http://169.254.169.254`.
+    if is_url(src) && is_ssrf_url(src) {
+        return Err("禁止访问内网或回环地址".into());
+    }
 
     let (format, raw) = if is_file(src) {
         read_local_file(src)?
@@ -421,6 +499,20 @@ mod tests {
         assert_eq!(parse_ipv4("256.0.0.0"), None);
         assert_eq!(parse_ipv4("1.2.3"), None);
         assert_eq!(parse_ipv4("a.b.c.d"), None);
+        // Alternate representations
+        assert_eq!(parse_ipv4("2130706433"), Some([127, 0, 0, 1]));  // decimal
+        assert_eq!(parse_ipv4("0x7f000001"), Some([127, 0, 0, 1]));  // hex
+        assert_eq!(parse_ipv4("0177.0.0.1"), Some([127, 0, 0, 1]));  // octal octet
+        assert_eq!(parse_ipv4("0x7f.0.0.1"), Some([127, 0, 0, 1])); // hex octet
+    }
+
+    #[test]
+    fn test_ssrf_blocks_alternate_encodings() {
+        assert!(is_ssrf_url("http://2130706433/"));       // decimal 127.0.0.1
+        assert!(is_ssrf_url("http://0x7f000001/"));        // hex 127.0.0.1
+        assert!(is_ssrf_url("http://0177.0.0.1/"));        // octal 127.0.0.1
+        assert!(is_ssrf_url("http://0x7f.0.0.1/"));        // hex octet
+        assert!(is_ssrf_url("http://1/"));                  // decimal 0.0.0.1 (0/8 network)
     }
 
     #[test]

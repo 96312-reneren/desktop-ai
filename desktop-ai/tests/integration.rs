@@ -174,7 +174,7 @@ fn api_server_smoke_test() {
 
     let test_port = 11435u16;
     let mut server = desktop_ai::api_server::ApiServer::start(
-        Arc::clone(&inference), test_port, model_id.clone(),
+        Arc::clone(&inference), test_port, model_id.clone(), "test-token".into(),
     );
     thread::sleep(Duration::from_millis(300));
 

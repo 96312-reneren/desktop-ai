@@ -157,7 +157,7 @@ pub fn build_rag_prompt(
 /// Neutralise ChatML control tokens coming from untrusted (crawled / search)
 /// content so a malicious document cannot伪造 system / assistant turns by
 /// embedding `<|im_start|>` or `<|im_end|>`.
-fn sanitize_chatml(s: &str) -> String {
+pub fn sanitize_chatml(s: &str) -> String {
     s.replace("<|im_start|>", "<| im_start |>")
      .replace("<|im_end|>", "<| im_end |>")
 }
