@@ -10,3 +10,6 @@
 *.log
 .vscode/
 .idea/
+
+# Analysis reports (private)
+*.docx
