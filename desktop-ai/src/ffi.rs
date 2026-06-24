@@ -99,8 +99,21 @@ type PfnDecode = unsafe extern "C" fn(*mut LlamaContext, LlamaBatch) -> i32;
 type PfnSampleTokenGreedy = unsafe extern "C" fn(*mut LlamaContext, *mut LlamaToken) -> LlamaToken;
 type PfnNEmbd = unsafe extern "C" fn(*const LlamaModel) -> i32;
 type PfnGetEmbeddingsIth = unsafe extern "C" fn(*mut LlamaContext, i32) -> *mut f32;
+type PfnGetLogitsIth = unsafe extern "C" fn(*mut LlamaContext) -> *mut f32;
 type PfnFreeContext = unsafe extern "C" fn(*mut LlamaContext);
 type PfnPrintSystemInfo = unsafe extern "C" fn() -> *const c_char;
+
+// ─── Sampling API version marker ──────────────────────
+
+/// True when the loaded DLL exports `llama_get_logits_ith`, which means
+/// the *modern* sampling API (`llama_token_data_array`) is in effect.
+/// When false the DLL uses the *legacy* `&mut llama_token` signature that
+/// our `sample_greedy` wrapper targets.
+static SAMPLING_V2: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn sampling_is_v2() -> bool {
+    SAMPLING_V2.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 // ─── DLL integrity ────────────────────────────────────
 
@@ -176,6 +189,19 @@ fn check_dll_version(lib: &Library) -> Result<(), String> {
     // Log the first line of system info for audit trail.
     let first_line = trimmed.lines().next().unwrap_or(trimmed);
     log::info!("llama.cpp: {}", first_line);
+
+    // Detect sampling API version: if `llama_get_logits_ith` is exported
+    // the DLL uses the modern API (llama_token_data_array) and our
+    // `sample_greedy` wrapper is targeting the legacy signature.
+    // Log a warning so the developer knows the FFI surface is stale.
+    if unsafe { lib.get::<PfnGetLogitsIth>(b"llama_get_logits_ith") }.is_ok() {
+        SAMPLING_V2.store(true, std::sync::atomic::Ordering::Relaxed);
+        log::warn!(
+            "llama.dll exports llama_get_logits_ith (modern sampling API); \
+             sample_greedy still uses the legacy &mut llama_token signature. \
+             Verify at next DLL upgrade."
+        );
+    }
     Ok(())
 }
 
