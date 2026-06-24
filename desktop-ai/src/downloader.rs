@@ -8,7 +8,11 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 
 pub enum DownloadMsg {
-    Progress { percent: u32, downloaded_mb: f64, total_mb: f64 },
+    Progress {
+        percent: u32,
+        downloaded_mb: f64,
+        total_mb: f64,
+    },
     Status(String),
     Done,
     Error(String),
@@ -60,13 +64,17 @@ pub fn download_model(
 
     let status = response.status();
     let (total_size, mut downloaded, mut file) = if status == 206 {
-        let total = response.headers().get("content-range")
+        let total = response
+            .headers()
+            .get("content-range")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.split('/').next_back()?.parse().ok())
             .unwrap_or(0);
 
         let _ = tx.send(DownloadMsg::Status(format!(
-            "续传中 ({:.0}/{:.0} MB)...", existing_size as f64/1e6, total as f64/1e6
+            "续传中 ({:.0}/{:.0} MB)...",
+            existing_size as f64 / 1e6,
+            total as f64 / 1e6
         )));
 
         let f = OpenOptions::new().append(true).open(&dest);
@@ -78,7 +86,9 @@ pub fn download_model(
             }
         }
     } else if status == 200 {
-        let total = response.headers().get("content-length")
+        let total = response
+            .headers()
+            .get("content-length")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
@@ -138,7 +148,9 @@ pub fn download_model(
         if let Err(e) = fs::remove_file(&dest) {
             log::warn!("failed to remove corrupted download: {}", e);
         }
-        let _ = tx.send(DownloadMsg::Error("下载文件异常小，已删除。请检查网络后重试。".into()));
+        let _ = tx.send(DownloadMsg::Error(
+            "下载文件异常小，已删除。请检查网络后重试。".into(),
+        ));
         return;
     }
 
@@ -151,7 +163,8 @@ pub fn download_model(
                 if !actual.eq_ignore_ascii_case(expected.trim()) {
                     let _ = fs::remove_file(&dest);
                     let _ = tx.send(DownloadMsg::Error(format!(
-                        "SHA-256 校验失败\n期望: {}\n实际: {}", expected, actual
+                        "SHA-256 校验失败\n期望: {}\n实际: {}",
+                        expected, actual
                     )));
                     return;
                 }
@@ -171,8 +184,12 @@ fn compute_sha256(path: &Path) -> Result<String, String> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 65536];
     loop {
-        let n = file.read(&mut buf).map_err(|e| format!("读取失败: {}", e))?;
-        if n == 0 { break; }
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| format!("读取失败: {}", e))?;
+        if n == 0 {
+            break;
+        }
         hasher.update(&buf[..n]);
     }
     let hash = hasher.finalize();
@@ -191,7 +208,10 @@ mod tests {
         let path = dir.join("empty.bin");
         fs::write(&path, b"").unwrap();
         let h = compute_sha256(&path).unwrap();
-        assert_eq!(h, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            h,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -203,7 +223,10 @@ mod tests {
         let path = dir.join("abc.bin");
         fs::write(&path, b"abc").unwrap();
         let h = compute_sha256(&path).unwrap();
-        assert_eq!(h, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(
+            h,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

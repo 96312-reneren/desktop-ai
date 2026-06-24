@@ -23,9 +23,11 @@ pub struct Sandbox {
 impl Sandbox {
     pub fn new(dir: PathBuf) -> Self {
         fs::create_dir_all(&dir).ok();
-        let resolved = std::fs::canonicalize(&dir)
-            .unwrap_or_else(|_| dir.clone());
-        Self { root: dir, resolved_root: resolved }
+        let resolved = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        Self {
+            root: dir,
+            resolved_root: resolved,
+        }
     }
 
     /// Resolve a path and ensure it stays within the sandbox.
@@ -53,8 +55,8 @@ impl Sandbox {
 
         // Existing path: canonicalize both and compare as path components.
         if candidate.exists() {
-            let resolved = std::fs::canonicalize(&candidate)
-                .map_err(|e| format!("解析路径失败: {}", e))?;
+            let resolved =
+                std::fs::canonicalize(&candidate).map_err(|e| format!("解析路径失败: {}", e))?;
             if resolved.starts_with(&self.resolved_root) {
                 return Ok(resolved);
             }
@@ -94,7 +96,8 @@ impl Sandbox {
         }
         let mut f = fs::File::open(&path).map_err(|e| format!("打开失败: {}", e))?;
         let mut buf = String::new();
-        f.read_to_string(&mut buf).map_err(|e| format!("读取失败: {}", e))?;
+        f.read_to_string(&mut buf)
+            .map_err(|e| format!("读取失败: {}", e))?;
         Ok(buf)
     }
 
@@ -108,14 +111,19 @@ impl Sandbox {
             return Err("内容过大".into());
         }
         let mut f = fs::File::create(&path).map_err(|e| format!("创建文件失败: {}", e))?;
-        f.write_all(content.as_bytes()).map_err(|e| format!("写入失败: {}", e))?;
+        f.write_all(content.as_bytes())
+            .map_err(|e| format!("写入失败: {}", e))?;
         Ok(())
     }
 
     pub fn list(&self, relative: &str) -> Result<Vec<FileEntry>, String> {
         let dir = self.safe_path(relative)?;
-        if !dir.exists() { return Ok(Vec::new()); }
-        if !dir.is_dir() { return Err("不是目录".into()); }
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        if !dir.is_dir() {
+            return Err("不是目录".into());
+        }
         self._list_impl(dir)
     }
 
@@ -135,7 +143,8 @@ impl Sandbox {
                 Ok(m) => m,
                 Err(_) => continue,
             };
-            let name = path.file_name()
+            let name = path
+                .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             entries.push(FileEntry {
@@ -145,9 +154,7 @@ impl Sandbox {
                 is_dir: meta.is_dir(),
             });
         }
-        entries.sort_by(|a, b| {
-            b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name))
-        });
+        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
         Ok(entries)
     }
 
@@ -165,7 +172,9 @@ impl Sandbox {
         Ok(s)
     }
 
-    pub fn root_path(&self) -> &PathBuf { &self.root }
+    pub fn root_path(&self) -> &PathBuf {
+        &self.root
+    }
 }
 
 #[cfg(test)]

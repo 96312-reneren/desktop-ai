@@ -40,7 +40,9 @@ pub struct Config {
     pub api_token: String,
 }
 
-fn default_api_port() -> u16 { 11434 }
+fn default_api_port() -> u16 {
+    11434
+}
 
 fn default_api_token() -> String {
     // P0-2: generate a random-ish token on first startup so the API is
@@ -93,8 +95,7 @@ impl Default for Config {
 }
 
 pub fn app_dirs() -> ProjectDirs {
-    ProjectDirs::from("com", "desktopai", "DesktopAI")
-        .expect("failed to get project directories")
+    ProjectDirs::from("com", "desktopai", "DesktopAI").expect("failed to get project directories")
 }
 
 fn ensure_dir(dir: &std::path::Path, label: &str) {
@@ -160,18 +161,41 @@ pub fn load_config() -> Config {
         return config;
     };
 
-    if config.font_size < 10 { config.font_size = 14; }
-    if config.font_size > 24 { config.font_size = 14; }
-    if config.n_ctx < 512 { config.n_ctx = 512; }
-    if config.n_ctx > 32768 { config.n_ctx = 4096; }
-    if config.theme != "dark" && config.theme != "light" { config.theme = "dark".into(); }
-    if config.last_conversation_id.as_deref().map(|s| s.len() > 100).unwrap_or(false) {
+    if config.font_size < 10 {
+        config.font_size = 14;
+    }
+    if config.font_size > 24 {
+        config.font_size = 14;
+    }
+    if config.n_ctx < 512 {
+        config.n_ctx = 512;
+    }
+    if config.n_ctx > 32768 {
+        config.n_ctx = 4096;
+    }
+    if config.theme != "dark" && config.theme != "light" {
+        config.theme = "dark".into();
+    }
+    if config
+        .last_conversation_id
+        .as_deref()
+        .map(|s| s.len() > 100)
+        .unwrap_or(false)
+    {
         config.last_conversation_id = None;
     }
-    if config.system_prompt.len() > 10000 { config.system_prompt = "You are a helpful assistant.".into(); }
-    if config.api_port < 1024 { config.api_port = 11434; }
-    if config.gpu_layers < 0 { config.gpu_layers = 0; }
-    if config.gpu_layers > 999 { config.gpu_layers = 0; }
+    if config.system_prompt.len() > 10000 {
+        config.system_prompt = "You are a helpful assistant.".into();
+    }
+    if config.api_port < 1024 {
+        config.api_port = 11434;
+    }
+    if config.gpu_layers < 0 {
+        config.gpu_layers = 0;
+    }
+    if config.gpu_layers > 999 {
+        config.gpu_layers = 0;
+    }
     config
 }
 
@@ -207,10 +231,18 @@ mod tests {
         c.n_ctx = 100;
         c.theme = "red".into();
         c.system_prompt = "x".repeat(20000);
-        if c.font_size < 10 { c.font_size = 14; }
-        if c.n_ctx < 512 { c.n_ctx = 512; }
-        if c.theme != "dark" && c.theme != "light" { c.theme = "dark".into(); }
-        if c.system_prompt.len() > 10000 { c.system_prompt = "You are a helpful assistant.".into(); }
+        if c.font_size < 10 {
+            c.font_size = 14;
+        }
+        if c.n_ctx < 512 {
+            c.n_ctx = 512;
+        }
+        if c.theme != "dark" && c.theme != "light" {
+            c.theme = "dark".into();
+        }
+        if c.system_prompt.len() > 10000 {
+            c.system_prompt = "You are a helpful assistant.".into();
+        }
         assert_eq!(c.font_size, 14);
         assert_eq!(c.n_ctx, 512);
         assert_eq!(c.theme, "dark");

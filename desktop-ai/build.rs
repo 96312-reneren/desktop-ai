@@ -6,7 +6,9 @@ fn main() {
     if dll_src.exists() {
         // Copy to build output directory
         let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
-        let target_dir = std::path::Path::new(&manifest_dir).join("target").join(&profile);
+        let target_dir = std::path::Path::new(&manifest_dir)
+            .join("target")
+            .join(&profile);
 
         // Also copy to deps directory for tests
         std::fs::create_dir_all(&target_dir).ok();

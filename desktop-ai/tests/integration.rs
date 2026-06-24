@@ -17,9 +17,9 @@ use std::time::Duration;
 fn cleaner_handles_random_binary_without_panic() {
     for i in 0..1000 {
         let len = i % 4097 + 1;
-            let garbage: String = (0..len)
-                .map(|j| ((i as u8).wrapping_add(j as u8)) as char)
-                .collect();
+        let garbage: String = (0..len)
+            .map(|j| ((i as u8).wrapping_add(j as u8)) as char)
+            .collect();
         let _ = desktop_ai::cleaner::clean_text(&garbage, "text");
         let _ = desktop_ai::cleaner::clean_text(&garbage, "html");
         let _ = desktop_ai::cleaner::clean_text(&garbage, "markdown");
@@ -29,7 +29,9 @@ fn cleaner_handles_random_binary_without_panic() {
 #[test]
 fn cleaner_handles_gbk_like_bytes() {
     // Construct a GBK-like byte sequence: GBK 中文你好 = b'\xB0\xA1\xC4\xE3\xBA\xC3'
-    let raw = [0x47u8, 0x42, 0x4B, 0x20, 0xB0, 0xA1, 0xC4, 0xE3, 0x20, 0xBA, 0xC3, 0x20];
+    let raw = [
+        0x47u8, 0x42, 0x4B, 0x20, 0xB0, 0xA1, 0xC4, 0xE3, 0x20, 0xBA, 0xC3, 0x20,
+    ];
     let mixed = String::from_utf8_lossy(&raw);
     // Feed this lossy string through the cleaner — must not panic
     let (title, body) = desktop_ai::cleaner::clean_text(&mixed, "html");
@@ -47,9 +49,15 @@ fn cleaner_empty_input() {
 #[test]
 fn chunker_handles_random_long_sized_strings() {
     for size in &[0usize, 1, 50, 200, 500, 2000, 10000] {
-        let s: String = (0..*size).map(|i| match i % 5 {
-            1 => '。', 2 => '！', 3 => '？', 4 => '\n', _ => 'A'
-        }).collect();
+        let s: String = (0..*size)
+            .map(|i| match i % 5 {
+                1 => '。',
+                2 => '！',
+                3 => '？',
+                4 => '\n',
+                _ => 'A',
+            })
+            .collect();
         let chunks = desktop_ai::chunker::chunk_text(&s, 500, 50);
         for c in &chunks {
             let cc = c.chars().count();
@@ -65,7 +73,11 @@ fn chunker_huge_repeated_line() {
     for c in &chunks {
         assert!(c.chars().count() <= 500);
     }
-    assert!(chunks.len() >= 950, "expected ~1000 chunks, got {}", chunks.len());
+    assert!(
+        chunks.len() >= 950,
+        "expected ~1000 chunks, got {}",
+        chunks.len()
+    );
 }
 
 // ─── 3. Concurrent conversation stress test ───────────
@@ -91,7 +103,8 @@ fn concurrent_conversation_crud_no_race() {
     thread::sleep(Duration::from_millis(600));
     done.store(true, Ordering::Relaxed);
     for h in handles {
-        h.join().expect("thread panicked during concurrent conversation ops");
+        h.join()
+            .expect("thread panicked during concurrent conversation ops");
     }
 }
 
@@ -121,9 +134,10 @@ fn config_save_load_roundtrip() {
 fn model_available() -> bool {
     std::path::Path::new("llama.dll").exists()
         && std::fs::read_dir(config::models_dir())
-            .map(|iter| iter.flatten().any(|e| {
-                e.file_name().to_string_lossy().ends_with(".gguf")
-            }))
+            .map(|iter| {
+                iter.flatten()
+                    .any(|e| e.file_name().to_string_lossy().ends_with(".gguf"))
+            })
             .unwrap_or(false)
 }
 
@@ -162,7 +176,9 @@ fn api_server_smoke_test() {
 
     let inf = match desktop_ai::inference::LlamaInference::load_ex(
         &model_path.to_string_lossy(),
-        2048, 4, config.gpu_layers,
+        2048,
+        4,
+        config.gpu_layers,
     ) {
         Ok(i) => i,
         Err(e) => {
@@ -174,7 +190,10 @@ fn api_server_smoke_test() {
 
     let test_port = 11435u16;
     let mut server = desktop_ai::api_server::ApiServer::start(
-        Arc::clone(&inference), test_port, model_id.clone(), "test-token".into(),
+        Arc::clone(&inference),
+        test_port,
+        model_id.clone(),
+        "test-token".into(),
     );
     thread::sleep(Duration::from_millis(300));
 
@@ -184,22 +203,28 @@ fn api_server_smoke_test() {
         .expect("build client");
 
     // Health
-    let resp = client.get(format!("http://127.0.0.1:{}/health", test_port))
-        .send().expect("health request");
+    let resp = client
+        .get(format!("http://127.0.0.1:{}/health", test_port))
+        .send()
+        .expect("health request");
     assert_eq!(resp.status().as_u16(), 200);
     let body: serde_json::Value = resp.json().expect("parse health json");
     assert_eq!(body["status"], "ok");
 
     // Ready
-    let resp = client.get(format!("http://127.0.0.1:{}/ready", test_port))
-        .send().expect("ready request");
+    let resp = client
+        .get(format!("http://127.0.0.1:{}/ready", test_port))
+        .send()
+        .expect("ready request");
     assert_eq!(resp.status().as_u16(), 200);
     let body: serde_json::Value = resp.json().expect("parse ready json");
     assert_eq!(body["status"], "ready");
 
     // v1/models
-    let resp = client.get(format!("http://127.0.0.1:{}/v1/models", test_port))
-        .send().expect("models request");
+    let resp = client
+        .get(format!("http://127.0.0.1:{}/v1/models", test_port))
+        .send()
+        .expect("models request");
     assert_eq!(resp.status().as_u16(), 200);
 
     server.stop();

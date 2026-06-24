@@ -1,13 +1,14 @@
 // DesktopAI sub-module: knowledge-base panel + search panel
-use egui::{Color32, RichText, ScrollArea, TextEdit, vec2};
 use super::DesktopAI;
+use egui::{vec2, Color32, RichText, ScrollArea, TextEdit};
 
 impl DesktopAI {
     pub(crate) fn render_search_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.add_sized(vec2(ui.available_width() - 60.0, 24.0),
-                TextEdit::singleline(&mut self.search_query)
-                    .hint_text("输入搜索关键词..."));
+            ui.add_sized(
+                vec2(ui.available_width() - 60.0, 24.0),
+                TextEdit::singleline(&mut self.search_query).hint_text("输入搜索关键词..."),
+            );
             if (ui.button("搜索").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)))
                 && !self.search_loading
             {
@@ -26,15 +27,21 @@ impl DesktopAI {
 
         if !self.search_results.is_empty() {
             ui.separator();
-            ui.label(RichText::new(format!("{} 条结果", self.search_results.len()))
-                .size(11.0).color(Color32::GRAY));
+            ui.label(
+                RichText::new(format!("{} 条结果", self.search_results.len()))
+                    .size(11.0)
+                    .color(Color32::GRAY),
+            );
             ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
                 for result in &self.search_results {
                     ui.group(|ui| {
                         ui.label(RichText::new(&result.title).size(12.0).strong());
                         if !result.url.is_empty() {
-                            ui.label(RichText::new(&result.url).size(10.0)
-                                .color(Color32::from_rgb(100, 180, 255)));
+                            ui.label(
+                                RichText::new(&result.url)
+                                    .size(10.0)
+                                    .color(Color32::from_rgb(100, 180, 255)),
+                            );
                         }
                         if !result.snippet.is_empty() {
                             ui.label(RichText::new(&result.snippet).size(11.0));
@@ -51,7 +58,14 @@ impl DesktopAI {
         ui.horizontal(|ui| {
             ui.heading(RichText::new("知识库").size(14.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(RichText::new("×").size(16.0).color(Color32::from_rgb(200, 80, 80))).clicked() {
+                if ui
+                    .button(
+                        RichText::new("×")
+                            .size(16.0)
+                            .color(Color32::from_rgb(200, 80, 80)),
+                    )
+                    .clicked()
+                {
                     self.show_kb_panel = false;
                 }
             });
