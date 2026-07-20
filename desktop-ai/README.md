@@ -324,3 +324,28 @@ THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPL
 - 单模型实例（切换需卸载）
 - 无系统托盘最小化
 - 无代码语法高亮（计划引入 syntect）
+
+##补充/重要提示
+关于 PDF 解析稳定性的说明
+
+本软件为纯本地离线工具，所有 PDF 解析均在您的电脑本地完成，不涉及任何网络传输。
+
+近期安全社区报告了底层 PDF 解析库（lopdf）在处理极端恶意嵌套对象时存在导致程序闪退的理论风险。请注意：
+
+1. 触发条件：仅当您主动打开一个刻意构造的、极度畸形的恶意 PDF 时可能触发。
+2. 实际影响：最坏情况是该软件进程闪退。不影响您的操作系统、其他文件及个人数据，重启软件即可恢复正常。
+3. 为何未修复：该解析库的官方安全修复版涉及底层 API 大规模重构，强制升级将导致现有正常 PDF 文档出现乱码或无法打开等更严重的兼容性问题。为保障 99.9% 正常文档的稳定性，我们暂缓了本次升级。
+
+建议：请仅从可信来源获取 PDF 文件。如遇闪退，重启软件即可，您的数据不会丢失。
+
+##Known Issue: PDF Parsing Stack Overflow (RUSTSEC-2026-0187)
+
+Our PDF extraction relies on the popular lopdf crate. Version 0.34.x has a theoretical DoS vulnerability when parsing deeply nested objects.
+
+We are aware of this, but we have decided not to hotfix it for now due to the following reasons:
+
+· Breaking Changes: The patched version (lopdf >= 0.42.0) introduced significant API breaking changes. Upgrading would require rewriting our core extraction logic and extensive regression testing.
+· Threat Model Mismatch: Since this is a local offline client, the attack vector relies entirely on the user feeding a malicious file to themselves. (Self-inflicted DoS).
+· Trade-off: We prioritize ensuring that all standard, legitimate PDFs open flawlessly over fixing an edge-case crash that only affects malicious files.
+
+We will upgrade this dependency as soon as the upstream pdf-extract team releases a stable adaptation. Until then, please ensure your PDFs come from trusted sources.
