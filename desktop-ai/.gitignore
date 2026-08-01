@@ -13,3 +13,6 @@
 
 # Analysis reports (private)
 *.docx
+
+# AI tool artifacts
+.qoder/
