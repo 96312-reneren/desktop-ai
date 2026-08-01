@@ -1,6 +1,7 @@
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
+use crate::db::Db;
 use crate::embedding::EmbeddingEngine;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,37 +25,73 @@ pub struct StoredDocument {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct VectorStoreData {
-    documents: Vec<StoredDocument>,
+/// SQLite-backed vector store.
+///
+/// Concurrency: embedding inference happens *before* taking the DB lock;
+/// inside the lock only short SQL transactions run (see [`crate::db`]).
+pub struct VectorStore {
+    db: Db,
+    engine: Option<EmbeddingEngine>,
 }
 
-pub struct VectorStore {
-    path: PathBuf,
-    data: VectorStoreData,
-    engine: Option<EmbeddingEngine>,
+const SCHEMA_VERSION: i64 = 1;
+
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS documents (
+    id         TEXT PRIMARY KEY,
+    title      TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chunks (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id    TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    idx       INTEGER NOT NULL,
+    text      TEXT NOT NULL,
+    embedding BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);
+";
+
+fn embed_to_blob(v: &[f32]) -> Vec<u8> {
+    let mut bytes = vec![0u8; v.len() * 4];
+    for (i, x) in v.iter().enumerate() {
+        bytes[i * 4..i * 4 + 4].copy_from_slice(&x.to_le_bytes());
+    }
+    bytes
+}
+
+fn blob_to_embed(bytes: &[u8]) -> Vec<f32> {
+    let mut out = vec![0f32; bytes.len() / 4];
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.as_mut_ptr() as *mut u8, bytes.len());
+    }
+    out
 }
 
 impl VectorStore {
     pub fn new(store_dir: &std::path::Path) -> Self {
-        let path = store_dir.join("vector_store.json");
-        let data = if path.exists() {
-            std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or(VectorStoreData {
-                    documents: Vec::new(),
-                })
-        } else {
-            VectorStoreData {
-                documents: Vec::new(),
+        let db = crate::db::open(&store_dir.join("kb.db")).unwrap_or_else(|e| {
+            log::error!("failed to open kb.db: {} — using in-memory fallback", e);
+            crate::db::open(&std::env::temp_dir().join(format!(
+                "desktop_ai_kb_fallback_{}.db",
+                std::process::id()
+            )))
+            .expect("fallback kb db")
+        });
+        if let Err(e) = db.with_conn(|c| {
+            c.execute_batch(SCHEMA)?;
+            let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+            if version < SCHEMA_VERSION {
+                if let Err(e) = migrate_from_json(store_dir, c) {
+                    log::error!("kb JSON migration failed: {}", e);
+                }
+                c.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             }
-        };
-        Self {
-            path,
-            data,
-            engine: None,
+            Ok(())
+        }) {
+            log::error!("kb schema init failed: {}", e);
         }
+        Self { db, engine: None }
     }
 
     /// Install an embedding backend.
@@ -73,8 +110,10 @@ impl VectorStore {
         self.engine.is_some()
     }
 
-    pub fn documents(&self) -> &[StoredDocument] {
-        &self.data.documents
+    pub fn documents(&self) -> Vec<StoredDocument> {
+        self.db
+            .with_conn(|c| load_all_documents(c))
+            .unwrap_or_default()
     }
 
     pub fn add_document(
@@ -90,38 +129,48 @@ impl VectorStore {
             return Err("no content to index".into());
         }
 
-        let id = format!("doc_{}", chrono::Utc::now().timestamp_millis());
-        let mut stored_chunks = Vec::new();
-
+        // Heavy work (embedding) happens outside the DB lock.
+        let mut embedded: Vec<(String, Vec<f32>)> = Vec::with_capacity(chunks.len());
         for chunk in &chunks {
             let vec = engine.embed(chunk);
-            stored_chunks.push(StoredChunk {
-                text: chunk.clone(),
-                embedding: vec,
-            });
+            embedded.push((chunk.clone(), vec));
         }
 
-        self.data.documents.push(StoredDocument {
-            id,
-            title: title.to_string(),
-            chunks: stored_chunks,
-            created_at: chrono::Utc::now().to_rfc3339(),
-        });
+        let id = format!("doc_{}", chrono::Utc::now().timestamp_millis());
+        let created_at = chrono::Utc::now().to_rfc3339();
+        let title = title.to_string();
 
-        self.save()?;
-        Ok(())
+        self.db.with_conn(|c| {
+            let tx = c.transaction()?;
+            tx.execute(
+                "INSERT INTO documents (id, title, created_at) VALUES (?1, ?2, ?3)",
+                params![id, title, created_at],
+            )?;
+            {
+                let mut stmt = tx.prepare(
+                    "INSERT INTO chunks (doc_id, idx, text, embedding) VALUES (?1, ?2, ?3, ?4)",
+                )?;
+                for (i, (chunk_text, vec)) in embedded.iter().enumerate() {
+                    stmt.execute(params![id, i as i64, chunk_text, embed_to_blob(vec)])?;
+                }
+            }
+            tx.commit()
+        })
     }
 
     pub fn delete_document(&mut self, id: &str) -> Result<(), String> {
-        self.data.documents.retain(|d| d.id != id);
-        self.save()
+        self.db.with_conn(|c| {
+            c.execute("DELETE FROM documents WHERE id = ?1", params![id])?;
+            Ok(())
+        })
     }
 
     #[allow(dead_code)]
     pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>, String> {
         let engine = self.engine.as_ref().ok_or("embedding engine not loaded")?;
         let query_vec = engine.embed(query);
-        Ok(search_by_vector(&self.data.documents, &query_vec, top_k))
+        let docs = self.documents();
+        Ok(search_by_vector(&docs, &query_vec, top_k))
     }
 
     pub fn embed_query(&self, query: &str) -> Result<Vec<f32>, String> {
@@ -130,18 +179,100 @@ impl VectorStore {
     }
 
     pub fn documents_snapshot(&self) -> Vec<StoredDocument> {
-        self.data.documents.clone()
+        self.documents()
+    }
+}
+
+fn load_all_documents(c: &Connection) -> rusqlite::Result<Vec<StoredDocument>> {
+    let mut stmt = c.prepare("SELECT id, title, created_at FROM documents ORDER BY created_at")?;
+    let rows: Vec<(String, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    let mut docs = Vec::with_capacity(rows.len());
+    for (id, title, created_at) in rows {
+        let mut chunks = Vec::new();
+        {
+            let mut stmt = c.prepare(
+                "SELECT text, embedding FROM chunks WHERE doc_id = ?1 ORDER BY idx",
+            )?;
+            let rows = stmt.query_map(params![id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+            for row in rows {
+                let (text, blob) = row?;
+                chunks.push(StoredChunk {
+                    text,
+                    embedding: blob_to_embed(&blob),
+                });
+            }
+        }
+        docs.push(StoredDocument {
+            id,
+            title,
+            chunks,
+            created_at,
+        });
+    }
+    Ok(docs)
+}
+
+/// Import the legacy `vector_store.json` (if present) into the SQLite store.
+fn migrate_from_json(store_dir: &std::path::Path, c: &mut Connection) -> Result<(), String> {
+    let legacy_path = store_dir.join("vector_store.json");
+    if !legacy_path.exists() {
+        return Ok(());
+    }
+    #[derive(Deserialize)]
+    struct LegacyData {
+        #[serde(default)]
+        documents: Vec<LegacyDocument>,
+    }
+    #[derive(Deserialize)]
+    struct LegacyDocument {
+        id: String,
+        title: String,
+        #[serde(default)]
+        chunks: Vec<LegacyChunk>,
+        #[serde(default)]
+        created_at: String,
+    }
+    #[derive(Deserialize)]
+    struct LegacyChunk {
+        text: String,
+        embedding: Vec<f32>,
     }
 
-    fn save(&self) -> Result<(), String> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
-        }
-        let json =
-            serde_json::to_string_pretty(&self.data).map_err(|e| format!("serialize: {}", e))?;
-        std::fs::write(&self.path, &json).map_err(|e| format!("write: {}", e))?;
-        Ok(())
+    let raw = std::fs::read_to_string(&legacy_path).map_err(|e| format!("read legacy kb: {}", e))?;
+    let data: LegacyData =
+        serde_json::from_str(&raw).map_err(|e| format!("parse legacy kb: {}", e))?;
+    if data.documents.is_empty() {
+        return Ok(());
     }
+
+    let tx = c.transaction().map_err(|e| e.to_string())?;
+    for doc in &data.documents {
+        let created_at = if doc.created_at.is_empty() {
+            "1970-01-01T00:00:00Z".to_string()
+        } else {
+            doc.created_at.clone()
+        };
+        tx.execute(
+            "INSERT OR IGNORE INTO documents (id, title, created_at) VALUES (?1, ?2, ?3)",
+            params![doc.id, doc.title, created_at],
+        )
+        .map_err(|e| e.to_string())?;
+        let mut stmt = tx
+            .prepare("INSERT INTO chunks (doc_id, idx, text, embedding) VALUES (?1, ?2, ?3, ?4)")
+            .map_err(|e| e.to_string())?;
+        for (i, chunk) in doc.chunks.iter().enumerate() {
+            stmt.execute(params![doc.id, i as i64, chunk.text, embed_to_blob(&chunk.embedding)])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    log::info!(
+        "migrated {} documents from vector_store.json",
+        data.documents.len()
+    );
+    Ok(())
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -189,4 +320,136 @@ pub fn search_by_vector(
             source,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_store() -> (VectorStore, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "desktop_ai_kb_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = VectorStore::new(&dir);
+        (store, dir)
+    }
+
+    #[test]
+    fn blob_roundtrip() {
+        let v = vec![0.1f32, -0.5, 3.14, 0.0, 1e-8];
+        let blob = embed_to_blob(&v);
+        let back = blob_to_embed(&blob);
+        assert_eq!(v, back);
+    }
+
+    #[test]
+    fn empty_store_has_no_documents() {
+        let (store, dir) = temp_store();
+        assert!(store.documents().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn add_and_delete_document_without_engine_is_error() {
+        let (mut store, dir) = temp_store();
+        assert!(store.add_document("t", "body", 500, 50).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn search_ranking_matches_naive_expectation() {
+        let docs = vec![StoredDocument {
+            id: "a".into(),
+            title: "文档A".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            chunks: vec![
+                StoredChunk {
+                    text: "苹果".into(),
+                    embedding: vec![1.0, 0.0, 0.0],
+                },
+                StoredChunk {
+                    text: "香蕉".into(),
+                    embedding: vec![0.0, 1.0, 0.0],
+                },
+            ],
+        }];
+        let hits = search_by_vector(&docs, &[1.0, 0.0, 0.0], 1);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk, "苹果");
+        assert!((hits[0].score - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn search_topk_and_title_truncation() {
+        let long_title = "x".repeat(60);
+        let docs = vec![StoredDocument {
+            id: "a".into(),
+            title: long_title.clone(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            chunks: vec![StoredChunk {
+                text: "t".into(),
+                embedding: vec![1.0, 0.0],
+            }],
+        }];
+        let hits = search_by_vector(&docs, &[0.0, 1.0], 1);
+        assert_eq!(hits[0].source.len(), 43);
+        assert!(hits[0].source.ends_with("..."));
+    }
+
+    #[test]
+    fn legacy_json_migration() {
+        let dir = std::env::temp_dir().join(format!(
+            "desktop_ai_kb_mig_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let json = r#"{
+            "documents": [{
+                "id": "doc_old_1",
+                "title": "旧文档",
+                "created_at": "2025-01-01T00:00:00Z",
+                "chunks": [{
+                    "text": "旧文本",
+                    "embedding": [1.0, 0.0, 0.0]
+                }]
+            }]
+        }"#;
+        std::fs::write(dir.join("vector_store.json"), json).unwrap();
+        let store = VectorStore::new(&dir);
+        let docs = store.documents();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].id, "doc_old_1");
+        assert_eq!(docs[0].chunks.len(), 1);
+        assert_eq!(docs[0].chunks[0].text, "旧文本");
+        assert_eq!(docs[0].chunks[0].embedding, vec![1.0, 0.0, 0.0]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn persistence_across_reopen() {
+        let dir = std::env::temp_dir().join(format!(
+            "desktop_ai_kb_persist_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let store = VectorStore::new(&dir);
+            let _ = &store;
+        }
+        let store2 = VectorStore::new(&dir);
+        assert!(store2.documents().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

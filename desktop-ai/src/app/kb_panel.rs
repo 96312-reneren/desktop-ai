@@ -136,7 +136,7 @@ impl DesktopAI {
 
         ui.separator();
         ui.label(RichText::new("已索引文档").size(13.0).strong());
-        let docs = self.vector_store.documents().to_vec();
+        let docs = self.vector_store.documents();
         if docs.is_empty() {
             ui.label(RichText::new("暂无文档。通过上方按钮选择文件或粘贴文本。")
                 .size(11.0).color(Color32::GRAY));

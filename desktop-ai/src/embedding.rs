@@ -60,8 +60,10 @@ impl EmbeddingEngine {
                 return vec![0.0; self.dim];
             }
 
-            // Average pooling: get embedding for each token and average
-            let embd_ptr = ffi::get_embeddings_ith(self.ctx, n_tokens - 1);
+            // Decoder-model embedding: use the hidden state of the LAST token
+            // (index -1 = most recent embedding; a positive index would point
+            // past the single output of the final llama_decode call).
+            let embd_ptr = ffi::get_embeddings_ith(self.ctx, -1);
             if embd_ptr.is_null() {
                 return vec![0.0; self.dim];
             }
