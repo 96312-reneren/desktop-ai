@@ -5,6 +5,7 @@ pub mod cleaner;
 pub mod config;
 pub mod conversation;
 pub mod crawler;
+pub mod db;
 pub mod downloader;
 pub mod embedding;
 pub mod ffi;

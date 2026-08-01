@@ -964,7 +964,7 @@ impl DesktopAI {
             }
         };
         match Conversation::import_json(&content) {
-            Ok(conv) => {
+            Ok(mut conv) => {
                 conv.save();
                 self.current_conv = conv;
                 self.error_message = Some("导入成功".into());
@@ -996,12 +996,7 @@ impl DesktopAI {
     }
 
     pub(crate) fn delete_all_conversations(&mut self) {
-        let dir = config::conversations_dir();
-        if dir.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&dir) {
-                log::warn!("failed to delete conversations dir: {}", e);
-            }
-        }
+        Conversation::delete_all();
         self.current_conv = Conversation::new();
         self.gen = None;
         self.status_message = "所有对话已删除".into();
@@ -1036,23 +1031,40 @@ impl DesktopAI {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_default();
-        let batch_path = exe_dir.join("_uninstall.bat");
-        if let Ok(mut f) = std::fs::File::create(&batch_path) {
-            use std::io::Write;
-            let _ = writeln!(f, "@echo off");
-            let _ = writeln!(f, "echo 桌面AI 卸载中...");
-            let _ = writeln!(f, "timeout /t 2 /nobreak >nul");
-            let _ = writeln!(f, "del /f /q \"{}\"", exe_path.display());
-            let _ = writeln!(f, "del /f /q \"{}\"", exe_dir.join("llama.dll").display());
-            let _ = writeln!(f, "del /f /q \"{}\"", batch_path.display());
-            let _ = writeln!(f, "echo 桌面AI 已卸载。");
-            let _ = writeln!(f, "timeout /t 2 /nobreak >nul");
+        let lib_path = exe_dir.join(crate::ffi::llama_library_name());
+
+        #[cfg(windows)]
+        {
+            // Windows cannot delete a running executable, so hand the
+            // deletion off to a background batch script.
+            let batch_path = exe_dir.join("_uninstall.bat");
+            if let Ok(mut f) = std::fs::File::create(&batch_path) {
+                use std::io::Write;
+                let _ = writeln!(f, "@echo off");
+                let _ = writeln!(f, "echo 桌面AI 卸载中...");
+                let _ = writeln!(f, "timeout /t 2 /nobreak >nul");
+                let _ = writeln!(f, "del /f /q \"{}\"", exe_path.display());
+                let _ = writeln!(f, "del /f /q \"{}\"", lib_path.display());
+                let _ = writeln!(f, "del /f /q \"{}\"", batch_path.display());
+                let _ = writeln!(f, "echo 桌面AI 已卸载。");
+                let _ = writeln!(f, "timeout /t 2 /nobreak >nul");
+            }
+
+            let _ = std::process::Command::new("cmd")
+                .args(["/C", "start", "/MIN", ""])
+                .arg(batch_path.to_string_lossy().to_string())
+                .spawn();
         }
 
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "/MIN", ""])
-            .arg(batch_path.to_string_lossy().to_string())
-            .spawn();
+        #[cfg(not(windows))]
+        {
+            // Unix allows unlinking an executable that is currently running.
+            let _ = std::fs::remove_file(&exe_path);
+            let _ = std::fs::remove_file(&lib_path);
+            for name in ["libllama.so.0", "libggml.so.0", "libggml-base.so.0"] {
+                let _ = std::fs::remove_file(exe_dir.join(name));
+            }
+        }
 
         std::process::exit(0);
     }

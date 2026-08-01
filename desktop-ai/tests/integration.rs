@@ -132,7 +132,7 @@ fn config_save_load_roundtrip() {
 // ─── 5. API smoke test (requires model) ────────────────
 
 fn model_available() -> bool {
-    std::path::Path::new("llama.dll").exists()
+    std::path::Path::new(desktop_ai::ffi::llama_library_name()).exists()
         && std::fs::read_dir(config::models_dir())
             .map(|iter| {
                 iter.flatten()

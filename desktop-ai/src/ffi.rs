@@ -7,6 +7,8 @@ use std::ffi::{c_char, c_void, CStr, CString};
 #[repr(C)]
 #[derive(Clone)]
 pub struct LlamaModelParams {
+    pub devices: *const c_void,
+    pub tensor_buft_overrides: *const c_void,
     pub n_gpu_layers: i32,
     pub split_mode: i32,
     pub main_gpu: i32,
@@ -16,8 +18,12 @@ pub struct LlamaModelParams {
     pub kv_overrides: *const c_void,
     pub vocab_only: bool,
     pub use_mmap: bool,
+    pub use_direct_io: bool,
     pub use_mlock: bool,
     pub check_tensors: bool,
+    pub use_extra_bufts: bool,
+    pub no_host: bool,
+    pub no_alloc: bool,
 }
 
 impl Default for LlamaModelParams {
@@ -29,15 +35,16 @@ impl Default for LlamaModelParams {
 #[repr(C)]
 #[derive(Clone)]
 pub struct LlamaContextParams {
-    pub seed: u32,
     pub n_ctx: u32,
     pub n_batch: u32,
     pub n_ubatch: u32,
     pub n_seq_max: u32,
-    pub n_threads: u32,
-    pub n_threads_batch: u32,
+    pub n_threads: i32,
+    pub n_threads_batch: i32,
     pub rope_scaling_type: i32,
     pub pooling_type: i32,
+    pub attention_type: i32,
+    pub flash_attn_type: i32,
     pub rope_freq_base: f32,
     pub rope_freq_scale: f32,
     pub yarn_ext_factor: f32,
@@ -46,11 +53,20 @@ pub struct LlamaContextParams {
     pub yarn_beta_slow: f32,
     pub yarn_orig_ctx: u32,
     pub defrag_thold: f32,
-    pub logits_all: bool,
+    pub cb_eval: *const c_void,
+    pub cb_eval_user_data: *const c_void,
+    pub type_k: i32,
+    pub type_v: i32,
+    pub abort_callback: *const c_void,
+    pub abort_callback_data: *const c_void,
     pub embeddings: bool,
     pub offload_kqv: bool,
-    pub flash_attn: bool,
     pub no_perf: bool,
+    pub op_offload: bool,
+    pub swa_full: bool,
+    pub kv_unified: bool,
+    pub samplers: *const c_void,
+    pub n_samplers: usize,
 }
 
 impl Default for LlamaContextParams {
@@ -62,6 +78,7 @@ impl Default for LlamaContextParams {
 pub type LlamaToken = i32;
 pub type LlamaModel = c_void;
 pub type LlamaContext = c_void;
+pub type LlamaSampler = c_void;
 
 #[repr(C)]
 pub struct LlamaBatch {
@@ -99,20 +116,68 @@ type PfnDecode = unsafe extern "C" fn(*mut LlamaContext, LlamaBatch) -> i32;
 type PfnSampleTokenGreedy = unsafe extern "C" fn(*mut LlamaContext, *mut LlamaToken) -> LlamaToken;
 type PfnNEmbd = unsafe extern "C" fn(*const LlamaModel) -> i32;
 type PfnGetEmbeddingsIth = unsafe extern "C" fn(*mut LlamaContext, i32) -> *mut f32;
-type PfnGetLogitsIth = unsafe extern "C" fn(*mut LlamaContext) -> *mut f32;
 type PfnFreeContext = unsafe extern "C" fn(*mut LlamaContext);
 type PfnPrintSystemInfo = unsafe extern "C" fn() -> *const c_char;
 
+// ─── Vocab API (llama.cpp ≥ b4xxx) ─────────────────────
+
+type PfnGetVocab = unsafe extern "C" fn(*const LlamaModel) -> *const c_void;
+type PfnVocabNTokens = unsafe extern "C" fn(*const c_void) -> i32;
+type PfnBackendInit = unsafe extern "C" fn();
+
+// ─── Modern sampler API (llama.cpp ≥ b4xxx) ─────────────
+
+type PfnSamplerInitGreedy = unsafe extern "C" fn() -> *mut LlamaSampler;
+type PfnSamplerFree = unsafe extern "C" fn(*mut LlamaSampler);
+/// Sample and accept a token from the idx-th output of the last evaluation.
+type PfnSamplerSample = unsafe extern "C" fn(*mut LlamaSampler, *mut LlamaContext, i32) -> LlamaToken;
+
 // ─── Sampling API version marker ──────────────────────
 
-/// True when the loaded DLL exports `llama_get_logits_ith`, which means
-/// the *modern* sampling API (`llama_token_data_array`) is in effect.
-/// When false the DLL uses the *legacy* `&mut llama_token` signature that
-/// our `sample_greedy` wrapper targets.
+/// True when the loaded library exports the modern `llama_sampler_*` API
+/// (llama.cpp ≥ b4xxx). In that case `sample_greedy` uses a registered
+/// greedy sampler via `llama_sampler_sample` instead of the legacy
+/// `llama_sample_token_greedy(ctx, &mut token)` wrapper.
 static SAMPLING_V2: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True when the library exposes the vocab API (`llama_model_get_vocab`).
+/// Modern llama.cpp (≥ b4xxx) takes `llama_vocab*` in tokenize /
+/// token_to_piece / n_vocab instead of `llama_model*`.
+static MODERN_VOCAB_API: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Greedy samplers (modern API), keyed by chat context pointer.
+/// Pointers are stored as usize so the map is `Send + Sync`.
+static SAMPLER_REGISTRY: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<usize, usize>>,
+> = std::sync::LazyLock::new(|| {
+    std::sync::Mutex::new(std::collections::HashMap::new())
+});
 
 pub fn sampling_is_v2() -> bool {
     SAMPLING_V2.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+// ─── Platform library name ─────────────────────────────
+
+/// Filename of the llama shared library for the current platform:
+/// `llama.dll` (Windows), `libllama.dylib` (macOS), `libllama.so` (Linux/Unix).
+pub fn llama_library_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "llama.dll"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "libllama.dylib"
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        "libllama.so"
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    {
+        "llama"
+    }
 }
 
 // ─── DLL integrity ────────────────────────────────────
@@ -123,7 +188,7 @@ fn verify_dll(path: &str) -> Result<(), String> {
     let meta = std::fs::metadata(path).map_err(|e| format!("cannot access {}: {}", path, e))?;
     if meta.len() < LLAMA_DLL_MIN_SIZE {
         return Err(format!(
-            "llama.dll appears corrupted (size {} < {} bytes)",
+            "llama library appears corrupted (size {} < {} bytes)",
             meta.len(),
             LLAMA_DLL_MIN_SIZE
         ));
@@ -136,10 +201,27 @@ fn verify_dll(path: &str) -> Result<(), String> {
 static LLAMA_LIB: OnceCell<Library> = OnceCell::new();
 
 fn lib() -> &'static Library {
-    LLAMA_LIB.get().expect("llama.dll not loaded")
+    LLAMA_LIB.get().expect("llama library not loaded")
 }
 
-/// Load llama.dll with integrity verification. Must be called once before any other function.
+/// Resolve the llama library path. On Linux/macOS `dlopen` does not search
+/// the executable's directory, so prefer an absolute path next to the exe;
+/// fall back to the bare filename (dev runs / tests with CWD-based loading).
+fn resolve_lib_path() -> std::path::PathBuf {
+    let lib_name = llama_library_name();
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_default();
+    let candidate = exe_dir.join(lib_name);
+    if candidate.exists() {
+        candidate
+    } else {
+        std::path::PathBuf::from(lib_name)
+    }
+}
+
+/// Load the platform llama shared library with integrity verification. Must be called once before any other function.
 ///
 /// Performs three checks in order:
 /// 1. File size ≥ 1 MB (`verify_dll`).
@@ -150,57 +232,79 @@ fn lib() -> &'static Library {
 /// # Safety
 ///
 /// This function must be called exactly once before any other FFI function.
-/// The DLL is loaded into a global static and shared across all subsequent calls.
+/// The library is loaded into a global static and shared across all subsequent calls.
 pub unsafe fn init() -> Result<(), String> {
     LLAMA_LIB
         .get_or_try_init(|| {
-            verify_dll("llama.dll")?;
-            let lib =
-                Library::new("llama.dll").map_err(|e| format!("加载 llama.dll 失败: {}", e))?;
+            let lib_path = resolve_lib_path();
+            let lib_path_str = lib_path.to_string_lossy();
+            verify_dll(&lib_path_str)?;
+            let lib = Library::new(lib_path_str.as_ref())
+                .map_err(|e| format!("加载 {} 失败: {}", lib_path_str, e))?;
             check_dll_version(&lib)?;
             Ok(lib)
         })
         .map(|_| ())
 }
 
-/// Probe the freshly loaded DLL by calling `llama_print_system_info`.
+/// Probe the freshly loaded library by calling `llama_print_system_info`.
 /// If the symbol is missing, returns NULL, or emits an empty / whitespace-only
 /// string, the DLL is considered incompatible — the user must re-download the
 /// complete package.
 fn check_dll_version(lib: &Library) -> Result<(), String> {
     let sym: Symbol<PfnPrintSystemInfo> =
         unsafe { lib.get(b"llama_print_system_info") }.map_err(|_| {
-            "llama.dll 缺少关键符号 (llama_print_system_info)，\
-         版本可能不兼容，请重新下载完整包"
+            "llama 库缺少关键符号 (llama_print_system_info)，\
+          版本可能不兼容，请重新下载完整包"
                 .to_string()
         })?;
 
     let ptr = unsafe { sym() };
     if ptr.is_null() {
-        return Err("llama.dll 损坏或不兼容，请重新下载完整包".into());
+        return Err("llama 库损坏或不兼容，请重新下载完整包".into());
     }
 
     let info = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().to_string();
     let trimmed = info.trim();
     if trimmed.is_empty() {
-        return Err("llama.dll 损坏或不兼容，请重新下载完整包".into());
+        return Err("llama 库损坏或不兼容，请重新下载完整包".into());
     }
 
     // Log the first line of system info for audit trail.
     let first_line = trimmed.lines().next().unwrap_or(trimmed);
     log::info!("llama.cpp: {}", first_line);
 
-    // Detect sampling API version: if `llama_get_logits_ith` is exported
-    // the DLL uses the modern API (llama_token_data_array) and our
-    // `sample_greedy` wrapper is targeting the legacy signature.
-    // Log a warning so the developer knows the FFI surface is stale.
-    if unsafe { lib.get::<PfnGetLogitsIth>(b"llama_get_logits_ith") }.is_ok() {
+    // Detect the sampling API era of the loaded library:
+    // modern `llama_sampler_*` API (llama.cpp ≥ b4xxx) vs legacy
+    // `llama_sample_token_greedy(ctx, &mut token)`.
+    if unsafe { lib.get::<PfnSamplerSample>(b"llama_sampler_sample") }.is_ok() {
         SAMPLING_V2.store(true, std::sync::atomic::Ordering::Relaxed);
-        log::warn!(
-            "llama.dll exports llama_get_logits_ith (modern sampling API); \
-             sample_greedy still uses the legacy &mut llama_token signature. \
-             Verify at next DLL upgrade."
+        log::info!("llama library uses the modern llama_sampler_* API");
+    } else if unsafe { lib.get::<PfnSampleTokenGreedy>(b"llama_sample_token_greedy") }.is_ok() {
+        SAMPLING_V2.store(false, std::sync::atomic::Ordering::Relaxed);
+        log::info!("llama library uses the legacy sampling API");
+    } else {
+        return Err(
+            "llama 库缺少采样 API (llama_sampler_sample / llama_sample_token_greedy)，\
+          版本不兼容，请重新下载完整包"
+                .into(),
         );
+    }
+
+    // Modern vocab API (`llama_vocab*` instead of `llama_model*` in
+    // tokenize / token_to_piece / n_vocab).
+    MODERN_VOCAB_API.store(
+        unsafe { lib.get::<PfnGetVocab>(b"llama_model_get_vocab") }.is_ok(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
+    // Initialize the backend (required since llama.cpp b4xxx; harmless
+    // on older libraries that initialize lazily).
+    let backend_init = unsafe { lib.get::<PfnBackendInit>(b"llama_backend_init") }
+        .or_else(|_| unsafe { lib.get::<PfnBackendInit>(b"llama_init_backend") });
+    match backend_init {
+        Ok(sym) => unsafe { sym() },
+        Err(_) => log::warn!("llama_backend_init not exported; assuming lazy init"),
     }
     Ok(())
 }
@@ -227,7 +331,7 @@ fn to_cstring_safe(s: &str) -> CString {
 
 /// # Safety
 ///
-/// `llama.dll` must have been loaded via [`init`] before calling this function.
+/// The llama library must have been loaded via [`init`] before calling this function.
 /// `path` must point to a valid GGUF model file accessible to the process.
 /// The caller is responsible for calling [`free_model`] on the returned pointer
 /// when it is no longer needed.
@@ -237,6 +341,9 @@ pub unsafe fn load_model(path: &str) -> *mut LlamaModel {
         use_mmap: true,
         use_mlock: false,
         n_gpu_layers: 0,
+        // -1 selects "no device" mode, required on CPU-only builds where the
+        // device list is empty (GPU-only in modern llama.cpp).
+        main_gpu: -1,
         ..LlamaModelParams::default()
     };
     call!(
@@ -257,6 +364,7 @@ pub unsafe fn load_model_gpu(path: &str, n_gpu_layers: i32) -> *mut LlamaModel {
         use_mmap: true,
         use_mlock: false,
         n_gpu_layers,
+        main_gpu: if n_gpu_layers > 0 { 0 } else { -1 },
         ..LlamaModelParams::default()
     };
     call!(
@@ -278,17 +386,36 @@ pub unsafe fn new_context(model: *mut LlamaModel, n_ctx: u32, n_threads: u32) ->
         n_batch: 512,
         n_ubatch: 512,
         n_seq_max: 1,
-        n_threads,
-        n_threads_batch: n_threads,
+        n_threads: n_threads as i32,
+        n_threads_batch: n_threads as i32,
         no_perf: true,
         ..LlamaContextParams::default()
     };
-    call!(
+    let ctx = call!(
         llama_new_context_with_model,
         PfnNewContextWithModel,
         model,
         params
-    )
+    );
+    if !ctx.is_null() && SAMPLING_V2.load(std::sync::atomic::Ordering::Relaxed) {
+        // Register a greedy sampler so `sample_greedy` can draw tokens.
+        let smpl = call!(llama_sampler_init_greedy, PfnSamplerInitGreedy,);
+        if smpl.is_null() {
+            log::error!("llama_sampler_init_greedy returned NULL");
+        } else {
+            SAMPLER_REGISTRY.lock().unwrap().insert(ctx as usize, smpl as usize);
+        }
+    }
+    ctx
+}
+
+/// Free the registered sampler (if any) for a context about to be destroyed.
+fn release_sampler(ctx: *mut LlamaContext) {
+    if SAMPLING_V2.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Some(smpl) = SAMPLER_REGISTRY.lock().unwrap().remove(&(ctx as usize)) {
+            call!(llama_sampler_free, PfnSamplerFree, smpl as *mut LlamaSampler);
+        }
+    }
 }
 
 /// # Safety
@@ -303,14 +430,38 @@ pub unsafe fn free_model(model: *mut LlamaModel) {
 /// `ctx` must be a valid pointer from [`new_context`] or [`new_embedding_context`].
 /// After this call the pointer is invalid.
 pub unsafe fn free_context(ctx: *mut LlamaContext) {
+    release_sampler(ctx);
     call!(llama_free, PfnFree, ctx);
+}
+
+/// Resolve the first argument for tokenizer functions: the vocab on modern
+/// llama.cpp, or the model itself on legacy libraries.
+fn vocab_or_model(model: *const LlamaModel) -> *const LlamaModel {
+    if MODERN_VOCAB_API.load(std::sync::atomic::Ordering::Relaxed) {
+        let vocab = call!(llama_model_get_vocab, PfnGetVocab, model);
+        if vocab.is_null() {
+            log::error!("llama_model_get_vocab returned NULL");
+            return std::ptr::null();
+        }
+        vocab as *const LlamaModel
+    } else {
+        model
+    }
 }
 
 /// # Safety
 ///
 /// `model` must be a valid, non-null pointer.
 pub unsafe fn n_vocab(model: *const LlamaModel) -> i32 {
-    call!(llama_n_vocab, PfnNVocab, model)
+    if MODERN_VOCAB_API.load(std::sync::atomic::Ordering::Relaxed) {
+        let vocab = vocab_or_model(model);
+        if vocab.is_null() {
+            return 0;
+        }
+        call!(llama_vocab_n_tokens, PfnVocabNTokens, vocab)
+    } else {
+        call!(llama_n_vocab, PfnNVocab, model)
+    }
 }
 
 /// # Safety
@@ -318,13 +469,17 @@ pub unsafe fn n_vocab(model: *const LlamaModel) -> i32 {
 /// `model` must be a valid pointer. `text` will be sanitised internally via
 /// [`to_cstring_safe`].
 pub unsafe fn tokenize(model: *const LlamaModel, text: &str, add_special: bool) -> Vec<LlamaToken> {
+    let first = vocab_or_model(model);
+    if first.is_null() {
+        return vec![1, 2];
+    }
     let c_text = to_cstring_safe(text);
     let max_tokens = (text.len() * 2).max(256);
     let mut tokens = vec![0i32; max_tokens];
     let count = call!(
         llama_tokenize,
         PfnTokenize,
-        model,
+        first,
         c_text.as_ptr(),
         text.len() as i32,
         tokens.as_mut_ptr(),
@@ -344,11 +499,15 @@ pub unsafe fn tokenize(model: *const LlamaModel, text: &str, add_special: bool) 
 ///
 /// `model` must be a valid pointer. `token` must be a valid llama token ID.
 pub unsafe fn token_to_piece(model: *const LlamaModel, token: LlamaToken) -> String {
+    let first = vocab_or_model(model);
+    if first.is_null() {
+        return String::new();
+    }
     let mut buf = vec![0i8; 512];
     let len = call!(
         llama_token_to_piece,
         PfnTokenToPiece,
-        model,
+        first,
         token,
         buf.as_mut_ptr() as *mut c_char,
         buf.len() as i32,
@@ -358,12 +517,12 @@ pub unsafe fn token_to_piece(model: *const LlamaModel, token: LlamaToken) -> Str
     if len <= 0 {
         return String::new();
     }
-    CStr::from_bytes_until_nul(std::slice::from_raw_parts(
+    // The piece written by llama_token_to_piece has no NUL terminator, so
+    // CStr::from_bytes_until_nul would error; decode the raw bytes instead.
+    String::from_utf8_lossy(std::slice::from_raw_parts(
         buf.as_ptr() as *const u8,
         len as usize,
     ))
-    .unwrap_or_default()
-    .to_string_lossy()
     .into_owned()
 }
 
@@ -382,14 +541,29 @@ pub unsafe fn decode(ctx: *mut LlamaContext, token: LlamaToken) {
 ///
 /// `ctx` must be a valid context pointer.
 pub unsafe fn sample_greedy(ctx: *mut LlamaContext) -> LlamaToken {
-    let mut tok: LlamaToken = 0;
-    call!(
-        llama_sample_token_greedy,
-        PfnSampleTokenGreedy,
-        ctx,
-        &mut tok
-    );
-    tok
+    if SAMPLING_V2.load(std::sync::atomic::Ordering::Relaxed) {
+        let smpl = SAMPLER_REGISTRY
+            .lock()
+            .unwrap()
+            .get(&(ctx as usize))
+            .copied()
+            .unwrap_or(0) as *mut LlamaSampler;
+        if smpl.is_null() {
+            log::error!("sample_greedy: no sampler registered for this context");
+            return 2; // EOS-like: let the generation loop terminate
+        }
+        // Samples and accepts a token from output 0 of the last llama_decode.
+        call!(llama_sampler_sample, PfnSamplerSample, smpl, ctx, 0)
+    } else {
+        let mut tok: LlamaToken = 0;
+        call!(
+            llama_sample_token_greedy,
+            PfnSampleTokenGreedy,
+            ctx,
+            &mut tok
+        );
+        tok
+    }
 }
 
 // ─── Embedding ──────────────────────────────────────────
@@ -408,8 +582,8 @@ pub unsafe fn new_embedding_context(
         n_batch: 512,
         n_ubatch: 512,
         n_seq_max: 1,
-        n_threads,
-        n_threads_batch: n_threads,
+        n_threads: n_threads as i32,
+        n_threads_batch: n_threads as i32,
         embeddings: true,
         no_perf: true,
         ..LlamaContextParams::default()
@@ -441,6 +615,7 @@ pub unsafe fn get_embeddings_ith(ctx: *mut LlamaContext, i: i32) -> *mut f32 {
 /// `ctx` must be a valid embedding context pointer. After this call the pointer
 /// is invalid and must not be used again.
 pub unsafe fn free_embd_context(ctx: *mut LlamaContext) {
+    release_sampler(ctx);
     call!(llama_free, PfnFreeContext, ctx);
 }
 
@@ -583,7 +758,7 @@ mod tests {
         assert!(result.is_err(), "missing file must be rejected");
     }
 
-    /// No-op if llama.dll exists without the right size; we only test
+    /// No-op if the llama library exists without the right size; we only test
     /// the check logic, not the actual DLL.
     #[test]
     fn struct_alignment_does_not_cause_undefined_behavior() {

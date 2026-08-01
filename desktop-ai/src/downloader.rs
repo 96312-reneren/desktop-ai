@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
+#[derive(Debug)]
 pub enum DownloadMsg {
     Progress {
         percent: u32,
@@ -71,18 +72,56 @@ pub fn download_model(
             .and_then(|s| s.split('/').next_back()?.parse().ok())
             .unwrap_or(0);
 
-        let _ = tx.send(DownloadMsg::Status(format!(
-            "续传中 ({:.0}/{:.0} MB)...",
-            existing_size as f64 / 1e6,
-            total as f64 / 1e6
-        )));
+        // If the server's total is smaller than what we already have, the
+        // local file is corrupt — restart from scratch.
+        if total > 0 && existing_size > total {
+            let _ = tx.send(DownloadMsg::Status(format!(
+                "本地文件不完整 ({:.0} MB > {:.0} MB)，重新下载...",
+                existing_size as f64 / 1e6,
+                total as f64 / 1e6
+            )));
+            let _ = fs::remove_file(&dest);
+            let req = client.get(url);
+            match req.send() {
+                Ok(r) if r.status() == 200 => {
+                    let total = r
+                        .headers()
+                        .get("content-length")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    let f = File::create(&dest);
+                    match f {
+                        Ok(f) => (total, 0u64, f),
+                        Err(e) => {
+                            let _ = tx.send(DownloadMsg::Error(format!("无法创建文件: {}", e)));
+                            return;
+                        }
+                    }
+                }
+                Ok(r) => {
+                    let _ = tx.send(DownloadMsg::Error(format!("HTTP {}", r.status())));
+                    return;
+                }
+                Err(e) => {
+                    let _ = tx.send(DownloadMsg::Error(format!("连接失败: {}", e)));
+                    return;
+                }
+            }
+        } else {
+            let _ = tx.send(DownloadMsg::Status(format!(
+                "续传中 ({:.0}/{:.0} MB)...",
+                existing_size as f64 / 1e6,
+                total as f64 / 1e6
+            )));
 
-        let f = OpenOptions::new().append(true).open(&dest);
-        match f {
-            Ok(f) => (total, existing_size, f),
-            Err(e) => {
-                let _ = tx.send(DownloadMsg::Error(format!("无法写入文件: {}", e)));
-                return;
+            let f = OpenOptions::new().append(true).open(&dest);
+            match f {
+                Ok(f) => (total, existing_size, f),
+                Err(e) => {
+                    let _ = tx.send(DownloadMsg::Error(format!("无法写入文件: {}", e)));
+                    return;
+                }
             }
         }
     } else if status == 200 {
@@ -98,6 +137,17 @@ pub fn download_model(
             Ok(f) => (total, 0u64, f),
             Err(e) => {
                 let _ = tx.send(DownloadMsg::Error(format!("无法创建文件: {}", e)));
+                return;
+            }
+        }
+    } else if status == 416 {
+        // Range not satisfiable — the local file is already complete.
+        // Fall through to the integrity check below.
+        let _ = tx.send(DownloadMsg::Status("文件已完整，正在校验...".into()));
+        match File::open(&dest) {
+            Ok(f) => (existing_size, existing_size, f),
+            Err(e) => {
+                let _ = tx.send(DownloadMsg::Error(format!("无法打开文件: {}", e)));
                 return;
             }
         }

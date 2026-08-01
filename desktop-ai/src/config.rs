@@ -45,16 +45,23 @@ fn default_api_port() -> u16 {
 }
 
 fn default_api_token() -> String {
-    // P0-2: generate a random-ish token on first startup so the API is
-    // not wide-open. The token is written to config.json and stays stable
-    // across restarts. If the user deletes config.json a new token is
-    // generated.
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("da-{:016x}", nanos)
+    // Cryptographically random token generated on first startup so the API
+    // is not wide-open. Written to config.json and stays stable across
+    // restarts; a fresh token is generated if config.json is deleted.
+    let mut bytes = [0u8; 16];
+    if getrandom::fill(&mut bytes).is_ok() {
+        let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+        format!("da-{}", hex)
+    } else {
+        // Fallback: timestamp-based (weak but still keeps the API from
+        // being wide-open) if the OS RNG is unavailable.
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("da-{:016x}", nanos)
+    }
 }
 
 /// Maximum chat-input graphemes (NOT bytes). Enforced via
@@ -131,6 +138,12 @@ pub fn kb_dir() -> PathBuf {
 pub fn sandbox_dir() -> PathBuf {
     let dir = app_dirs().data_dir().join("sandbox");
     ensure_dir(&dir, "sandbox");
+    dir
+}
+
+pub fn log_dir() -> PathBuf {
+    let dir = app_dirs().data_dir().join("logs");
+    ensure_dir(&dir, "logs");
     dir
 }
 
