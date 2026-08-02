@@ -130,7 +130,8 @@ type PfnBackendInit = unsafe extern "C" fn();
 type PfnSamplerInitGreedy = unsafe extern "C" fn() -> *mut LlamaSampler;
 type PfnSamplerFree = unsafe extern "C" fn(*mut LlamaSampler);
 /// Sample and accept a token from the idx-th output of the last evaluation.
-type PfnSamplerSample = unsafe extern "C" fn(*mut LlamaSampler, *mut LlamaContext, i32) -> LlamaToken;
+type PfnSamplerSample =
+    unsafe extern "C" fn(*mut LlamaSampler, *mut LlamaContext, i32) -> LlamaToken;
 
 // ─── Sampling API version marker ──────────────────────
 
@@ -149,9 +150,7 @@ static MODERN_VOCAB_API: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 /// Pointers are stored as usize so the map is `Send + Sync`.
 static SAMPLER_REGISTRY: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<usize, usize>>,
-> = std::sync::LazyLock::new(|| {
-    std::sync::Mutex::new(std::collections::HashMap::new())
-});
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 pub fn sampling_is_v2() -> bool {
     SAMPLING_V2.load(std::sync::atomic::Ordering::Relaxed)
@@ -403,7 +402,10 @@ pub unsafe fn new_context(model: *mut LlamaModel, n_ctx: u32, n_threads: u32) ->
         if smpl.is_null() {
             log::error!("llama_sampler_init_greedy returned NULL");
         } else {
-            SAMPLER_REGISTRY.lock().unwrap().insert(ctx as usize, smpl as usize);
+            SAMPLER_REGISTRY
+                .lock()
+                .unwrap()
+                .insert(ctx as usize, smpl as usize);
         }
     }
     ctx
@@ -413,7 +415,11 @@ pub unsafe fn new_context(model: *mut LlamaModel, n_ctx: u32, n_threads: u32) ->
 fn release_sampler(ctx: *mut LlamaContext) {
     if SAMPLING_V2.load(std::sync::atomic::Ordering::Relaxed) {
         if let Some(smpl) = SAMPLER_REGISTRY.lock().unwrap().remove(&(ctx as usize)) {
-            call!(llama_sampler_free, PfnSamplerFree, smpl as *mut LlamaSampler);
+            call!(
+                llama_sampler_free,
+                PfnSamplerFree,
+                smpl as *mut LlamaSampler
+            );
         }
     }
 }
@@ -556,7 +562,10 @@ pub unsafe fn decode(ctx: *mut LlamaContext, token: LlamaToken) {
     if rc < 0 {
         log::error!("llama_decode failed with code {}", rc);
     } else if rc > 0 {
-        log::warn!("llama_decode requested retry (code {}), result may be degraded", rc);
+        log::warn!(
+            "llama_decode requested retry (code {}), result may be degraded",
+            rc
+        );
     }
     // batch is consumed by decode, no free needed since llama_decode manages it
 }

@@ -72,10 +72,10 @@ impl VectorStore {
     pub fn new(store_dir: &std::path::Path) -> Self {
         let db = crate::db::open(&store_dir.join("kb.db")).unwrap_or_else(|e| {
             log::error!("failed to open kb.db: {} — using in-memory fallback", e);
-            crate::db::open(&std::env::temp_dir().join(format!(
-                "desktop_ai_kb_fallback_{}.db",
-                std::process::id()
-            )))
+            crate::db::open(
+                &std::env::temp_dir()
+                    .join(format!("desktop_ai_kb_fallback_{}.db", std::process::id())),
+            )
             .expect("fallback kb db")
         });
         if let Err(e) = db.with_conn(|c| {
@@ -192,10 +192,11 @@ fn load_all_documents(c: &Connection) -> rusqlite::Result<Vec<StoredDocument>> {
     for (id, title, created_at) in rows {
         let mut chunks = Vec::new();
         {
-            let mut stmt = c.prepare(
-                "SELECT text, embedding FROM chunks WHERE doc_id = ?1 ORDER BY idx",
-            )?;
-            let rows = stmt.query_map(params![id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+            let mut stmt =
+                c.prepare("SELECT text, embedding FROM chunks WHERE doc_id = ?1 ORDER BY idx")?;
+            let rows = stmt.query_map(params![id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })?;
             for row in rows {
                 let (text, blob) = row?;
                 chunks.push(StoredChunk {
@@ -240,7 +241,8 @@ fn migrate_from_json(store_dir: &std::path::Path, c: &mut Connection) -> Result<
         embedding: Vec<f32>,
     }
 
-    let raw = std::fs::read_to_string(&legacy_path).map_err(|e| format!("read legacy kb: {}", e))?;
+    let raw =
+        std::fs::read_to_string(&legacy_path).map_err(|e| format!("read legacy kb: {}", e))?;
     let data: LegacyData =
         serde_json::from_str(&raw).map_err(|e| format!("parse legacy kb: {}", e))?;
     if data.documents.is_empty() {
@@ -263,8 +265,13 @@ fn migrate_from_json(store_dir: &std::path::Path, c: &mut Connection) -> Result<
             .prepare("INSERT INTO chunks (doc_id, idx, text, embedding) VALUES (?1, ?2, ?3, ?4)")
             .map_err(|e| e.to_string())?;
         for (i, chunk) in doc.chunks.iter().enumerate() {
-            stmt.execute(params![doc.id, i as i64, chunk.text, embed_to_blob(&chunk.embedding)])
-                .map_err(|e| e.to_string())?;
+            stmt.execute(params![
+                doc.id,
+                i as i64,
+                chunk.text,
+                embed_to_blob(&chunk.embedding)
+            ])
+            .map_err(|e| e.to_string())?;
         }
     }
     tx.commit().map_err(|e| e.to_string())?;

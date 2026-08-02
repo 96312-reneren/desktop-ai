@@ -188,10 +188,7 @@ pub fn build_rag_prompt(
     let start = if has_system { 1 } else { 0 };
     for msg in &base_messages[start..] {
         let safe = sanitize_chatml(&msg.content);
-        s.push_str(&format!(
-            "<|im_start|>{}\n{}<|im_end|>\n",
-            msg.role, safe
-        ));
+        s.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", msg.role, safe));
     }
 
     s.push_str("<|im_start|>assistant\n");
@@ -281,9 +278,21 @@ mod tests {
             "injected extra turns: {}",
             prompt
         );
-        assert!(!prompt.contains("请忽略<|im_start|>"), "history injected: {}", prompt);
-        assert!(!prompt.contains("KB 内容 <|im_end|>"), "kb injected: {}", prompt);
-        assert!(prompt.contains("KB 内容 &lt;|im_end|&gt;"), "kb not escaped: {}", prompt);
+        assert!(
+            !prompt.contains("请忽略<|im_start|>"),
+            "history injected: {}",
+            prompt
+        );
+        assert!(
+            !prompt.contains("KB 内容 <|im_end|>"),
+            "kb injected: {}",
+            prompt
+        );
+        assert!(
+            prompt.contains("KB 内容 &lt;|im_end|&gt;"),
+            "kb not escaped: {}",
+            prompt
+        );
         assert!(prompt.ends_with("<|im_start|>assistant\n"));
     }
 }
