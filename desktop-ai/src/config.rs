@@ -215,8 +215,19 @@ pub fn load_config() -> Config {
 pub fn save_config(config: &Config) {
     let path = config_path();
     if let Ok(data) = serde_json::to_string_pretty(config) {
-        if let Err(e) = std::fs::write(&path, &data) {
-            log::warn!("failed to save config: {}", e);
+        // Atomic-ish write: a crash mid-write corrupts the tmp file, not the
+        // real config. rename() is atomic on POSIX; on Windows we remove the
+        // target first as a fallback when the plain rename fails.
+        let tmp = path.with_extension("json.tmp");
+        if let Err(e) = std::fs::write(&tmp, &data) {
+            log::warn!("failed to write config: {}", e);
+            return;
+        }
+        if std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(&path);
+            if let Err(e) = std::fs::rename(&tmp, &path) {
+                log::warn!("failed to replace config: {}", e);
+            }
         }
     }
 }
