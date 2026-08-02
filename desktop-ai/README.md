@@ -1,26 +1,28 @@
 # 桌面AI
 
-**纯 Rust 本地大模型聊天应用** — 二进制 10 MB + DLL 2.5 MB 即可运行，无需 Python / Node / CUDA / Docker。
+**纯 Rust 本地大模型聊天应用** — 无需 Python / Node / CUDA / Docker，双击即可运行，支持 Windows 与 Linux。
 
-零门槛中文 AI 桌面工具：双击 exe → 选模型 → 对话，全程 GUI。
+零门槛中文 AI 桌面工具：选模型 → 对话，全程 GUI，支持 RAG 知识库 / 网络搜索 / OpenAI 兼容 API。
 
 > **开源许可：** 本应用代码采用 [MIT 许可证](./LICENSE)。llama.cpp 使用 MIT 许可。所支持的千问模型使用 Apache 2.0 许可（由阿里云/通义提供）。
 
 ---
 
-## 当前版本：v5.8.0
+## 当前版本：v6.1.0
 
-### 区别于上一版（v5.7）的关键变更
-- **Markdown 渲染重写**：基于 pulldown-cmark 完整支持标题/段落/列表/表格/链接/图片/引用/内联代码/代码块/删除线；所有 Label 支持 `.selectable(true)` 复制。
-- **对话导入导出**：rfd 文件对话框 + JSON 序列化；导入时强制 id 校验防路径遍历。
-- **Ctrl+Enter 发送** + **1500 字输入硬限制**（静默截断 + 绿色提示）+ **零宽字符过滤**（U+200B/C/D）
-- **重复输出检测**：推理过程中最后 50 个字符全部相同 → 自动停止并标注
-- **RAG 文档自动分段**：超过 16000 字符 → chunker 自动分段索引，不拒绝不报错
-- **爬虫弹性增强**：指数退避重试（429/503→2s/4s/8s）+ 脏数据过滤（U+FFFD >10%）+ 超时提示 + 友好错误信息
-- **embedding.rs bug 修复**：usize 上的 `<=0` 永远为假。
-- **app.rs 拆分**：1722 行 → 6 子模块（mod.rs + sidebar/chat/settings/model_select/kb_panel）
-- **Clippy 全清**：0 错误、0 警告（修复 27+ 条 lint）+ 15 个 unsafe 函数全部含 `# Safety` 文档
-- **测试套件从 27 项扩至 73 项**（+46 项：fuzz、布局、集成、输入防御、脏数据过滤等）
+### 区别于上一版（v5.8）的关键变更
+- **SQLite 存储迁移**：知识库与对话从 JSON 迁移至 SQLite（WAL 事务、崩溃不丢数据、增量写入），旧数据首次启动自动迁移
+- **会话增量落盘**：只写入新增消息，长对话不再全量重写
+- **模型下载断点续传**：中断后自动续传，无需重新下载
+- **日志文件**：每日滚动日志写入数据目录，崩溃后可排查
+- **API token 强随机化**：getrandom 密码学随机，替代时间戳方案
+- **新版 llama.cpp API 适配**：采样器 / vocab / 后端初始化全适配，修复模型加载崩溃与空输出问题
+- **ChatML 注入消毒扩展**：13 个特殊标记全覆盖，对话历史统一消毒
+- **SSRF 防护补强**：种子 URL 校验、重定向逐跳校验、IP 编码绕过拦截
+- **API 防护**：请求总超时防慢速滴流、CORS 白名单回显、路由查询串兼容
+- **config 原子写入** + tokenize 缓冲扩容 + decode 错误可见
+- **跨平台**：正式支持 Linux（x86_64，glibc ≥ 2.35），GitHub Actions 自动编译双平台产物并发布 Release
+- **依赖安全升级**：pdf-extract 0.12（lopdf 0.42，修复 RUSTSEC-2026-0187）、anyhow、event-listener、memmap2 等
 
 完整功能见下方[功能清单](#核心功能)。
 
@@ -31,26 +33,23 @@
 ### 推理
 - **多模型选择**：6 款 Qwen GGUF 模型（0.5B / 1.7B / 3B / 7B / 8B / Coder-7B），覆盖 2 GB - 16 GB 内存设备
 - **流式生成**：token-by-token 实时显示，可中断停止
-- **GPU 加速**：通过 `n_gpu_layers` 支持 CUDA / Vulkan，自动 GPU 检测（WMIC）
+- **GPU 加速**：通过 `n_gpu_layers` 支持 CUDA / Vulkan，自动 GPU 检测
+- **新版 llama.cpp 兼容**：运行时自动检测库的 API 时代（现代 `llama_sampler_*` / 旧版采样）
 
 ### RAG 三位一体
-- **本地知识库 KB**：基于同一模型的 embeddings=true 上下文做语义检索
+- **本地知识库 KB**：基于同一模型的 embedding 上下文做语义检索，SQLite 存储（WAL 事务，增量写入，自动迁移旧 JSON）
 - **网络搜索**：DuckDuckGo HTML 抓取
-- **网页爬虫**：深度 1-3，SSRF 防护拦截私网 / 回环地址
-- **统一 RAG 提示词**：`build_rag_prompt()` 将 KB 与搜索上下文注入系统提示词，并对 `<|im_start|>` 等控制标记做注入消毒
+- **网页爬虫**：深度 1-3，SSRF 防护拦截私网 / 回环地址（含 IP 替代编码、逐跳重定向校验）
+- **统一 RAG 提示词**：`build_rag_prompt()` 将 KB 与搜索上下文注入系统提示词，并对全部 ChatML 特殊标记做注入消毒
 
 ### API 服务
 - **OpenAI 兼容**：`/v1/chat/completions`、`/v1/models`、`/health`、`/ready`
-- **CORS 白名单**：仅允许 localhost / 127.0.0.1（命令行无 Origin 总是放行）
-- **DoS 防护**：最大 16 并发、30 秒读超时、1 MB 请求体上限
-
-### 沙盒文件系统（Agent 基础）
-- 路径遍历防护（`canonicalize` + `Path::starts_with` 组件校验）
-- 500 KB 文件大小上限
-- read / write / list API 预留作 Agent 工具调用接口
+- **Bearer Token 认证**：`/v1/*` 需携带 `Authorization: Bearer <token>`（设置中查看）
+- **CORS 白名单**：仅允许 localhost / 127.0.0.1，响应回显白名单 Origin
+- **DoS 防护**：最大 16 并发、30 秒读超时 + 60 秒请求总超时、1 MB 请求体上限
 
 ### 对话管理
-- 多轮对话自动持久化为 JSON
+- 多轮对话持久化（SQLite，增量落盘）
 - 实时搜索过滤（Ctrl+F）
 - **JSON 导入 / 导出**（备份与迁移）
 - id 消毒（仅允许 `[a-zA-Z0-9_]`）
@@ -64,26 +63,28 @@
 - 硬件检测自动推荐合适模型
 
 ### 安全加固
-- **4 项 CRITICAL 已修复**：CString 崩溃 / Arc UAF / 路径遍历 / 下载无校验
-- **2 项 HIGH 已修复**：DLL 最小尺寸校验 / config 边界 clamp
-- **新增 SSRF 拦截**（crawler.rs）+ **ChatML 注入消毒**（inference.rs）
+- **新版 llama.cpp FFI 全适配**：结构布局、后端初始化、vocab API、现代采样器
+- **SSRF 拦截**（种子 / 子链接 / 重定向 / IP 编码）+ **ChatML 注入消毒**（13 标记全覆盖）
+- **API 认证** + 慢速滴流防护 + CORS 白名单
+- **依赖漏洞修复**：pdf-extract 0.12 / lopdf 0.42（RUSTSEC-2026-0187）、anyhow、event-listener、memmap2
 - Release profile：`opt-level=3` + `lto=true` + `strip="symbols"`
 
 ### 工程质量
-- **73 个测试**全部通过（65 unit + 8 integration），覆盖 10 个模块
+- **85 个测试**全部通过（77 unit + 8 integration），覆盖 11 个模块
 - **0 个 Clippy 错误、0 个 Clippy 警告**（pristine baseline）
-- **15 个 unsafe 函数**全部含 `# Safety` 文档说明
-- 结构化日志：`tracing-subscriber` + `tracing-log` 桥接 `log::*!` 宏
-- **app.rs 1722 行**拆分为 6 子模块 + update() 仅 29 行入口
-- **4903 行 Rust 代码**，22 个源文件
+- 全部 unsafe 函数含 `# Safety` 文档说明
+- 结构化日志：`tracing-subscriber` + `tracing-log` 桥接 `log::*!` 宏，落盘到数据目录 `logs/`
+- GitHub Actions 自动编译：push 构建双平台产物，tag 自动发布 Release
 
 ---
 
 ## 快速开始
 
 ### 1. 获取应用
-- 从 release 目录复制 `桌面AI.exe` 与 `llama.dll` 到同一文件夹
-- 双击 `桌面AI.exe`
+从 [GitHub Releases](https://github.com/96312-reneren/desktop-ai/releases) 下载对应平台压缩包，或使用仓库 `release/` 目录：
+
+- **Windows**：`release/windows/` 中的 `桌面AI.exe` 与 `llama.dll` 放在同一文件夹，双击 `桌面AI.exe`
+- **Linux**：解压 `release/linux/` 或 `desktop-ai-<版本>-linux-x86_64.tar.gz`，运行 `desktop-ai`（需 glibc ≥ 2.35）
 
 ### 2. 首次使用
 1. 应用启动后，点击左上角"切换模型"
@@ -98,7 +99,7 @@
 
 ### 4. 启用 API 服务器（可选）
 - 设置面板中开启"API 服务"，默认端口 11434
-- 任何 OpenAI 客户端可指向 `http://127.0.0.1:11434/v1`
+- 任何 OpenAI 客户端可指向 `http://127.0.0.1:11434/v1`，需携带 API token
 
 ---
 
@@ -106,25 +107,26 @@
 
 ```
 桌面AI/
-├── desktop-ai/                    # Rust 源码 (current)
+├── desktop-ai/                    # Rust 源码
 │   ├── src/
 │   │   ├── main.rs                # 入口 + 字体加载 + 日志初始化
-│   │   ├── config.rs              # 配置序列化 + 边界校验
-│   │   ├── conversation.rs        # 对话 CRUD + 导入导出
-│   │   ├── ffi.rs                 # llama.cpp C FFI 绑定 (unsafe)
-│   │   ├── inference.rs           # 推理 + ChatML + RAG 提示词
+│   │   ├── config.rs              # 配置序列化 + 边界校验 + 原子写入
+│   │   ├── db.rs                  # SQLite 连接封装（Mutex + WAL + busy_timeout）
+│   │   ├── conversation.rs        # 对话 CRUD（SQLite 增量落盘）+ 导入导出
+│   │   ├── ffi.rs                 # llama.cpp C FFI 绑定（unsafe，双 API 时代兼容）
+│   │   ├── inference.rs           # 推理 + ChatML 消毒 + RAG 提示词
 │   │   ├── embedding.rs           # 文本向量化
-│   │   ├── vector_store.rs        # JSON 向量存储 + 余弦检索
+│   │   ├── vector_store.rs        # SQLite 向量存储 + 余弦检索 + JSON 迁移
 │   │   ├── chunker.rs             # 句子感知分块器
 │   │   ├── cleaner.rs             # HTML → 纯文本清洗
 │   │   ├── crawler.rs             # 网页爬虫 + SSRF 防护
 │   │   ├── search.rs              # DuckDuckGo 搜索
-│   │   ├── api_server.rs          # OpenAI 兼容 HTTP API
+│   │   ├── api_server.rs          # OpenAI 兼容 HTTP API（token 认证 + DoS 防护）
 │   │   ├── sandbox.rs             # 沙盒文件系统
 │   │   ├── markdown.rs            # Markdown → egui 渲染
-│   │   ├── downloader.rs          # 模型下载 + SHA-256 校验
+│   │   ├── downloader.rs          # 模型下载 + 断点续传 + SHA-256 校验
 │   │   ├── model_catalog.rs       # 6 款 Qwen 模型元数据
-│   │   ├── lib.rs                 # 库根 (集成测试 + re-export)
+│   │   ├── lib.rs                 # 库根（集成测试 + re-export）
 │   │   └── app/                   # 主应用（6 个子模块）
 │   │       ├── mod.rs             # 结构体 + 业务逻辑 + update()
 │   │       ├── sidebar.rs         # 侧边栏 + 对话列表 + 导入导出
@@ -133,12 +135,18 @@
 │   │       ├── model_select.rs    # 模型选择窗口
 │   │       └── kb_panel.rs        # 知识库 + 搜索面板
 │   ├── tests/
-│   │   └── integration.rs         # 集成测试 (GBK/concurrent/API)
-│   ├── build.rs                   # 复制 llama.dll 到输出目录
-│   ├── Cargo.toml                 # 项目配置 (v5.8.0)
+│   │   └── integration.rs         # 集成测试（GBK/concurrent/API）
+│   ├── build.rs                   # 按平台复制 llama 库到输出目录
+│   ├── Cargo.toml                 # 项目配置 (v6.1.0)
 │   ├── Cargo.lock                 # 依赖版本锁定
-│   ├── llama.dll                  # llama.cpp 预编译 (2.5 MB)
+│   ├── llama.dll                  # llama.cpp 预编译 (Windows)
+│   ├── libllama.so / libggml*.so  # llama.cpp 预编译 (Linux)
 │   └── README.md                  # 本文件
+├── release/                       # 发布产物
+│   ├── windows/                   # 桌面AI.exe + llama.dll
+│   ├── linux/                     # desktop-ai + libllama.so + libggml*.so.0
+│   └── desktop-ai-v6.1.0-linux-x86_64.tar.gz
+└── .github/workflows/             # CI + 自动编译发布
 ```
 
 ---
@@ -147,7 +155,7 @@
 
 ### 环境要求
 - Rust stable（edition 2021）
-- Windows 平台（Mac/Linux 待适配）
+- Windows / Linux（macOS 理论上可编译，未验证）
 - Cargo 镜像推荐 TUNA：`sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/`
 
 ### 构建命令
@@ -155,40 +163,62 @@
 # 开发版（快速迭代）
 cargo build
 
-# Release 版（带 LTO + strip，输出 ~10 MB）
+# Release 版（带 LTO + strip）
 cargo build --release
 
-# 运行所有 74 个测试
+# 运行所有 85 个测试
 cargo test
 
 # Clippy 静态扫描
 cargo clippy
 ```
 
+### Linux 额外依赖
+```bash
+sudo apt install build-essential cmake pkg-config patchelf libssl-dev \
+  libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+  libxkbcommon-dev libwayland-dev libgtk-3-dev libgl1-mesa-dev
+```
+
+### 自动编译发布
+- 推送 `main` 分支：GitHub Actions 自动构建 Windows / Linux 产物（Actions artifact）
+- 推送 `vX.Y.Z` tag：自动构建并创建 GitHub Release，附带双平台安装包与发布说明
+- 无需本地编译，发布流程：`git tag vX.Y.Z && git push origin vX.Y.Z`
+
 ### 关键依赖
 | crate | 用途 |
 |-------|------|
 | `eframe` / `egui` 0.31 | 即时模式 GUI |
+| `rusqlite` 0.37 (bundled) | SQLite 存储（自带编译，无系统依赖） |
 | `pulldown-cmark` 0.12 | Markdown 解析 |
-| `libloading` 0.8 | llama.dll 动态加载 |
+| `libloading` 0.8 | llama 库动态加载 |
 | `reqwest` 0.12 (blocking) | HTTP 客户端 |
 | `rfd` 0.15 | 原生文件对话框 |
-| `pdf-extract` 0.7 | PDF 文本提取 |
+| `pdf-extract` 0.12 | PDF 文本提取（lopdf 0.42） |
 | `sha2` 0.10 | 模型 SHA-256 校验 |
-| `tracing-subscriber` 0.3 | 结构化日志 |
+| `tracing-subscriber` 0.3 | 结构化日志（stderr + 文件） |
+| `getrandom` | API token 密码学随机 |
 
 ---
 
 ## 开发历史
 
+### v6.1 (2026-08-02) — 自动编译与安全审计版
+- SQLite 存储迁移（知识库 + 对话）+ 增量落盘
+- 模型下载断点续传 + 日志文件 + API token 强随机
+- 新版 llama.cpp API 全适配（采样器 / vocab / 后端初始化）
+- ChatML 消毒扩展、SSRF 补强、API 慢速滴流防护、config 原子写
+- 依赖安全升级（pdf-extract 0.12 / lopdf 0.42 等）
+- GitHub Actions 自动编译 + 自动发布 Release
+- 正式支持 Linux
+
 ### v5.8 (2026-06-22/23) — 工程质量与文档版
 - **app.rs 拆分**：1722 行 → 6 子模块（app/mod.rs + sidebar/chat/settings/model_select/kb_panel）
-- **Clippy 全清**：0 错误、0 警告（修复 27 条 lint）
+- **Clippy 全清**：0 错误、0 警告
 - Markdown 渲染重写支持表格 / 链接 / 内联代码
 - 对话导入导出 + Ctrl+Enter 发送
-- 修复 embedding.rs:22 usize 比较失效 bug
-- 修复知识库关闭按钮 CJK 字体缺失问题
-- 测试从 27 扩至 43 项，生成更新版《测试报告.docx》
+- 修复 embedding.rs usize 比较失效 bug
+- 测试从 27 扩至 43 项
 
 ### v5.7 — RAG 与安全加固版
 - 网页爬虫 + 清洗管道 + GPU 推理 + 沙盒 P0
@@ -319,33 +349,13 @@ THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPL
 ---
 
 ## 已知限制
-- 仅支持 Windows（Mac/Linux 待适配）
+- Linux 需要 glibc ≥ 2.35（Ubuntu 22.04+ 等 2022 年后发行版）
 - 仅支持 GGUF 格式模型
 - 单模型实例（切换需卸载）
 - 无系统托盘最小化
 - 无代码语法高亮（计划引入 syntect）
 
-##补充/重要提示
-关于 PDF 解析稳定性的说明
+## 安全说明
 
-本软件为纯本地离线工具，所有 PDF 解析均在您的电脑本地完成，不涉及任何网络传输。
-
-近期安全社区报告了底层 PDF 解析库（lopdf）在处理极端恶意嵌套对象时存在导致程序闪退的理论风险。请注意：
-
-1. 触发条件：仅当您主动打开一个刻意构造的、极度畸形的恶意 PDF 时可能触发。
-2. 实际影响：最坏情况是该软件进程闪退。不影响您的操作系统、其他文件及个人数据，重启软件即可恢复正常。
-3. 为何未修复：该解析库的官方安全修复版涉及底层 API 大规模重构，强制升级将导致现有正常 PDF 文档出现乱码或无法打开等更严重的兼容性问题。为保障 99.9% 正常文档的稳定性，我们暂缓了本次升级。
-
-建议：请仅从可信来源获取 PDF 文件。如遇闪退，重启软件即可，您的数据不会丢失。
-
-##Known Issue: PDF Parsing Stack Overflow (RUSTSEC-2026-0187)
-
-Our PDF extraction relies on the popular lopdf crate. Version 0.34.x has a theoretical DoS vulnerability when parsing deeply nested objects.
-
-We are aware of this, but we have decided not to hotfix it for now due to the following reasons:
-
-· Breaking Changes: The patched version (lopdf >= 0.42.0) introduced significant API breaking changes. Upgrading would require rewriting our core extraction logic and extensive regression testing.
-· Threat Model Mismatch: Since this is a local offline client, the attack vector relies entirely on the user feeding a malicious file to themselves. (Self-inflicted DoS).
-· Trade-off: We prioritize ensuring that all standard, legitimate PDFs open flawlessly over fixing an edge-case crash that only affects malicious files.
-
-We will upgrade this dependency as soon as the upstream pdf-extract team releases a stable adaptation. Until then, please ensure your PDFs come from trusted sources.
+- **PDF 解析**：v6.1 起已升级至 pdf-extract 0.12 / lopdf 0.42，修复了历史版本（0.34）的深层嵌套对象栈溢出漏洞（RUSTSEC-2026-0187）。所有解析均在本地完成，不涉及网络传输。
+- **cargo audit 忽略项**：`RUSTSEC-2026-0194/0195`（quick-xml）因被 wayland-scanner（构建期工具，Windows 不运行）与 zbus_xml（系统 D-Bus 层）锁定且上游暂无修复版本而忽略，本地桌面场景无实际攻击面。
