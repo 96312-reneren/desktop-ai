@@ -60,7 +60,10 @@ pub(crate) struct KbJobState {
 
 /// 后台索引线程 → UI 线程的消息。
 enum KbIndexMsg {
-    Progress { frac: f32, status: String },
+    Progress {
+        frac: f32,
+        status: String,
+    },
     Done {
         status: String,
         status_message: String,
@@ -352,7 +355,11 @@ fn index_content(
 }
 
 /// 统一发送索引收尾消息：成功 → Done，失败 → Error。
-fn finish_kb_job(tx: &mpsc::Sender<KbIndexMsg>, result: Result<(usize, usize), String>, info: KbDoneInfo) {
+fn finish_kb_job(
+    tx: &mpsc::Sender<KbIndexMsg>,
+    result: Result<(usize, usize), String>,
+    info: KbDoneInfo,
+) {
     match result {
         Ok((added, total)) => {
             if total > 1 {
@@ -855,14 +862,7 @@ impl DesktopAI {
         );
 
         thread::spawn(move || {
-            downloader::download_model(
-                &url,
-                dest,
-                cancel,
-                tx,
-                expected_sha256.as_deref(),
-                &parts,
-            );
+            downloader::download_model(&url, dest, cancel, tx, expected_sha256.as_deref(), &parts);
         });
     }
 
@@ -948,9 +948,8 @@ impl DesktopAI {
         let do_search = self.config.search_enabled;
         // 索引进行中跳过 KB 注入：embedding 锁被后台任务持有，
         // 避免 UI 线程等待整个文档的向量化过程。
-        let do_kb = self.config.kb_enabled
-            && self.vector_store.has_engine()
-            && self.kb_job.is_none();
+        let do_kb =
+            self.config.kb_enabled && self.vector_store.has_engine() && self.kb_job.is_none();
         let user_query = text.clone();
 
         let kb_data = if do_kb {

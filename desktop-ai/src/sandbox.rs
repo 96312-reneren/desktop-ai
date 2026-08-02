@@ -18,6 +18,9 @@ pub struct FileEntry {
 pub struct Sandbox {
     root: PathBuf,
     resolved_root: PathBuf,
+    /// Optional size cap for binary read/write operations.
+    /// `None` = unlimited (current default); set via [`Sandbox::with_max_size`].
+    max_size: Option<u64>,
 }
 
 impl Sandbox {
@@ -27,7 +30,25 @@ impl Sandbox {
         Self {
             root: dir,
             resolved_root: resolved,
+            max_size: None,
         }
+    }
+
+    /// Configure an explicit size cap (in bytes) for binary operations
+    /// (`write_bytes` / `read_bytes`). Text `write`/`read` keep the built-in
+    /// 500 KB cap. Call this before the sandbox is used.
+    pub fn with_max_size(mut self, max: u64) -> Self {
+        self.max_size = Some(max);
+        self
+    }
+
+    /// Enforce `limit` on `len`, or `hard_default` when no cap is configured.
+    fn check_size(&self, len: u64, hard_default: u64) -> Result<(), String> {
+        let limit = self.max_size.unwrap_or(hard_default);
+        if len > limit {
+            return Err(format!("内容过大 ({} > {} bytes)", len, limit));
+        }
+        Ok(())
     }
 
     /// Resolve a path and ensure it stays within the sandbox.
@@ -91,9 +112,7 @@ impl Sandbox {
             return self.list_text(relative);
         }
         let meta = fs::metadata(&path).map_err(|e| format!("读取失败: {}", e))?;
-        if meta.len() > MAX_FILE_SIZE {
-            return Err("文件过大".into());
-        }
+        self.check_size(meta.len(), MAX_FILE_SIZE)?;
         let mut f = fs::File::open(&path).map_err(|e| format!("打开失败: {}", e))?;
         let mut buf = String::new();
         f.read_to_string(&mut buf)
@@ -107,9 +126,7 @@ impl Sandbox {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
         }
-        if content.len() as u64 > MAX_FILE_SIZE {
-            return Err("内容过大".into());
-        }
+        self.check_size(content.len() as u64, MAX_FILE_SIZE)?;
         let mut f = fs::File::create(&path).map_err(|e| format!("创建文件失败: {}", e))?;
         f.write_all(content.as_bytes())
             .map_err(|e| format!("写入失败: {}", e))?;
@@ -176,19 +193,22 @@ impl Sandbox {
         &self.root
     }
 
-    /// 二进制文件写入（无可配置大小限制，适用于模型文件等大文件）。
+    /// 二进制文件写入。默认无大小上限；通过 [`Sandbox::with_max_size`]
+    /// 可配置上限（适用于 Agent 工具调用场景防滥用）。
     pub fn write_bytes(&self, relative: &str, content: &[u8]) -> Result<(), String> {
         let path = self.safe_path(relative)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
         }
+        self.check_size(content.len() as u64, u64::MAX)?;
         let mut f = fs::File::create(&path).map_err(|e| format!("创建文件失败: {}", e))?;
         f.write_all(content)
             .map_err(|e| format!("写入失败: {}", e))?;
         Ok(())
     }
 
-    /// 二进制文件读取。
+    /// 二进制文件读取。默认无大小上限；通过 [`Sandbox::with_max_size`]
+    /// 可配置上限。
     pub fn read_bytes(&self, relative: &str) -> Result<Vec<u8>, String> {
         let path = self.safe_path(relative)?;
         if !path.exists() {
@@ -197,6 +217,8 @@ impl Sandbox {
         if path.is_dir() {
             return Err("无法读取目录".into());
         }
+        let meta = fs::metadata(&path).map_err(|e| format!("读取失败: {}", e))?;
+        self.check_size(meta.len(), u64::MAX)?;
         fs::read(&path).map_err(|e| format!("读取失败: {}", e))
     }
 
@@ -351,5 +373,37 @@ mod tests {
         let sb = test_sandbox();
         // 路径遍历不应 panic，应返回 false
         assert!(!sb.exists("../../etc/passwd"));
+    }
+
+    #[test]
+    fn test_with_max_size_limits_write_bytes() {
+        let n = NEXT_TEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("desktop_ai_sandbox_cap_{}", n));
+        let _ = fs::remove_dir_all(&dir);
+        let sb = Sandbox::new(dir.clone()).with_max_size(1_024);
+        assert!(sb.write_bytes("small.bin", &vec![0u8; 1_024]).is_ok());
+        assert!(sb.write_bytes("big.bin", &vec![0u8; 1_025]).is_err());
+        // 文本 write 同样受上限约束（上限覆盖内置 500KB 默认）
+        assert!(sb.write("t.txt", &"x".repeat(1_025)).is_err());
+        // 上限放开后大文件可写
+        let sb2 = Sandbox::new(std::env::temp_dir().join(format!("desktop_ai_sandbox_cap2_{}", n)))
+            .with_max_size(1_000_000);
+        assert!(sb2.write_bytes("big.bin", &vec![0xABu8; 600_000]).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_with_max_size_limits_read_bytes() {
+        let n = NEXT_TEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("desktop_ai_sandbox_cap_r_{}", n));
+        let _ = fs::remove_dir_all(&dir);
+        // 先写入 200 字节（无限制 sandbox）
+        Sandbox::new(dir.clone())
+            .write_bytes("f.bin", &[0u8; 200])
+            .unwrap();
+        // 再用 100 字节上限的 sandbox 读取 → 应失败
+        let sb = Sandbox::new(dir.clone()).with_max_size(100);
+        assert!(sb.read_bytes("f.bin").is_err(), "读取超上限应失败");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

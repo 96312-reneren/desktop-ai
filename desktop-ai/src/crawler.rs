@@ -231,6 +231,10 @@ fn fetch_url(url: &str, cfg: &CrawlConfig) -> Result<(String, String), String> {
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopAI/5.7")
         // P0-5: disable auto-redirect so we can re-validate each hop.
         .redirect(reqwest::redirect::Policy::none())
+        // Explicit TLS verification (default, but stated for consistency with
+        // downloader.rs / search.rs and to prevent silent regressions).
+        .danger_accept_invalid_certs(false)
+        .danger_accept_invalid_hostnames(false)
         .build()
         .map_err(|e| format!("连接失败: {}", e))?;
 
