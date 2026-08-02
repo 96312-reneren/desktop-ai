@@ -340,6 +340,9 @@ fn migrate_from_json(c: &mut Connection) -> Result<(), String> {
     }
 
     let tx = c.transaction().map_err(|e| e.to_string())?;
+    // 注意：遗留对话 JSON 文件位于 conversations_dir()（data_dir/conversations），
+    // 而沙箱目录为 data_dir/sandbox，两者不在同一路径下，
+    // 因此不强制使用沙箱读取，避免破坏现有迁移逻辑。
     for path in files {
         let raw = match std::fs::read_to_string(&path) {
             Ok(r) => r,

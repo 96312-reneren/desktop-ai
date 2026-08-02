@@ -81,10 +81,10 @@
 ## 快速开始
 
 ### 1. 获取应用
-从 [GitHub Releases](https://github.com/96312-reneren/desktop-ai/releases) 下载对应平台压缩包，或使用仓库 `release/` 目录：
+从 [GitHub Releases](https://github.com/96312-reneren/desktop-ai/releases) 下载对应平台压缩包：
 
-- **Windows**：`release/windows/` 中的 `桌面AI.exe` 与 `llama.dll` 放在同一文件夹，双击 `桌面AI.exe`
-- **Linux**：解压 `release/linux/` 或 `desktop-ai-<版本>-linux-x86_64.tar.gz`，运行 `desktop-ai`（需 glibc ≥ 2.35）
+- **Windows**：`桌面AI.exe` 与 `llama.dll` 放在同一文件夹，双击 `桌面AI.exe`
+- **Linux**：解压 `desktop-ai-<版本>-linux-x86_64.tar.gz`，运行 `desktop-ai`（需 glibc ≥ 2.35）
 
 ### 2. 首次使用
 1. 应用启动后，点击左上角"切换模型"
@@ -142,11 +142,7 @@
 │   ├── llama.dll                  # llama.cpp 预编译 (Windows)
 │   ├── libllama.so / libggml*.so  # llama.cpp 预编译 (Linux)
 │   └── README.md                  # 本文件
-├── release/                       # 发布产物
-│   ├── windows/                   # 桌面AI.exe + llama.dll
-│   ├── linux/                     # desktop-ai + libllama.so + libggml*.so.0
-│   └── desktop-ai-v6.1.0-linux-x86_64.tar.gz
-└── .github/workflows/             # CI + 自动编译发布
+└── (远端) release/ + .github/workflows/   # 发布产物与 CI 配置由 GitHub 远端维护（Actions 自动生成），本地源码树不含
 ```
 
 ---
@@ -166,7 +162,7 @@ cargo build
 # Release 版（带 LTO + strip）
 cargo build --release
 
-# 运行所有 85 个测试
+# 运行所有 128 个测试
 cargo test
 
 # Clippy 静态扫描
@@ -184,6 +180,7 @@ sudo apt install build-essential cmake pkg-config patchelf libssl-dev \
 - 推送 `main` 分支：GitHub Actions 自动构建 Windows / Linux 产物（Actions artifact）
 - 推送 `vX.Y.Z` tag：自动构建并创建 GitHub Release，附带双平台安装包与发布说明
 - 无需本地编译，发布流程：`git tag vX.Y.Z && git push origin vX.Y.Z`
+- 注：`.github/workflows/` 配置文件与 `release/` 产物位于 GitHub 远端仓库，本地源码树不包含
 
 ### 关键依赖
 | crate | 用途 |

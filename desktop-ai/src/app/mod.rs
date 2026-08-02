@@ -5,12 +5,15 @@ mod settings;
 mod sidebar;
 
 use std::collections::HashMap;
-use std::sync::{atomic::AtomicBool, mpsc, Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
 use crate::api_server::ApiServer;
 use crate::config::{self, Config};
 use crate::conversation::Conversation;
+use crate::crawler::extract_pdf_safe;
 use crate::downloader::{self, DownloadMsg};
 use crate::inference::{self, LlamaInference, StreamToken};
 use crate::model_catalog::find_model;
@@ -45,6 +48,44 @@ pub(crate) struct GenState {
     pub(crate) pending_text: String,
     rx: mpsc::Receiver<StreamToken>,
     pub(crate) stop_flag: Arc<AtomicBool>,
+}
+
+// ─── KB index state (background indexing) ──────────────
+
+/// 后台知识库索引任务状态：UI 线程轮询 `rx`，`cancel` 可随时中止。
+pub(crate) struct KbJobState {
+    rx: mpsc::Receiver<KbIndexMsg>,
+    pub(crate) cancel: Arc<AtomicBool>,
+}
+
+/// 后台索引线程 → UI 线程的消息。
+enum KbIndexMsg {
+    Progress { frac: f32, status: String },
+    Done {
+        status: String,
+        status_message: String,
+        clear_url: bool,
+        clear_title: bool,
+        clear_content: bool,
+    },
+    Error(String),
+}
+
+/// 待执行的索引任务：UI 线程只做参数准备与校验，重活在后台线程完成。
+enum KbIndexJob {
+    File {
+        path: PathBuf,
+        filename: String,
+        ext: String,
+    },
+    Paste {
+        title: String,
+        content: String,
+    },
+    Crawl {
+        url: String,
+        depth: u32,
+    },
 }
 
 // ─── Model load state (off-UI-thread loading) ──────────
@@ -92,7 +133,7 @@ pub struct DesktopAI {
     pub(crate) api_server: Option<ApiServer>,
 
     // Knowledge base
-    pub(crate) vector_store: VectorStore,
+    pub(crate) vector_store: Arc<VectorStore>,
     pub(crate) sandbox: Sandbox,
     pub(crate) show_kb_panel: bool,
     pub(crate) kb_title: String,
@@ -102,7 +143,7 @@ pub struct DesktopAI {
     pub(crate) kb_indexing: bool,
     pub(crate) kb_index_progress: f32,
     pub(crate) kb_index_status: String,
-    pub(crate) kb_crawl_stop: Option<Arc<AtomicBool>>,
+    pub(crate) kb_job: Option<KbJobState>,
 
     // Search
     pub(crate) show_search_panel: bool,
@@ -130,13 +171,212 @@ pub(crate) enum ConfirmAction {
     UninstallApp,
 }
 
-fn extract_pdf_safe(path: &std::path::Path) -> Result<String, String> {
-    let path = path.to_path_buf();
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        pdf_extract::extract_text(&path)
-    }))
-    .map_err(|_| "PDF解析时发生panic".to_string())?
-    .map_err(|e| format!("PDF解析失败: {}", e))
+/// 成功收尾信息：文案由后台线程生成，UI 线程只负责应用。
+struct KbDoneInfo {
+    single_status: String,
+    single_message: String,
+    clear_url: bool,
+    clear_title: bool,
+    clear_content: bool,
+}
+
+/// 后台知识库索引线程入口：按任务类型执行读取/爬取、分块、向量化与入库，
+/// 通过 `tx` 上报进度与结果；UI 线程由 [`DesktopAI::poll_kb_job`] 接收。
+fn run_kb_job(
+    store: Arc<VectorStore>,
+    job: KbIndexJob,
+    cancel: Arc<AtomicBool>,
+    tx: mpsc::Sender<KbIndexMsg>,
+) {
+    match job {
+        KbIndexJob::File {
+            path,
+            filename,
+            ext,
+        } => {
+            let content = match ext.as_str() {
+                "pdf" => match extract_pdf_safe(&path) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = tx.send(KbIndexMsg::Error(format!("PDF解析失败: {}", e)));
+                        return;
+                    }
+                },
+                _ => match std::fs::read_to_string(&path) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = tx.send(KbIndexMsg::Error(format!("读取失败: {}", e)));
+                        return;
+                    }
+                },
+            };
+            let _ = tx.send(KbIndexMsg::Progress {
+                frac: 0.2,
+                status: "分块中...".into(),
+            });
+            let result = index_content(&store, &filename, &content, 500, 50, &cancel, &tx);
+            finish_kb_job(
+                &tx,
+                result,
+                KbDoneInfo {
+                    single_status: format!("已添加: {}", filename),
+                    single_message: format!("已索引文档: {}", filename),
+                    clear_url: false,
+                    clear_title: false,
+                    clear_content: false,
+                },
+            );
+        }
+        KbIndexJob::Paste { title, content } => {
+            let char_count = content.chars().count();
+            let _ = tx.send(KbIndexMsg::Progress {
+                frac: 0.2,
+                status: format!("分块中... ({:.0} 字符)", char_count as f64),
+            });
+            let result = index_content(&store, &title, &content, 512, 64, &cancel, &tx);
+            finish_kb_job(
+                &tx,
+                result,
+                KbDoneInfo {
+                    single_status: "完成".into(),
+                    single_message: format!("已添加文档: {}", title),
+                    clear_url: false,
+                    clear_title: true,
+                    clear_content: true,
+                },
+            );
+        }
+        KbIndexJob::Crawl { url, depth } => {
+            let _ = tx.send(KbIndexMsg::Progress {
+                frac: 0.05,
+                status: if depth > 1 {
+                    format!("深度爬取(≤{}层): {}", depth, url)
+                } else {
+                    format!("正在爬取: {}", url)
+                },
+            });
+            let results = if depth > 1 {
+                let config = crate::crawler::CrawlConfig {
+                    max_depth: depth,
+                    max_pages: 15,
+                    ..Default::default()
+                };
+                crate::crawler::crawl_with_depth(&url, config)
+            } else {
+                vec![crate::crawler::crawl_url(&url)]
+            };
+
+            let total = results.len();
+            let mut added = 0usize;
+            for result in &results {
+                if cancel.load(Ordering::Relaxed) {
+                    let _ = tx.send(KbIndexMsg::Error("已取消".into()));
+                    return;
+                }
+                match result {
+                    Ok(page) => {
+                        let _ = tx.send(KbIndexMsg::Progress {
+                            frac: 0.3 + (added as f32 / total as f32) * 0.6,
+                            status: format!(
+                                "索引 {}/{}: {}",
+                                added + 1,
+                                total,
+                                &page.title[..page.title.len().min(30)]
+                            ),
+                        });
+                        if let Err(e) = store.add_document(&page.title, &page.text, 500, 50) {
+                            log::warn!("索引失败 {}: {}", page.title, e);
+                        }
+                        added += 1;
+                    }
+                    Err(e) => {
+                        log::warn!("爬取失败: {}", e);
+                    }
+                }
+            }
+
+            if added > 0 {
+                let _ = tx.send(KbIndexMsg::Done {
+                    status: format!("完成: {} 个文档已索引", added),
+                    status_message: format!("已爬取 {} 个文档", added),
+                    clear_url: true,
+                    clear_title: false,
+                    clear_content: false,
+                });
+            } else {
+                let _ = tx.send(KbIndexMsg::Error(
+                    "未爬取到有效内容。页面可能需 JavaScript 渲染，或 URL 不正确。".into(),
+                ));
+            }
+        }
+    }
+}
+
+/// 分块 + 向量化 + 入库，返回 `(成功段数, 总段数)`。
+/// 大文档自动分段并逐段上报进度；单段文档直接入库。
+fn index_content(
+    store: &VectorStore,
+    title: &str,
+    content: &str,
+    chunk_size: usize,
+    overlap: usize,
+    cancel: &AtomicBool,
+    tx: &mpsc::Sender<KbIndexMsg>,
+) -> Result<(usize, usize), String> {
+    let char_count = content.chars().count();
+    if char_count > config::KB_SINGLE_DOC_CHARS {
+        let chunks = crate::chunker::chunk_text(content, chunk_size, overlap);
+        let total = chunks.len();
+        let mut added = 0usize;
+        for (i, chunk) in chunks.iter().enumerate() {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("已取消".into());
+            }
+            let _ = tx.send(KbIndexMsg::Progress {
+                frac: 0.3 + (i as f32 / total as f32) * 0.65,
+                status: format!("索引分段 {}/{}", i + 1, total),
+            });
+            let seg_title = format!("{} 段{}", title, i + 1);
+            match store.add_document(&seg_title, chunk, chunk_size, overlap) {
+                Ok(()) => added += 1,
+                Err(e) => log::warn!("索引段失败 {}: {}", seg_title, e),
+            }
+        }
+        Ok((added, total))
+    } else {
+        store
+            .add_document(title, content, chunk_size, overlap)
+            .map_err(|e| format!("索引失败: {}", e))?;
+        Ok((1, 1))
+    }
+}
+
+/// 统一发送索引收尾消息：成功 → Done，失败 → Error。
+fn finish_kb_job(tx: &mpsc::Sender<KbIndexMsg>, result: Result<(usize, usize), String>, info: KbDoneInfo) {
+    match result {
+        Ok((added, total)) => {
+            if total > 1 {
+                let _ = tx.send(KbIndexMsg::Done {
+                    status: "完成".into(),
+                    status_message: format!("文档较长，已自动切分为 {}/{} 段索引", added, total),
+                    clear_url: info.clear_url,
+                    clear_title: info.clear_title,
+                    clear_content: info.clear_content,
+                });
+            } else {
+                let _ = tx.send(KbIndexMsg::Done {
+                    status: info.single_status,
+                    status_message: info.single_message,
+                    clear_url: info.clear_url,
+                    clear_title: info.clear_title,
+                    clear_content: info.clear_content,
+                });
+            }
+        }
+        Err(e) => {
+            let _ = tx.send(KbIndexMsg::Error(e));
+        }
+    }
 }
 
 fn detect_hardware() -> (usize, Option<String>) {
@@ -245,7 +485,7 @@ impl DesktopAI {
 
         let (cpu_cores, ram_warning) = detect_hardware();
         let gpu_info = detect_gpus();
-        let vector_store = VectorStore::new(&config::kb_dir());
+        let vector_store = Arc::new(VectorStore::new(&config::kb_dir()));
         let sandbox = Sandbox::new(config::sandbox_dir());
 
         Self {
@@ -271,7 +511,7 @@ impl DesktopAI {
             kb_indexing: false,
             kb_index_progress: 0.0,
             kb_index_status: String::new(),
-            kb_crawl_stop: None,
+            kb_job: None,
             show_search_panel: false,
             search_query: String::new(),
             search_results: Vec::new(),
@@ -394,7 +634,11 @@ impl DesktopAI {
                     self.status_message = format!("{} 就绪{}", model_name, gpu_tag);
                 }
                 if let Some(engine) = embedding {
-                    self.vector_store.set_engine(engine);
+                    // 此时没有任何后台任务共享 vector_store（KB 索引需要
+                    // engine 才能启动），get_mut 必然成功。
+                    if let Some(store) = Arc::get_mut(&mut self.vector_store) {
+                        store.set_engine(engine);
+                    }
                 }
                 self.inference = Some(inf);
             }
@@ -465,64 +709,12 @@ impl DesktopAI {
             }
         }
 
-        self.kb_title.clear();
-        self.kb_indexing = true;
-        self.kb_index_progress = 0.0;
-        self.kb_index_status = "读取文件...".into();
-
-        let content = match ext.as_str() {
-            "pdf" => match extract_pdf_safe(&path) {
-                Ok(t) => t,
-                Err(e) => {
-                    self.kb_indexing = false;
-                    self.error_message = Some(format!("PDF解析失败: {}", e));
-                    return;
-                }
-            },
-            _ => match std::fs::read_to_string(&path) {
-                Ok(t) => t,
-                Err(e) => {
-                    self.kb_indexing = false;
-                    self.error_message = Some(format!("读取失败: {}", e));
-                    return;
-                }
-            },
-        };
-
-        let char_count = content.chars().count();
-        if char_count > config::KB_SINGLE_DOC_CHARS {
-            // ── Auto-chunk large document ──
-            self.kb_index_progress = 0.2;
-            self.kb_index_status = format!("文档较长 ({} 字符)，正在自动分段...", char_count);
-            let chunks = crate::chunker::chunk_text(&content, 500, 50);
-            let total = chunks.len();
-            let mut added = 0usize;
-            for (i, chunk) in chunks.iter().enumerate() {
-                self.kb_index_progress = 0.3 + (i as f32 / total as f32) * 0.65;
-                let seg_title = format!("{} 段{}", filename, i + 1);
-                match self.vector_store.add_document(&seg_title, chunk, 500, 50) {
-                    Ok(()) => added += 1,
-                    Err(e) => log::warn!("索引段失败 {}: {}", seg_title, e),
-                }
-            }
-            self.kb_index_progress = 1.0;
-            self.kb_index_status = "完成".into();
-            self.status_message = format!("文档较长，已自动切分为 {}/{} 段索引", added, total,);
-        } else {
-            self.kb_index_progress = 0.3;
-            self.kb_index_status = format!("分块中... ({:.0} 字符)", char_count as f64);
-            match self.vector_store.add_document(&filename, &content, 500, 50) {
-                Ok(()) => {
-                    self.kb_index_progress = 1.0;
-                    self.kb_index_status = format!("已添加: {}", filename);
-                    self.status_message = format!("已索引文档: {}", filename);
-                }
-                Err(e) => {
-                    self.error_message = Some(format!("索引失败: {}", e));
-                }
-            }
-        }
-        self.kb_indexing = false;
+        // 读取/分块/向量化/入库全部在后台线程执行，避免 UI 卡顿。
+        self.start_kb_job(KbIndexJob::File {
+            path,
+            filename,
+            ext,
+        });
     }
 
     pub(crate) fn paste_and_index_text(&mut self) {
@@ -535,44 +727,8 @@ impl DesktopAI {
             self.error_message = Some("需要先加载模型才能使用知识库".into());
             return;
         }
-        self.kb_indexing = true;
-        self.kb_index_progress = 0.1;
-
-        let char_count = content.chars().count();
-        if char_count > config::KB_SINGLE_DOC_CHARS {
-            // ── Auto-chunk ──
-            self.kb_index_status = format!("文档较长 ({} 字符)，正在自动分段...", char_count);
-            let chunks = crate::chunker::chunk_text(&content, 512, 64);
-            let total = chunks.len();
-            let mut added = 0usize;
-            for (i, chunk) in chunks.iter().enumerate() {
-                let seg_title = format!("{} 段{}", title, i + 1);
-                match self.vector_store.add_document(&seg_title, chunk, 512, 64) {
-                    Ok(()) => added += 1,
-                    Err(e) => log::warn!("索引段失败 {}: {}", seg_title, e),
-                }
-            }
-            self.kb_title.clear();
-            self.kb_content.clear();
-            self.kb_index_progress = 1.0;
-            self.kb_index_status = "完成".into();
-            self.status_message = format!("文档较长，已自动切分为 {}/{} 段索引", added, total,);
-        } else {
-            self.kb_index_status = "正在向量化...".into();
-            match self.vector_store.add_document(&title, &content, 512, 64) {
-                Ok(()) => {
-                    self.kb_title.clear();
-                    self.kb_content.clear();
-                    self.kb_index_progress = 1.0;
-                    self.kb_index_status = "完成".into();
-                    self.status_message = format!("已添加文档: {}", title);
-                }
-                Err(e) => {
-                    self.error_message = Some(format!("添加失败: {}", e));
-                }
-            }
-        }
-        self.kb_indexing = false;
+        // 读取/分块/向量化/入库全部在后台线程执行，避免 UI 卡顿。
+        self.start_kb_job(KbIndexJob::Paste { title, content });
     }
 
     pub(crate) fn crawl_url_to_kb(&mut self) {
@@ -588,62 +744,85 @@ impl DesktopAI {
             return;
         }
         let depth = self.kb_crawl_depth.clamp(1, 3);
+        // 爬取/分块/向量化/入库全部在后台线程执行，避免 UI 卡顿。
+        self.start_kb_job(KbIndexJob::Crawl { url, depth });
+    }
 
-        self.kb_crawl_stop = None;
+    /// 启动后台知识库索引任务（三种入口共用）。
+    fn start_kb_job(&mut self, job: KbIndexJob) {
+        let store = Arc::clone(&self.vector_store);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        self.kb_job = Some(KbJobState {
+            rx,
+            cancel: cancel.clone(),
+        });
         self.kb_indexing = true;
         self.kb_index_progress = 0.0;
-        self.kb_index_status = if depth > 1 {
-            format!("深度爬取(≤{}层): {}", depth, url)
-        } else {
-            format!("正在爬取: {}", url)
+        self.kb_index_status = match &job {
+            KbIndexJob::File { .. } => "读取文件...".into(),
+            KbIndexJob::Paste { .. } => "正在向量化...".into(),
+            KbIndexJob::Crawl { depth, url } if *depth > 1 => {
+                format!("深度爬取(≤{}层): {}", depth, url)
+            }
+            KbIndexJob::Crawl { url, .. } => format!("正在爬取: {}", url),
         };
+        thread::spawn(move || run_kb_job(store, job, cancel, tx));
+    }
 
-        let results = if depth > 1 {
-            let config = crate::crawler::CrawlConfig {
-                max_depth: depth,
-                max_pages: 15,
-                ..Default::default()
-            };
-            crate::crawler::crawl_with_depth(&url, config)
-        } else {
-            vec![crate::crawler::crawl_url(&url)]
+    /// 轮询后台索引任务：更新进度/状态，任务结束（Done/Error）时恢复 UI。
+    pub(crate) fn poll_kb_job(&mut self) {
+        let job = match self.kb_job.take() {
+            Some(j) => j,
+            None => return,
         };
-
-        let mut added = 0usize;
-        for result in &results {
-            match result {
-                Ok(page) => {
-                    self.kb_index_progress = (added as f32 / results.len() as f32).min(0.9);
-                    self.kb_index_status = format!(
-                        "索引 {}/{}: {}",
-                        added + 1,
-                        results.len(),
-                        &page.title[..page.title.len().min(30)]
-                    );
-                    if let Err(e) = self
-                        .vector_store
-                        .add_document(&page.title, &page.text, 500, 50)
-                    {
-                        log::warn!("索引失败 {}: {}", page.title, e);
-                    }
-                    added += 1;
+        loop {
+            match job.rx.try_recv() {
+                Ok(KbIndexMsg::Progress { frac, status }) => {
+                    self.kb_index_progress = frac;
+                    self.kb_index_status = status;
                 }
-                Err(e) => {
-                    log::warn!("爬取失败: {}", e);
+                Ok(KbIndexMsg::Done {
+                    status,
+                    status_message,
+                    clear_url,
+                    clear_title,
+                    clear_content,
+                }) => {
+                    self.kb_index_progress = 1.0;
+                    self.kb_index_status = status;
+                    self.status_message = status_message;
+                    if clear_url {
+                        self.kb_url.clear();
+                    }
+                    if clear_title {
+                        self.kb_title.clear();
+                    }
+                    if clear_content {
+                        self.kb_content.clear();
+                    }
+                    self.kb_indexing = false;
+                    self.kb_job = None;
+                    return;
+                }
+                Ok(KbIndexMsg::Error(e)) => {
+                    self.error_message = Some(e);
+                    self.kb_indexing = false;
+                    self.kb_job = None;
+                    return;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    self.kb_job = Some(job);
+                    return;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // 线程异常退出（如 panic）：恢复 UI 状态
+                    self.kb_indexing = false;
+                    self.kb_job = None;
+                    return;
                 }
             }
         }
-
-        if added > 0 {
-            self.kb_url.clear();
-            self.kb_index_progress = 1.0;
-            self.kb_index_status = format!("完成: {} 个文档已索引", added);
-            self.status_message = format!("已爬取 {} 个文档", added);
-        } else {
-            self.error_message =
-                Some("未爬取到有效内容。页面可能需 JavaScript 渲染，或 URL 不正确。".into());
-        }
-        self.kb_indexing = false;
     }
 
     // ─── Concurrent downloads ──────────────────────────
@@ -661,6 +840,7 @@ impl DesktopAI {
         let dest = config::models_dir().join(&info.filename);
         let url = info.url.clone();
         let expected_sha256 = info.expected_sha256.clone();
+        let parts = info.parts.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
 
@@ -675,7 +855,14 @@ impl DesktopAI {
         );
 
         thread::spawn(move || {
-            downloader::download_model(&url, dest, cancel, tx, expected_sha256.as_deref());
+            downloader::download_model(
+                &url,
+                dest,
+                cancel,
+                tx,
+                expected_sha256.as_deref(),
+                &parts,
+            );
         });
     }
 
@@ -759,7 +946,11 @@ impl DesktopAI {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
         let do_search = self.config.search_enabled;
-        let do_kb = self.config.kb_enabled && self.vector_store.has_engine();
+        // 索引进行中跳过 KB 注入：embedding 锁被后台任务持有，
+        // 避免 UI 线程等待整个文档的向量化过程。
+        let do_kb = self.config.kb_enabled
+            && self.vector_store.has_engine()
+            && self.kb_job.is_none();
         let user_query = text.clone();
 
         let kb_data = if do_kb {
@@ -1108,6 +1299,7 @@ impl eframe::App for DesktopAI {
         self.poll_all_downloads();
         self.poll_generation();
         self.poll_search();
+        self.poll_kb_job();
 
         // Keyboard shortcuts
         let input = ctx.input(|i| i.clone());

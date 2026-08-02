@@ -112,8 +112,10 @@ fn concurrent_conversation_crud_no_race() {
 
 #[test]
 fn config_save_load_roundtrip() {
-    let mut cfg = Config::default();
-    cfg.theme = "light".into();
+    let mut cfg = Config {
+        theme: "light".into(),
+        ..Default::default()
+    };
     cfg.font_size = 18;
     cfg.api_enabled = true;
     cfg.api_port = 9999;
@@ -151,7 +153,7 @@ fn api_server_smoke_test() {
         return;
     }
 
-    let mut config = config::load_config();
+    let config = config::load_config();
     let model_id = match &config.selected_model_id {
         Some(id) => id.clone(),
         None => {

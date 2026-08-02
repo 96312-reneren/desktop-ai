@@ -6,7 +6,11 @@ use egui::{vec2, Color32, RichText, ScrollArea, TextEdit};
 impl DesktopAI {
     pub(crate) fn render_sidebar(&mut self, ui: &mut egui::Ui) {
         ui.heading("桌面AI");
-        ui.label(RichText::new("v5.8").size(10.0).color(Color32::GRAY));
+        ui.label(
+            RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                .size(10.0)
+                .color(Color32::GRAY),
+        );
         ui.add_space(8.0);
 
         if ui.button("+ 新对话").clicked() {

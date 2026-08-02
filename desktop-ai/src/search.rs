@@ -10,6 +10,8 @@ pub fn search_duckduckgo(query: &str) -> Result<Vec<SearchResult>, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(5))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .danger_accept_invalid_certs(false)
+        .danger_accept_invalid_hostnames(false)
         .build()
         .map_err(|e| format!("client: {}", e))?;
 

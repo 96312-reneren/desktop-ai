@@ -114,6 +114,11 @@ impl DesktopAI {
             ui.add(egui::ProgressBar::new(self.kb_index_progress)
                 .desired_width(ui.available_width())
                 .text(&self.kb_index_status));
+            if let Some(job) = &self.kb_job {
+                if ui.small_button("取消索引").clicked() {
+                    job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
             ui.add_space(2.0);
         }
 

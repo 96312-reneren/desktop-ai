@@ -175,6 +175,51 @@ impl Sandbox {
     pub fn root_path(&self) -> &PathBuf {
         &self.root
     }
+
+    /// 二进制文件写入（无可配置大小限制，适用于模型文件等大文件）。
+    pub fn write_bytes(&self, relative: &str, content: &[u8]) -> Result<(), String> {
+        let path = self.safe_path(relative)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+        }
+        let mut f = fs::File::create(&path).map_err(|e| format!("创建文件失败: {}", e))?;
+        f.write_all(content)
+            .map_err(|e| format!("写入失败: {}", e))?;
+        Ok(())
+    }
+
+    /// 二进制文件读取。
+    pub fn read_bytes(&self, relative: &str) -> Result<Vec<u8>, String> {
+        let path = self.safe_path(relative)?;
+        if !path.exists() {
+            return Err(format!("文件不存在: {}", relative));
+        }
+        if path.is_dir() {
+            return Err("无法读取目录".into());
+        }
+        fs::read(&path).map_err(|e| format!("读取失败: {}", e))
+    }
+
+    /// 删除文件（路径遍历防护）。
+    pub fn delete(&self, relative: &str) -> Result<(), String> {
+        let path = self.safe_path(relative)?;
+        if !path.exists() {
+            return Err(format!("文件不存在: {}", relative));
+        }
+        if path.is_dir() {
+            fs::remove_dir_all(&path).map_err(|e| format!("删除目录失败: {}", e))?;
+        } else {
+            fs::remove_file(&path).map_err(|e| format!("删除文件失败: {}", e))?;
+        }
+        Ok(())
+    }
+
+    /// 检查文件是否存在。
+    pub fn exists(&self, relative: &str) -> bool {
+        self.safe_path(relative)
+            .map(|p| p.exists())
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
@@ -245,5 +290,66 @@ mod tests {
         let sb = test_sandbox();
         sb.write("brand_new_file.txt", "ok").unwrap();
         assert_eq!(sb.read("brand_new_file.txt").unwrap(), "ok");
+    }
+
+    #[test]
+    fn test_write_bytes_and_read_bytes() {
+        let sb = test_sandbox();
+        let data: Vec<u8> = vec![0, 1, 2, 255, 128, 64];
+        sb.write_bytes("binary.bin", &data).unwrap();
+        let back = sb.read_bytes("binary.bin").unwrap();
+        assert_eq!(back, data);
+    }
+
+    #[test]
+    fn test_write_bytes_large_file_no_size_limit() {
+        let sb = test_sandbox();
+        // 写入超过 MAX_FILE_SIZE 的二进制数据应成功
+        let data = vec![0xABu8; 600_000];
+        sb.write_bytes("large.bin", &data).unwrap();
+        let back = sb.read_bytes("large.bin").unwrap();
+        assert_eq!(back.len(), 600_000);
+    }
+
+    #[test]
+    fn test_read_bytes_nonexistent() {
+        let sb = test_sandbox();
+        assert!(sb.read_bytes("no_such_file.bin").is_err());
+    }
+
+    #[test]
+    fn test_delete_file() {
+        let sb = test_sandbox();
+        sb.write("to_delete.txt", "bye").unwrap();
+        assert!(sb.exists("to_delete.txt"));
+        sb.delete("to_delete.txt").unwrap();
+        assert!(!sb.exists("to_delete.txt"));
+    }
+
+    #[test]
+    fn test_delete_nonexistent_is_error() {
+        let sb = test_sandbox();
+        assert!(sb.delete("ghost.txt").is_err());
+    }
+
+    #[test]
+    fn test_delete_path_traversal_blocked() {
+        let sb = test_sandbox();
+        assert!(sb.delete("../important.txt").is_err());
+    }
+
+    #[test]
+    fn test_exists_true_and_false() {
+        let sb = test_sandbox();
+        assert!(!sb.exists("maybe.txt"));
+        sb.write("maybe.txt", "here").unwrap();
+        assert!(sb.exists("maybe.txt"));
+    }
+
+    #[test]
+    fn test_exists_path_traversal_returns_false() {
+        let sb = test_sandbox();
+        // 路径遍历不应 panic，应返回 false
+        assert!(!sb.exists("../../etc/passwd"));
     }
 }

@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
 use crate::db::Db;
 use crate::embedding::EmbeddingEngine;
@@ -29,9 +30,16 @@ pub struct StoredDocument {
 ///
 /// Concurrency: embedding inference happens *before* taking the DB lock;
 /// inside the lock only short SQL transactions run (see [`crate::db`]).
+///
+/// The embedding engine is guarded by a `Mutex`: `EmbeddingEngine` is
+/// `Send` but not `Sync` (it owns raw FFI pointers), and indexing runs on a
+/// background thread while the UI thread may call `embed_query` at the same
+/// time. Both paths lock the same mutex, so inference is serialised and the
+/// engine is only ever touched by one thread at a time. Keep heavy work
+/// inside the lock to a minimum.
 pub struct VectorStore {
     db: Db,
-    engine: Option<EmbeddingEngine>,
+    engine: Option<Arc<Mutex<EmbeddingEngine>>>,
 }
 
 const SCHEMA_VERSION: i64 = 1;
@@ -103,7 +111,7 @@ impl VectorStore {
     /// `VectorStore::embed_query` / `add_document` / `search` which borrow
     /// `&self` internally.
     pub fn set_engine(&mut self, engine: EmbeddingEngine) {
-        self.engine = Some(engine);
+        self.engine = Some(Arc::new(Mutex::new(engine)));
     }
 
     pub fn has_engine(&self) -> bool {
@@ -117,13 +125,16 @@ impl VectorStore {
     }
 
     pub fn add_document(
-        &mut self,
+        &self,
         title: &str,
         text: &str,
         chunk_size: usize,
         overlap: usize,
     ) -> Result<(), String> {
-        let engine = self.engine.as_ref().ok_or("embedding engine not loaded")?;
+        let engine = self
+            .engine
+            .as_ref()
+            .ok_or("embedding engine not loaded")?;
         let chunks = crate::chunker::chunk_text(text, chunk_size, overlap);
         if chunks.is_empty() {
             return Err("no content to index".into());
@@ -131,9 +142,12 @@ impl VectorStore {
 
         // Heavy work (embedding) happens outside the DB lock.
         let mut embedded: Vec<(String, Vec<f32>)> = Vec::with_capacity(chunks.len());
-        for chunk in &chunks {
-            let vec = engine.embed(chunk);
-            embedded.push((chunk.clone(), vec));
+        {
+            let engine = engine.lock().unwrap();
+            for chunk in &chunks {
+                let vec = engine.embed(chunk);
+                embedded.push((chunk.clone(), vec));
+            }
         }
 
         let id = format!("doc_{}", chrono::Utc::now().timestamp_millis());
@@ -158,7 +172,7 @@ impl VectorStore {
         })
     }
 
-    pub fn delete_document(&mut self, id: &str) -> Result<(), String> {
+    pub fn delete_document(&self, id: &str) -> Result<(), String> {
         self.db.with_conn(|c| {
             c.execute("DELETE FROM documents WHERE id = ?1", params![id])?;
             Ok(())
@@ -167,15 +181,21 @@ impl VectorStore {
 
     #[allow(dead_code)]
     pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>, String> {
-        let engine = self.engine.as_ref().ok_or("embedding engine not loaded")?;
-        let query_vec = engine.embed(query);
+        let engine = self
+            .engine
+            .as_ref()
+            .ok_or("embedding engine not loaded")?;
+        let query_vec = engine.lock().unwrap().embed(query);
         let docs = self.documents();
         Ok(search_by_vector(&docs, &query_vec, top_k))
     }
 
     pub fn embed_query(&self, query: &str) -> Result<Vec<f32>, String> {
-        let engine = self.engine.as_ref().ok_or("embedding engine not loaded")?;
-        Ok(engine.embed(query))
+        let engine = self
+            .engine
+            .as_ref()
+            .ok_or("embedding engine not loaded")?;
+        Ok(engine.lock().unwrap().embed(query))
     }
 
     pub fn documents_snapshot(&self) -> Vec<StoredDocument> {
@@ -241,6 +261,9 @@ fn migrate_from_json(store_dir: &std::path::Path, c: &mut Connection) -> Result<
         embedding: Vec<f32>,
     }
 
+    // 注意：遗留 JSON 文件位于 kb_dir()（data_dir/knowledge_base），
+    // 而沙箱目录为 data_dir/sandbox，两者不在同一路径下，
+    // 因此不强制使用沙箱读取，避免破坏现有迁移逻辑。
     let raw =
         std::fs::read_to_string(&legacy_path).map_err(|e| format!("read legacy kb: {}", e))?;
     let data: LegacyData =
@@ -348,7 +371,7 @@ mod tests {
 
     #[test]
     fn blob_roundtrip() {
-        let v = vec![0.1f32, -0.5, 3.14, 0.0, 1e-8];
+        let v = vec![0.1f32, -0.5, std::f32::consts::PI, 0.0, 1e-8];
         let blob = embed_to_blob(&v);
         let back = blob_to_embed(&blob);
         assert_eq!(v, back);
@@ -363,7 +386,7 @@ mod tests {
 
     #[test]
     fn add_and_delete_document_without_engine_is_error() {
-        let (mut store, dir) = temp_store();
+        let (store, dir) = temp_store();
         assert!(store.add_document("t", "body", 500, 50).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -458,5 +481,14 @@ mod tests {
         let store2 = VectorStore::new(&dir);
         assert!(store2.documents().is_empty());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_store_is_send_sync() {
+        // 编译期断言：后台索引线程需要把 VectorStore 共享到其他线程。
+        // EmbeddingEngine 本身非 Sync，靠 Mutex 包裹后 VectorStore 必须
+        // 满足 Send + Sync 才能跨线程使用。
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<VectorStore>();
     }
 }
