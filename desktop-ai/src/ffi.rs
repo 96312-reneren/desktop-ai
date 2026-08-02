@@ -722,7 +722,7 @@ mod tests {
         let sz = std::mem::size_of::<LlamaModelParams>();
         // Must be > 0 and a sane size (llama.cpp 层直接通过值传递)
         assert!(
-            sz >= 30 && sz <= 128,
+            (30..=128).contains(&sz),
             "LlamaModelParams size insane: {}",
             sz
         );
@@ -732,7 +732,7 @@ mod tests {
     fn llama_context_params_is_correctly_sized() {
         let sz = std::mem::size_of::<LlamaContextParams>();
         assert!(
-            sz >= 50 && sz <= 256,
+            (50..=256).contains(&sz),
             "LlamaContextParams size insane: {}",
             sz
         );
@@ -741,7 +741,7 @@ mod tests {
     #[test]
     fn llama_batch_is_correctly_sized() {
         let sz = std::mem::size_of::<LlamaBatch>();
-        assert!(sz >= 40 && sz <= 128, "LlamaBatch size insane: {}", sz);
+        assert!((40..=128).contains(&sz), "LlamaBatch size insane: {}", sz);
     }
 
     #[test]

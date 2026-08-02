@@ -64,7 +64,9 @@ fn strip_file_prefix(s: &str) -> &str {
     }
 }
 
-fn extract_pdf_safe(path: &std::path::Path) -> Result<String, String> {
+/// 提取 PDF 文本，panic 安全（pdf_extract 在损坏文件上可能 panic）。
+/// 供爬虫与知识库文件索引共用。
+pub fn extract_pdf_safe(path: &std::path::Path) -> Result<String, String> {
     let path = path.to_path_buf();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         pdf_extract::extract_text(&path)
@@ -614,7 +616,7 @@ mod tests {
     fn test_dirty_data_filter_rejects_high_replacement_chars() {
         // Build text where >10 % of chars are U+FFFD — must trigger the guard.
         let prefix = "Short normal text. ";
-        let garbage: String = std::iter::repeat('\u{FFFD}').take(20).collect();
+        let garbage: String = "\u{FFFD}".repeat(20);
         let mixed = format!("{}{}", prefix, garbage);
 
         let dir = std::env::temp_dir().join("desktop_ai_dirty_test");

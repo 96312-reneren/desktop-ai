@@ -8,6 +8,18 @@ use std::thread;
 
 use crate::inference::{LlamaInference, StreamToken};
 
+/// 常量时间字符串比较，防止时序攻击
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let max_len = a.len().max(b.len());
+    let mut diff = (a.len() ^ b.len()) as u8;
+    for i in 0..max_len {
+        let x = *a.get(i).unwrap_or(&0);
+        let y = *b.get(i).unwrap_or(&0);
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Maximum simultaneous in-flight API connections. Extra connections are
 /// rejected with 503 to prevent trivial local DoS via unbounded thread spawn.
 const MAX_CONCURRENT_CONNS: u32 = 16;
@@ -15,7 +27,23 @@ const MAX_CONCURRENT_CONNS: u32 = 16;
 const MAX_BODY_SIZE: usize = 1_048_576;
 /// Hosts permitted by the CORS policy. Command-line clients (no `Origin`
 /// header) are always allowed; browser origins must match one of these.
-const ALLOWED_ORIGIN_HOSTS: [&str; 2] = ["localhost", "127.0.0.1"];
+const ALLOWED_ORIGIN_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
+/// Allowed HTTP methods for CORS preflight responses.
+const CORS_ALLOWED_METHODS: &str = "GET, POST";
+/// Allowed request headers for CORS preflight responses.
+const CORS_ALLOWED_HEADERS: &str = "Content-Type, Authorization";
+/// Preflight cache duration in seconds (1 hour).
+const CORS_MAX_AGE: &str = "3600";
+/// 最大请求 URI 长度（8 KiB），防止超长 URI DoS。
+const MAX_URI_LEN: usize = 8192;
+/// 最大请求头数量，防止头注入 DoS。
+const MAX_HEADER_COUNT: usize = 64;
+/// 单个请求头值最大长度（8 KiB）。
+const MAX_HEADER_VALUE_LEN: usize = 8192;
+/// 请求头区域最大总字节数（64 KiB）。
+const MAX_HEADER_SECTION_SIZE: usize = 65536;
+/// 允许的 HTTP 方法白名单。
+const ALLOWED_METHODS: &[&str] = &["GET", "POST", "OPTIONS"];
 
 pub struct ApiServer {
     stop_flag: Arc<AtomicBool>,
@@ -129,13 +157,28 @@ fn handle_client(
         Err(e) => {
             log::warn!("API read_http_request: {}", e);
             let _ = stream.write_all(
-                json_response(400, &serde_json::json!({"error": e}).to_string()).as_bytes(),
+                json_response(400, r#"{"error":"bad request"}"#).as_bytes(),
             );
             return;
         }
     };
     let request = String::from_utf8_lossy(&raw);
-    let (method, path, body, origin) = parse_http(&request);
+
+    // 安全加固：使用经过验证的 HTTP 解析器
+    let parsed = match parse_http_validated(&request) {
+        Ok(p) => p,
+        Err((code, msg)) => {
+            log::warn!("API parse_http 拒绝: {} (状态码 {})", msg, code);
+            let _ = stream.write_all(
+                json_response(code, &format!(r#"{{"error":"{}"}} "#, msg)).as_bytes(),
+            );
+            return;
+        }
+    };
+    let method = parsed.method.as_str();
+    let path = parsed.path;
+    let body = parsed.body;
+    let origin = parsed.origin;
 
     // CORS: browser origins must be on the allow-list; command-line (no
     // Origin) is always permitted.
@@ -151,13 +194,18 @@ fn handle_client(
     // P0-2: /v1/* endpoints require Bearer token.
     // /health and /ready are intentionally unauthenticated for liveness probes.
     if path.starts_with("/v1/") {
-        let auth = parse_header(&request, "Authorization");
+        let auth = parsed
+            .headers
+            .iter()
+            .find(|(k, _)| k == "authorization")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
         let expected = format!("Bearer {}", api_token);
-        if auth.as_deref() != Some(expected.as_str()) {
+        if !constant_time_eq(auth.as_bytes(), expected.as_bytes()) {
             let _ = stream.write_all(
                 json_response(
                     401,
-                    r#"{"error":"unauthorized; set Authorization: Bearer <token>"}"#,
+                    r#"{"error":"unauthorized"}"#,
                 )
                 .as_bytes(),
             );
@@ -165,7 +213,7 @@ fn handle_client(
         }
     }
 
-    let mut response = match (method, path.as_str()) {
+    let response = match (method, path.as_str()) {
         ("GET", "/health") => json_response(200, r#"{"status":"ok"}"#),
         ("GET", "/ready") => json_response(
             200,
@@ -183,8 +231,15 @@ fn handle_client(
             .to_string();
             json_response(200, &body)
         }
-        ("POST", "/v1/chat/completions") => handle_chat_completion(body, &inf, &model_name),
-        ("OPTIONS", _) => cors_response(origin.as_deref()),
+        ("POST", "/v1/chat/completions") => {
+            // 流式模式下响应已直接写入 stream，返回 None 跳过统一写响应。
+            match handle_chat_completion(&mut stream, &body, &inf, &model_name, origin.as_deref())
+            {
+                Some(resp) => resp,
+                None => return,
+            }
+        }
+        ("OPTIONS", _) => cors_preflight_response(origin.as_deref()),
         (_, "/") => json_response(
             200,
             r#"{"message":"桌面AI API server running","endpoints":["/v1/models","/v1/chat/completions"]}"#,
@@ -192,31 +247,33 @@ fn handle_client(
         _ => json_response(404, r#"{"error":"not found"}"#),
     };
 
-    // Reflect the (already allow-listed) Origin instead of the wildcard so
-    // browsers never treat responses as readable cross-origin.
-    if let Some(ref origin) = origin {
-        response = response.replace(
-            "Access-Control-Allow-Origin: *",
-            &format!("Access-Control-Allow-Origin: {}", origin),
-        );
-    }
+    // Inject CORS headers for the validated origin. The origin was already
+    // checked against the allow-list above, so we reflect it verbatim.
+    let response = inject_cors_headers(&response, origin.as_deref());
 
     let _ = stream.write_all(response.as_bytes());
 }
 
+/// 处理 `/v1/chat/completions`。
+///
+/// 非流式（stream=false）：返回 `Some(response)`，由调用方统一写出。
+/// 流式（stream=true）：SSE 响应在生成过程中逐块实时写入 `stream`，
+/// 客户端断开连接会立即停止推理；返回 `None` 表示响应已写出。
 fn handle_chat_completion(
+    stream: &mut TcpStream,
     body: &str,
     inf: &Arc<Mutex<LlamaInference>>,
     model_name: &str,
-) -> String {
+    origin: Option<&str>,
+) -> Option<String> {
     let req: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
-        Err(_) => return json_response(400, r#"{"error":"invalid JSON"}"#),
+        Err(_) => return Some(json_response(400, r#"{"error":"invalid JSON"}"#)),
     };
 
     let messages = match extract_messages(&req) {
         Some(msgs) => msgs,
-        None => return json_response(400, r#"{"error":"missing messages array"}"#),
+        None => return Some(json_response(400, r#"{"error":"missing messages array"}"#)),
     };
 
     let stream_mode = req["stream"].as_bool().unwrap_or(false);
@@ -227,10 +284,10 @@ fn handle_chat_completion(
     for msg in &messages {
         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
         if !allowed_roles.contains(&role) {
-            return json_response(
+            return Some(json_response(
                 400,
                 r#"{"error":"invalid role; allowed: system, user, assistant"}"#,
-            );
+            ));
         }
         let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
         // P0-3: sanitise ChatML control tokens in user-supplied content to
@@ -241,6 +298,20 @@ fn handle_chat_completion(
     }
     prompt.push_str("<|im_start|>assistant\n");
 
+    if stream_mode {
+        stream_sse_response(stream, inf, prompt, origin);
+        None
+    } else {
+        Some(non_stream_response(inf, model_name, prompt))
+    }
+}
+
+/// 非流式补全：收集完整输出后一次性返回 JSON。
+fn non_stream_response(
+    inf: &Arc<Mutex<LlamaInference>>,
+    model_name: &str,
+    prompt: String,
+) -> String {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let (tx, rx) = std::sync::mpsc::channel();
 
@@ -254,7 +325,10 @@ fn handle_chat_completion(
     while let Ok(token) = rx.recv() {
         match token {
             StreamToken::Text(t) => output.push_str(&t),
-            StreamToken::Error(e) => output.push_str(&format!("[error: {}]", e)),
+            StreamToken::Error(e) => {
+                log::error!("Inference error: {}", e);
+                output.push_str("[error: internal error]");
+            }
             StreamToken::Done => break,
         }
         if output.len() > 4096 {
@@ -263,97 +337,288 @@ fn handle_chat_completion(
         }
     }
 
-    if stream_mode {
-        // SSE streaming response
-        let id = format!("chatcmpl-{}", chrono::Utc::now().timestamp_millis());
-        let mut sse = String::from("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n");
-        for chunk in output.chars().collect::<Vec<_>>().chunks(50) {
-            let text: String = chunk.iter().collect();
-            sse.push_str(&format!(
-                "data: {}\n\n",
-                serde_json::json!({
-                    "id": &id,
-                    "object": "chat.completion.chunk",
-                    "choices": [{"delta": {"content": text}, "index": 0}]
-                })
-            ));
-        }
-        sse.push_str("data: [DONE]\n\n");
-        sse
-    } else {
-        let id = format!("chatcmpl-{}", chrono::Utc::now().timestamp_millis());
-        let resp = serde_json::json!({
-            "id": id,
-            "object": "chat.completion",
-            "created": chrono::Utc::now().timestamp(),
-            "model": model_name,
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": output},
-                "finish_reason": "stop"
-            }]
-        });
-        json_response(200, &resp.to_string())
+    let id = format!("chatcmpl-{}", chrono::Utc::now().timestamp_millis());
+    let resp = serde_json::json!({
+        "id": id,
+        "object": "chat.completion",
+        "created": chrono::Utc::now().timestamp(),
+        "model": model_name,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": output},
+            "finish_reason": "stop"
+        }]
+    });
+    json_response(200, &resp.to_string())
+}
+
+/// 真流式 SSE 补全：token 生成过程中实时写入响应。
+///
+/// 攒够 50 个字符（或流结束）刷出一个 SSE data 块，降低小包数量；
+/// 客户端断开（write 失败）时立即置 stop 标志停止推理，避免浪费算力。
+fn stream_sse_response(
+    stream: &mut TcpStream,
+    inf: &Arc<Mutex<LlamaInference>>,
+    prompt: String,
+    origin: Option<&str>,
+) {
+    let cors_origin = origin.unwrap_or("null");
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: {}\r\nAccess-Control-Allow-Headers: {}\r\nConnection: close\r\n\r\n",
+        cors_origin, CORS_ALLOWED_METHODS, CORS_ALLOWED_HEADERS
+    );
+    if stream.write_all(header.as_bytes()).is_err() {
+        return; // 客户端已断开，无需启动推理
     }
+    // SSE 需要低延迟逐块送达，关闭 Nagle 合并
+    let _ = stream.set_nodelay(true);
+
+    let id = format!("chatcmpl-{}", chrono::Utc::now().timestamp_millis());
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    let inf = Arc::clone(inf);
+    let stop = stop_flag.clone();
+    thread::spawn(move || {
+        crate::inference::run_inference(inf, prompt, stop, tx, 2048);
+    });
+
+    let mut buf = String::new();
+    while let Ok(token) = rx.recv() {
+        match token {
+            StreamToken::Text(t) => buf.push_str(&t),
+            StreamToken::Error(e) => {
+                log::error!("Inference error: {}", e);
+                buf.push_str("[error: internal error]");
+            }
+            StreamToken::Done => break,
+        }
+        if buf.chars().count() >= 50 {
+            let chunk = sse_chunk(&id, &buf);
+            buf.clear();
+            if stream.write_all(chunk.as_bytes()).is_err() {
+                // 客户端断开：立即停止推理
+                stop_flag.store(true, Ordering::Relaxed);
+                return;
+            }
+        }
+    }
+    if !buf.is_empty() {
+        let chunk = sse_chunk(&id, &buf);
+        if stream.write_all(chunk.as_bytes()).is_err() {
+            stop_flag.store(true, Ordering::Relaxed);
+            return;
+        }
+    }
+    let _ = stream.write_all(b"data: [DONE]\n\n");
+}
+
+/// 构造一个 OpenAI 兼容的 SSE data 块。
+fn sse_chunk(id: &str, text: &str) -> String {
+    format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "id": id,
+            "object": "chat.completion.chunk",
+            "choices": [{"delta": {"content": text}, "index": 0}]
+        })
+    )
 }
 
 fn extract_messages(req: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
     req["messages"].as_array().cloned()
 }
 
-fn parse_http(raw: &str) -> (&str, String, &str, Option<String>) {
+/// 安全加固后的 HTTP 请求解析结果。
+#[derive(Debug)]
+struct ParsedRequest {
+    method: String,
+    path: String,
+    body: String,
+    origin: Option<String>,
+    /// 所有请求头（小写键名, 原始值）。
+    headers: Vec<(String, String)>,
+}
+
+/// 验证字符是否包含控制字符（0x00-0x1F, 0x7F）。
+fn contains_control_chars(s: &str) -> bool {
+    s.bytes().any(|b| b < 0x20 || b == 0x7F)
+}
+
+/// 验证请求头名称是否只含 RFC 7230 token 字符。
+fn is_valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| matches!(b,
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' |
+            b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' |
+            b'*' | b'+' | b'-' | b'.' | b'^' | b'_' |
+            b'`' | b'|' | b'~'
+        ))
+}
+
+/// 安全加固的 HTTP 请求解析器。对请求行、请求头进行完善的边界检查，
+/// 返回 `Result<ParsedRequest, (u16, &'static str)>` 以便调用方直接返回
+/// 合适的 HTTP 错误状态码。
+fn parse_http_validated(raw: &str) -> Result<ParsedRequest, (u16, &'static str)> {
     let lines: Vec<&str> = raw.split("\r\n").collect();
     if lines.is_empty() {
-        return ("GET", "/".into(), "", None);
+        return Err((400, "bad request"));
     }
 
-    let first: Vec<&str> = lines[0].split_whitespace().collect();
-    let method = if !first.is_empty() { first[0] } else { "GET" };
-    let path = if first.len() > 1 {
-        // Strip query string so /v1/chat/completions?stream=true routes.
-        first[1].split('?').next().unwrap_or("/").to_string()
-    } else {
-        "/".into()
-    };
+    // ── 请求行解析 ──
+    let request_line = lines[0];
 
-    // Origin header (case-insensitive) for CORS gating
+    // 检查请求行是否含控制字符
+    if contains_control_chars(request_line) {
+        return Err((400, "bad request"));
+    }
+
+    let parts: Vec<&str> = request_line.splitn(3, ' ').collect();
+    if parts.len() != 3 {
+        return Err((400, "bad request"));
+    }
+
+    let method_str = parts[0];
+    let uri = parts[1];
+    let version = parts[2];
+
+    // 方法白名单
+    if !ALLOWED_METHODS.contains(&method_str) {
+        return Err((405, "method not allowed"));
+    }
+
+    // URI 长度限制
+    if uri.len() > MAX_URI_LEN {
+        return Err((414, "URI too long"));
+    }
+
+    // HTTP 版本验证
+    if version != "HTTP/1.1" && version != "HTTP/1.0" {
+        return Err((505, "HTTP version not supported"));
+    }
+
+    // 提取路径（去除查询字符串）
+    let path = uri.split('?').next().unwrap_or("/").to_string();
+
+    // ── 请求头解析 ──
+    let mut headers: Vec<(String, String)> = Vec::new();
     let mut origin: Option<String> = None;
+    let mut content_length_count: usize = 0;
+    let mut header_section_size: usize = 0;
+
     for line in &lines[1..] {
         if line.is_empty() {
-            break;
+            break; // 空行标志着请求头结束
         }
-        if let Some(rest) = line
-            .strip_prefix("Origin:")
-            .or_else(|| line.strip_prefix("origin:"))
-        {
-            origin = Some(rest.trim().to_string());
-            break;
+
+        // 请求头数量限制
+        if headers.len() >= MAX_HEADER_COUNT {
+            return Err((431, "too many headers"));
         }
+
+        // 请求头行累计大小限制
+        header_section_size += line.len() + 2; // +2 for \r\n
+        if header_section_size > MAX_HEADER_SECTION_SIZE {
+            return Err((431, "header section too large"));
+        }
+
+        // 检查 null 字节（防止头注入）
+        if line.contains('\0') {
+            return Err((400, "bad request"));
+        }
+
+        // 检查控制字符
+        if contains_control_chars(line) {
+            return Err((400, "bad request"));
+        }
+
+        // 分割头名和头值
+        let colon_pos = line.find(':').ok_or((400, "bad request"))?;
+        let (name, value) = line.split_at(colon_pos);
+        let value = &value[1..]; // 跳过 ':'
+
+        // 验证头名称合法字符
+        if !is_valid_header_name(name) {
+            return Err((400, "bad request"));
+        }
+
+        // 头值长度限制
+        let trimmed_value = value.trim();
+        if trimmed_value.len() > MAX_HEADER_VALUE_LEN {
+            return Err((431, "header value too long"));
+        }
+
+        let name_lower = name.to_lowercase();
+
+        // Content-Length 重复检测（HTTP 请求走私防护）
+        if name_lower == "content-length" {
+            content_length_count += 1;
+            if content_length_count > 1 {
+                return Err((400, "duplicate Content-Length"));
+            }
+        }
+
+        // 提取 Origin 头
+        if name_lower == "origin" {
+            origin = Some(trimmed_value.to_string());
+        }
+
+        headers.push((name_lower, trimmed_value.to_string()));
     }
 
-    // Find body after \r\n\r\n
+    // 提取请求体
     let body = if let Some(pos) = raw.find("\r\n\r\n") {
-        &raw[pos + 4..]
+        raw[pos + 4..].trim().to_string()
     } else {
-        ""
+        String::new()
     };
 
-    (method, path, body.trim(), origin)
+    Ok(ParsedRequest {
+        method: method_str.to_string(),
+        path,
+        body,
+        origin,
+        headers,
+    })
 }
 
 fn json_response(code: u16, body: &str) -> String {
     format!(
-        "HTTP/1.1 {code} OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\nContent-Length: {len}\r\n\r\n{body}",
+        "HTTP/1.1 {code} OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {len}\r\n\r\n{body}",
         code = code,
         len = body.len(),
         body = body
     )
 }
 
-fn cors_response(_origin: Option<&str>) -> String {
-    // Reflect a specific allowed origin instead of the wildcard; command-line
-    // (no Origin) gets the wildcard which is harmless for non-browser clients.
-    "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n".into()
+/// Build CORS headers for a validated origin and inject them into an existing
+/// HTTP response. When `origin` is `Some`, we reflect that specific origin so
+/// browsers treat the response as same-origin for the requesting page. When
+/// `origin` is `None` (command-line client), no CORS headers are emitted.
+fn inject_cors_headers(response: &str, origin: Option<&str>) -> String {
+    let Some(origin) = origin else {
+        return response.to_string();
+    };
+    // Insert CORS headers right after the status line.
+    if let Some(pos) = response.find("\r\n") {
+        let (status_line, rest) = response.split_at(pos);
+        format!(
+            "{}\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: {}\r\nAccess-Control-Allow-Headers: {}{}",
+            status_line, origin, CORS_ALLOWED_METHODS, CORS_ALLOWED_HEADERS, rest
+        )
+    } else {
+        response.to_string()
+    }
+}
+
+/// Build a 204 preflight response with strict CORS headers for the given
+/// validated origin.
+fn cors_preflight_response(origin: Option<&str>) -> String {
+    let origin_value = origin.unwrap_or("null");
+    format!(
+        "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: {}\r\nAccess-Control-Allow-Headers: {}\r\nAccess-Control-Max-Age: {}\r\nConnection: close\r\n\r\n",
+        origin_value, CORS_ALLOWED_METHODS, CORS_ALLOWED_HEADERS, CORS_MAX_AGE
+    )
 }
 
 /// Read a full HTTP request: headers up to `\r\n\r\n` then `Content-Length`
@@ -377,7 +642,8 @@ fn read_http_request(
         if std::time::Instant::now() >= deadline {
             return Err("请求超时".into());
         }
-        if buf.len() > MAX_BODY_SIZE + 8192 {
+        // 请求头区域大小限制（安全加固）
+        if buf.len() > MAX_HEADER_SECTION_SIZE + 8192 {
             return Err("请求头过大".into());
         }
         let n = stream
@@ -429,44 +695,55 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// Case-insensitive HTTP header lookup.
-fn parse_header(request: &str, name: &str) -> Option<String> {
-    let prefix_lower = format!("{}:", name).to_lowercase();
-    for line in request.lines() {
-        let lower = line.to_lowercase();
-        if let Some(rest) = lower.strip_prefix(&prefix_lower) {
-            return Some(rest.trim().to_string());
-        }
-    }
-    None
-}
-
 fn parse_content_length(headers: &str) -> Option<usize> {
+    let mut found: Option<usize> = None;
+    let mut count = 0usize;
     for line in headers.split("\r\n") {
-        if let Some(rest) = line
-            .strip_prefix("Content-Length:")
-            .or_else(|| line.strip_prefix("content-length:"))
-        {
-            return rest.trim().parse().ok();
+        // 大小写不敏感匹配
+        let lower = line.to_lowercase();
+        if let Some(rest) = lower.strip_prefix("content-length:") {
+            count += 1;
+            // 重复 Content-Length 检测（HTTP 请求走私防护）
+            if count > 1 {
+                return None;
+            }
+            found = rest.trim().parse().ok();
         }
     }
-    None
+    found
 }
 
 /// True if the given `Origin` URL points at an allowed host (localhost or
-/// 127.0.0.1) on any port. Prevents `http://localhost.evil.com` style
-/// bypasses by matching the host boundary (`:`, `/`, or end-of-string).
+/// 127.0.0.1) on any port. Properly strips userinfo and path components
+/// before comparing the host, preventing `http://localhost:evil@attacker.com`
+/// style bypasses.
 fn origin_allowed(origin: &str) -> bool {
     for host in &ALLOWED_ORIGIN_HOSTS {
         for scheme in &["http://", "https://"] {
-            let prefix = format!("{}{}", scheme, host);
-            if origin == prefix {
+            let rest = match origin.strip_prefix(scheme) {
+                Some(r) => r,
+                None => continue,
+            };
+            // 去掉可选的 userinfo（user:pass@host）
+            let after_at = rest.rsplit('@').next().unwrap_or(rest);
+            // 截断到第一个路径/查询/fragment 分隔符
+            let host_port = after_at
+                .split(&['/', '?', '#'][..])
+                .next()
+                .unwrap_or("");
+            // 处理 IPv6 方括号表示（如 [::1]:8080）
+            let host_only = if host_port.starts_with('[') {
+                host_port
+                    .split(']')
+                    .next()
+                    .unwrap_or("")
+                    .trim_start_matches('[')
+            } else {
+                // 剥离可选端口（IPv4 或主机名）
+                host_port.split(':').next().unwrap_or("")
+            };
+            if host_only == *host {
                 return true;
-            }
-            if let Some(rest) = origin.strip_prefix(&prefix) {
-                if rest.starts_with(':') || rest.starts_with('/') {
-                    return true;
-                }
             }
         }
     }
@@ -484,6 +761,13 @@ mod tests {
         assert!(origin_allowed("http://localhost/app"));
         assert!(origin_allowed("http://127.0.0.1:3000"));
         assert!(origin_allowed("https://127.0.0.1"));
+        // IPv6 回环地址
+        assert!(origin_allowed("http://[::1]:8080"));
+        assert!(origin_allowed("http://[::1]"));
+        // 合法 userinfo + 合法 host
+        assert!(origin_allowed("http://user:pass@localhost:8080"));
+        // 合法 host 带路径
+        assert!(origin_allowed("http://localhost:8080/path"));
     }
 
     #[test]
@@ -492,6 +776,34 @@ mod tests {
         assert!(!origin_allowed("http://localhost.evil.com"));
         assert!(!origin_allowed("https://attacker.example/localhost"));
         assert!(!origin_allowed("http://192.168.1.1"));
+    }
+
+    #[test]
+    fn test_origin_rejects_userinfo_bypass() {
+        // userinfo 注入绕过：host 实际是 attacker.com
+        assert!(!origin_allowed("http://localhost:evil@attacker.com"));
+        // 子域名伪装
+        assert!(!origin_allowed("http://localhost.evil.com"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_equal() {
+        assert!(constant_time_eq(b"hello", b"hello"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_different_same_len() {
+        assert!(!constant_time_eq(b"hello", b"world"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_different_len() {
+        assert!(!constant_time_eq(b"short", b"much longer"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_empty() {
+        assert!(constant_time_eq(b"", b""));
     }
 
     #[test]
@@ -516,17 +828,130 @@ mod tests {
     #[test]
     fn test_parse_http_extracts_origin() {
         let raw = "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://localhost:8080\r\nContent-Type: application/json\r\n\r\n{}";
-        let (method, path, body, origin) = parse_http(raw);
-        assert_eq!(method, "POST");
-        assert_eq!(path, "/v1/chat/completions");
-        assert_eq!(body, "{}");
-        assert_eq!(origin.as_deref(), Some("http://localhost:8080"));
+        let parsed = parse_http_validated(raw).expect("有效请求应解析成功");
+        assert_eq!(parsed.method, "POST");
+        assert_eq!(parsed.path, "/v1/chat/completions");
+        assert_eq!(parsed.body, "{}");
+        assert_eq!(parsed.origin.as_deref(), Some("http://localhost:8080"));
     }
 
     #[test]
     fn test_parse_http_no_origin() {
         let raw = "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
-        let (_, _, _, origin) = parse_http(raw);
-        assert!(origin.is_none());
+        let parsed = parse_http_validated(raw).expect("有效请求应解析成功");
+        assert!(parsed.origin.is_none());
+    }
+
+    #[test]
+    fn test_parse_http_rejects_disallowed_method() {
+        let raw = "DELETE /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+        let result = parse_http_validated(raw);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().0, 405);
+    }
+
+    #[test]
+    fn test_parse_http_rejects_bad_version() {
+        let raw = "GET / HTTP/2.0\r\nHost: 127.0.0.1\r\n\r\n";
+        let result = parse_http_validated(raw);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().0, 505);
+    }
+
+    #[test]
+    fn test_parse_http_accepts_http10() {
+        let raw = "GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n";
+        let parsed = parse_http_validated(raw).expect("HTTP/1.0 应被接受");
+        assert_eq!(parsed.method, "GET");
+    }
+
+    #[test]
+    fn test_parse_http_rejects_long_uri() {
+        let long_path = "a".repeat(MAX_URI_LEN + 1);
+        let raw = format!("GET /{} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", long_path);
+        let result = parse_http_validated(&raw);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().0, 414);
+    }
+
+    #[test]
+    fn test_parse_http_rejects_null_byte_in_header() {
+        let raw = "GET / HTTP/1.1\r\nX-Injected: val\0ue\r\n\r\n";
+        let result = parse_http_validated(raw);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().0, 400);
+    }
+
+    #[test]
+    fn test_parse_http_rejects_duplicate_content_length() {
+        let raw = "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 10\r\n\r\nhello";
+        let result = parse_http_validated(raw);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().1.contains("Content-Length"));
+    }
+
+    #[test]
+    fn test_parse_http_rejects_control_chars_in_request_line() {
+        let raw = "GET /hea\x01lth HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+        let result = parse_http_validated(raw);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().0, 400);
+    }
+
+    #[test]
+    fn test_parse_http_rejects_invalid_header_name() {
+        let raw = "GET / HTTP/1.1\r\nX-Bad Header: value\r\n\r\n";
+        let result = parse_http_validated(raw);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().0, 400);
+    }
+
+    #[test]
+    fn test_parse_http_rejects_too_many_headers() {
+        let mut raw = String::from("GET / HTTP/1.1\r\n");
+        for i in 0..MAX_HEADER_COUNT + 1 {
+            raw.push_str(&format!("X-Header-{}: value\r\n", i));
+        }
+        raw.push_str("\r\n");
+        let result = parse_http_validated(&raw);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().0, 431);
+    }
+
+    #[test]
+    fn test_parse_http_rejects_long_header_value() {
+        let long_val = "x".repeat(MAX_HEADER_VALUE_LEN + 1);
+        let raw = format!("GET / HTTP/1.1\r\nX-Long: {}\r\n\r\n", long_val);
+        let result = parse_http_validated(&raw);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().0, 431);
+    }
+
+    #[test]
+    fn test_parse_content_length_rejects_duplicate() {
+        let dup = "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 10\r\n";
+        assert_eq!(parse_content_length(dup), None);
+    }
+
+    #[test]
+    fn test_sse_chunk_format() {
+        // OpenAI 兼容 chunk：`data: {json}\n\n`
+        let chunk = sse_chunk("chatcmpl-123", "你好世界");
+        assert!(chunk.starts_with("data: "), "chunk: {}", chunk);
+        assert!(chunk.ends_with("\n\n"), "chunk: {}", chunk);
+        let json_str = chunk.trim_start_matches("data: ").trim_end();
+        let v: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        assert_eq!(v["object"], "chat.completion.chunk");
+        assert_eq!(v["id"], "chatcmpl-123");
+        assert_eq!(v["choices"][0]["delta"]["content"], "你好世界");
+        assert_eq!(v["choices"][0]["index"], 0);
+    }
+
+    #[test]
+    fn test_sse_chunk_empty_text() {
+        let chunk = sse_chunk("chatcmpl-1", "");
+        let json_str = chunk.trim_start_matches("data: ").trim_end();
+        let v: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        assert_eq!(v["choices"][0]["delta"]["content"], "");
     }
 }

@@ -4,6 +4,17 @@ use crate::config;
 use crate::model_catalog::find_model;
 use egui::{vec2, Color32, RichText, ScrollArea, TextEdit};
 
+/// 对敏感信息（如 API token）进行脱敏处理。
+/// 只显示前 4 个字符 + "****"，长度不足 4 则全部遮掩。
+pub fn mask_sensitive(s: &str) -> String {
+    let visible: String = s.chars().take(4).collect();
+    if s.chars().count() <= 4 {
+        "****".to_string()
+    } else {
+        format!("{}****", visible)
+    }
+}
+
 impl DesktopAI {
     pub(crate) fn render_settings(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         ScrollArea::vertical().max_height(500.0).show(ui, |ui| {
@@ -115,8 +126,9 @@ impl DesktopAI {
                 });
                 ui.label(
                     RichText::new(format!(
-                        "API 地址: http://127.0.0.1:{}/v1/chat/completions",
-                        self.config.api_port
+                        "API 地址: http://127.0.0.1:{}/v1 | Token: {}",
+                        self.config.api_port,
+                        mask_sensitive(&self.config.api_token),
                     ))
                     .size(10.0)
                     .color(Color32::from_rgb(100, 180, 255)),
@@ -273,5 +285,34 @@ impl DesktopAI {
                 self.show_settings = false;
             }
         }); // ScrollArea
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mask_sensitive;
+
+    #[test]
+    fn mask_sensitive_long_token() {
+        let token = "da-abcdef1234567890";
+        let masked = mask_sensitive(token);
+        assert_eq!(masked, "da-a****");
+        assert!(!masked.contains("bcdef"));
+    }
+
+    #[test]
+    fn mask_sensitive_short_token() {
+        assert_eq!(mask_sensitive("abc"), "****");
+        assert_eq!(mask_sensitive(""), "****");
+        assert_eq!(mask_sensitive("abcd"), "****");
+    }
+
+    #[test]
+    fn mask_sensitive_unicode() {
+        // 前4个字符可见，其余遮掩
+        let s = "测试敏感数据extra";
+        let masked = mask_sensitive(s);
+        assert!(masked.ends_with("****"));
+        assert!(masked.starts_with("测试敏感"));
     }
 }

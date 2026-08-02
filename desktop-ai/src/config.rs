@@ -13,6 +13,21 @@ pub struct ModelInfo {
     pub filename: String,
     #[serde(default)]
     pub expected_sha256: Option<String>,
+    /// Split-file model parts (e.g. HF multi-part GGUF). When non-empty,
+    /// the downloader fetches every part, verifies each one's SHA-256, then
+    /// concatenates them into `filename`. Kept empty for single-file models.
+    #[serde(default)]
+    pub parts: Vec<ModelPart>,
+}
+
+/// One split-file model part: download URL + local filename (+ optional
+/// SHA-256 for integrity verification of that part).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelPart {
+    pub url: String,
+    pub filename: String,
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +170,20 @@ pub fn load_config() -> Config {
                 Ok(mut config) => {
                     if config.model_catalog.is_empty() {
                         config.model_catalog = super::model_catalog::default_catalog();
+                    } else {
+                        // Backfill `parts` for known catalog ids from older
+                        // config files (e.g. the 7B split-file entry) so
+                        // existing users automatically get the fixed URLs.
+                        // Only ids matched against the default catalog are
+                        // touched; user-customised entries keep their data.
+                        let defaults = super::model_catalog::default_catalog();
+                        for info in config.model_catalog.iter_mut() {
+                            if info.parts.is_empty() {
+                                if let Some(def) = defaults.iter().find(|d| d.id == info.id) {
+                                    info.parts = def.parts.clone();
+                                }
+                            }
+                        }
                     }
                     config
                 }
@@ -223,12 +252,50 @@ pub fn save_config(config: &Config) {
             log::warn!("failed to write config: {}", e);
             return;
         }
+
+        // Set restrictive permissions on the temp file BEFORE rename so the
+        // final config file is never world-readable (contains API tokens).
+        set_config_permissions(&tmp);
+
         if std::fs::rename(&tmp, &path).is_err() {
             let _ = std::fs::remove_file(&path);
             if let Err(e) = std::fs::rename(&tmp, &path) {
                 log::warn!("failed to replace config: {}", e);
             }
         }
+
+        // Also ensure permissions on the final path (rename preserves perms
+        // on POSIX, but be explicit for safety).
+        set_config_permissions(&path);
+    }
+}
+
+/// Set restrictive file permissions on the config file.
+///
+/// On Unix: `0o600` — owner read/write only, preventing other users on shared
+/// systems from reading sensitive data (API tokens, etc.).
+///
+/// On Windows: file access is governed by ACLs rather than POSIX mode bits.
+/// The default ACL inherited from the user's AppData directory already restricts
+/// access to the current user, so no extra step is needed here.
+fn set_config_permissions(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        if let Err(e) = std::fs::set_permissions(path, perms) {
+            log::warn!("failed to set config permissions on {:?}: {}", path, e);
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // On Windows, the config lives under %APPDATA% where the default ACL
+        // already limits access to the owning user.  No extra action needed.
+        log::debug!(
+            "Windows 配置文件权限由系统 ACL 管理, 路径: {:?}",
+            path
+        );
     }
 }
 
@@ -250,8 +317,10 @@ mod tests {
 
     #[test]
     fn test_config_validation_clamps() {
-        let mut c = Config::default();
-        c.font_size = 5;
+        let mut c = Config {
+            font_size: 5,
+            ..Default::default()
+        };
         c.n_ctx = 100;
         c.theme = "red".into();
         c.system_prompt = "x".repeat(20000);
@@ -293,6 +362,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_max_input_graphemes_is_reasonable() {
         // Must be between 100 and 10000 — sanity check on the constant.
         assert!(MAX_INPUT_GRAPHEMES >= 100);
@@ -300,6 +370,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_kb_single_doc_chars_is_reasonable() {
         // ~4000 tokens × 4 chars/token = 16000
         assert!(KB_SINGLE_DOC_CHARS >= 4000);
