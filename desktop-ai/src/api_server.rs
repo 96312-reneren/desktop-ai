@@ -156,9 +156,7 @@ fn handle_client(
         Ok(r) => r,
         Err(e) => {
             log::warn!("API read_http_request: {}", e);
-            let _ = stream.write_all(
-                json_response(400, r#"{"error":"bad request"}"#).as_bytes(),
-            );
+            let _ = stream.write_all(json_error(400, "bad_request", "bad request").as_bytes());
             return;
         }
     };
@@ -169,9 +167,7 @@ fn handle_client(
         Ok(p) => p,
         Err((code, msg)) => {
             log::warn!("API parse_http 拒绝: {} (状态码 {})", msg, code);
-            let _ = stream.write_all(
-                json_response(code, &format!(r#"{{"error":"{}"}} "#, msg)).as_bytes(),
-            );
+            let _ = stream.write_all(json_error(code, "malformed_request", msg).as_bytes());
             return;
         }
     };
@@ -186,7 +182,7 @@ fn handle_client(
         if !origin_allowed(origin) {
             log::warn!("API rejected Origin: {}", origin);
             let _ = stream
-                .write_all(json_response(403, r#"{"error":"origin not allowed"}"#).as_bytes());
+                .write_all(json_error(403, "origin_not_allowed", "origin not allowed").as_bytes());
             return;
         }
     }
@@ -202,13 +198,7 @@ fn handle_client(
             .unwrap_or("");
         let expected = format!("Bearer {}", api_token);
         if !constant_time_eq(auth.as_bytes(), expected.as_bytes()) {
-            let _ = stream.write_all(
-                json_response(
-                    401,
-                    r#"{"error":"unauthorized"}"#,
-                )
-                .as_bytes(),
-            );
+            let _ = stream.write_all(json_error(401, "unauthorized", "unauthorized").as_bytes());
             return;
         }
     }
@@ -233,8 +223,7 @@ fn handle_client(
         }
         ("POST", "/v1/chat/completions") => {
             // 流式模式下响应已直接写入 stream，返回 None 跳过统一写响应。
-            match handle_chat_completion(&mut stream, &body, &inf, &model_name, origin.as_deref())
-            {
+            match handle_chat_completion(&mut stream, &body, &inf, &model_name, origin.as_deref()) {
                 Some(resp) => resp,
                 None => return,
             }
@@ -244,7 +233,7 @@ fn handle_client(
             200,
             r#"{"message":"桌面AI API server running","endpoints":["/v1/models","/v1/chat/completions"]}"#,
         ),
-        _ => json_response(404, r#"{"error":"not found"}"#),
+        _ => json_error(404, "not_found", "not found"),
     };
 
     // Inject CORS headers for the validated origin. The origin was already
@@ -268,12 +257,18 @@ fn handle_chat_completion(
 ) -> Option<String> {
     let req: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
-        Err(_) => return Some(json_response(400, r#"{"error":"invalid JSON"}"#)),
+        Err(_) => return Some(json_error(400, "invalid_json", "invalid JSON")),
     };
 
     let messages = match extract_messages(&req) {
         Some(msgs) => msgs,
-        None => return Some(json_response(400, r#"{"error":"missing messages array"}"#)),
+        None => {
+            return Some(json_error(
+                400,
+                "missing_messages",
+                "missing messages array",
+            ))
+        }
     };
 
     let stream_mode = req["stream"].as_bool().unwrap_or(false);
@@ -284,9 +279,10 @@ fn handle_chat_completion(
     for msg in &messages {
         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
         if !allowed_roles.contains(&role) {
-            return Some(json_response(
+            return Some(json_error(
                 400,
-                r#"{"error":"invalid role; allowed: system, user, assistant"}"#,
+                "invalid_role",
+                "invalid role; allowed: system, user, assistant",
             ));
         }
         let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -448,12 +444,14 @@ fn contains_control_chars(s: &str) -> bool {
 /// 验证请求头名称是否只含 RFC 7230 token 字符。
 fn is_valid_header_name(name: &str) -> bool {
     !name.is_empty()
-        && name.bytes().all(|b| matches!(b,
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' |
-            b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' |
-            b'*' | b'+' | b'-' | b'.' | b'^' | b'_' |
-            b'`' | b'|' | b'~'
-        ))
+        && name.bytes().all(|b| {
+            matches!(b,
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' |
+                b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' |
+                b'*' | b'+' | b'-' | b'.' | b'^' | b'_' |
+                b'`' | b'|' | b'~'
+            )
+        })
 }
 
 /// 安全加固的 HTTP 请求解析器。对请求行、请求头进行完善的边界检查，
@@ -589,6 +587,18 @@ fn json_response(code: u16, body: &str) -> String {
         len = body.len(),
         body = body
     )
+}
+
+/// Build a JSON error response with a machine-readable `code` field so
+/// clients can branch on error type instead of parsing human text:
+/// `{"error": "<message>", "code": "<code>"}`
+fn json_error(status: u16, code: &str, message: &str) -> String {
+    let body = serde_json::json!({
+        "error": message,
+        "code": code,
+    })
+    .to_string();
+    json_response(status, &body)
 }
 
 /// Build CORS headers for a validated origin and inject them into an existing
@@ -727,10 +737,7 @@ fn origin_allowed(origin: &str) -> bool {
             // 去掉可选的 userinfo（user:pass@host）
             let after_at = rest.rsplit('@').next().unwrap_or(rest);
             // 截断到第一个路径/查询/fragment 分隔符
-            let host_port = after_at
-                .split(&['/', '?', '#'][..])
-                .next()
-                .unwrap_or("");
+            let host_port = after_at.split(&['/', '?', '#'][..]).next().unwrap_or("");
             // 处理 IPv6 方括号表示（如 [::1]:8080）
             let host_only = if host_port.starts_with('[') {
                 host_port
@@ -953,5 +960,74 @@ mod tests {
         let json_str = chunk.trim_start_matches("data: ").trim_end();
         let v: serde_json::Value = serde_json::from_str(json_str).unwrap();
         assert_eq!(v["choices"][0]["delta"]["content"], "");
+    }
+
+    #[test]
+    fn test_constant_time_eq_prefix_share() {
+        // 前缀相同、末尾不同的 token 必须判为不相等
+        assert!(!constant_time_eq(b"token-abcdef", b"token-ABCDEF"));
+        assert!(!constant_time_eq(b"a", b""));
+    }
+
+    #[test]
+    fn test_constant_time_eq_binary_bytes() {
+        // 包含 0x00 与高位字节的输入
+        assert!(constant_time_eq(&[0u8, 1, 2], &[0u8, 1, 2]));
+        assert!(!constant_time_eq(&[0u8, 1, 2], &[0u8, 1, 3]));
+        assert!(!constant_time_eq(&[255u8], &[254u8]));
+    }
+
+    #[test]
+    fn test_inject_cors_headers_with_origin() {
+        let base = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+        let out = inject_cors_headers(base, Some("http://localhost:8080"));
+        let head = out.split("\r\n\r\n").next().unwrap();
+        assert!(head.starts_with("HTTP/1.1 200 OK"));
+        assert!(head.contains("Access-Control-Allow-Origin: http://localhost:8080"));
+        assert!(head.contains("Access-Control-Allow-Methods: GET, POST"));
+        assert!(head.contains("Access-Control-Allow-Headers: Content-Type, Authorization"));
+        // 状态行必须是第一行, CORS 头插在状态行之后
+        assert!(out.contains("200 OK\r\nAccess-Control-Allow-Origin:"));
+        // body 原样保留
+        assert!(out.ends_with("\r\n\r\n{}"));
+    }
+
+    #[test]
+    fn test_inject_cors_headers_no_origin() {
+        let base = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        assert_eq!(inject_cors_headers(base, None), base);
+    }
+
+    #[test]
+    fn test_inject_cors_headers_malformed_response() {
+        // 无状态行分隔符时原样返回
+        let base = "garbage-no-crlf";
+        assert_eq!(inject_cors_headers(base, Some("http://localhost")), base);
+    }
+
+    #[test]
+    fn test_json_error_has_machine_readable_code() {
+        let resp = json_error(401, "unauthorized", "unauthorized");
+        assert!(resp.starts_with("HTTP/1.1 401 OK"));
+        let body = resp.split("\r\n\r\n").nth(1).unwrap();
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["code"], "unauthorized");
+        assert_eq!(v["error"], "unauthorized");
+        assert!(resp.contains(&format!("Content-Length: {}", body.len())));
+    }
+
+    #[test]
+    fn test_json_error_code_variants() {
+        for (status, code) in [
+            (400u16, "invalid_json"),
+            (403, "origin_not_allowed"),
+            (404, "not_found"),
+        ] {
+            let resp = json_error(status, code, "x");
+            assert!(resp.starts_with(&format!("HTTP/1.1 {} OK", status)));
+            let body = resp.split("\r\n\r\n").nth(1).unwrap();
+            let v: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(v["code"], code);
+        }
     }
 }

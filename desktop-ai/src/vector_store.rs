@@ -131,10 +131,7 @@ impl VectorStore {
         chunk_size: usize,
         overlap: usize,
     ) -> Result<(), String> {
-        let engine = self
-            .engine
-            .as_ref()
-            .ok_or("embedding engine not loaded")?;
+        let engine = self.engine.as_ref().ok_or("embedding engine not loaded")?;
         let chunks = crate::chunker::chunk_text(text, chunk_size, overlap);
         if chunks.is_empty() {
             return Err("no content to index".into());
@@ -181,20 +178,14 @@ impl VectorStore {
 
     #[allow(dead_code)]
     pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>, String> {
-        let engine = self
-            .engine
-            .as_ref()
-            .ok_or("embedding engine not loaded")?;
+        let engine = self.engine.as_ref().ok_or("embedding engine not loaded")?;
         let query_vec = engine.lock().unwrap().embed(query);
         let docs = self.documents();
         Ok(search_by_vector(&docs, &query_vec, top_k))
     }
 
     pub fn embed_query(&self, query: &str) -> Result<Vec<f32>, String> {
-        let engine = self
-            .engine
-            .as_ref()
-            .ok_or("embedding engine not loaded")?;
+        let engine = self.engine.as_ref().ok_or("embedding engine not loaded")?;
         Ok(engine.lock().unwrap().embed(query))
     }
 

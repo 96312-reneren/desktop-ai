@@ -292,10 +292,7 @@ fn set_config_permissions(path: &std::path::Path) {
     {
         // On Windows, the config lives under %APPDATA% where the default ACL
         // already limits access to the owning user.  No extra action needed.
-        log::debug!(
-            "Windows 配置文件权限由系统 ACL 管理, 路径: {:?}",
-            path
-        );
+        log::debug!("Windows 配置文件权限由系统 ACL 管理, 路径: {:?}", path);
     }
 }
 

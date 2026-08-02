@@ -35,29 +35,23 @@ pub fn validate_download_path(dest: &Path) -> Result<(), String> {
 
     // 解析绝对路径并确认在模型目录内
     let models_dir = crate::config::models_dir();
-    let resolved_models = std::fs::canonicalize(&models_dir)
-        .unwrap_or_else(|_| models_dir.clone());
+    let resolved_models = std::fs::canonicalize(&models_dir).unwrap_or_else(|_| models_dir.clone());
 
     // 如果目标已存在，用 canonicalize 解析；否则先创建父目录再解析
     let resolved_dest = if dest.exists() {
-        std::fs::canonicalize(dest)
-            .map_err(|e| format!("解析目标路径失败: {}", e))?
+        std::fs::canonicalize(dest).map_err(|e| format!("解析目标路径失败: {}", e))?
     } else {
         let parent = dest.parent().ok_or("目标路径无父目录")?;
         // 先创建父目录，支持子目录布局（如 qwen/7b/model.gguf）
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("创建父目录失败: {}", e))?;
-        let resolved_parent = std::fs::canonicalize(parent)
-            .map_err(|e| format!("解析父目录失败: {}", e))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建父目录失败: {}", e))?;
+        let resolved_parent =
+            std::fs::canonicalize(parent).map_err(|e| format!("解析父目录失败: {}", e))?;
         let fname = dest.file_name().ok_or("目标路径无文件名")?;
         resolved_parent.join(fname)
     };
 
     if !resolved_dest.starts_with(&resolved_models) {
-        return Err(format!(
-            "下载目标路径超出模型目录范围: {:?}",
-            dest
-        ));
+        return Err(format!("下载目标路径超出模型目录范围: {:?}", dest));
     }
 
     Ok(())
@@ -155,10 +149,7 @@ fn download_model_parts(
             return;
         }
         if let Err(e) = validate_download_path(path) {
-            let _ = tx.send(DownloadMsg::Error(format!(
-                "分卷路径安全验证失败: {}",
-                e
-            )));
+            let _ = tx.send(DownloadMsg::Error(format!("分卷路径安全验证失败: {}", e)));
             return;
         }
     }
