@@ -22,4 +22,8 @@ jobs:
       - run: cargo clippy -- -D warnings
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
-      - run: cargo audit
+      # RUSTSEC-2026-0194/0195 (quick-xml): no fixable upgrade — quick-xml 0.30
+      # is locked by wayland-scanner (build-time tool, never runs on Windows CI)
+      # and 0.39 by zbus_xml (system D-Bus XML parsing, local attack surface
+      # only). Tracked upstream; revisit when new versions release.
+      - run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
