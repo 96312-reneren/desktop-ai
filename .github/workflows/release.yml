@@ -1,0 +1,117 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "发布版本号 (如 6.1.0)，留空则读取 Cargo.toml"
+        required: false
+        default: ""
+
+jobs:
+  windows:
+    name: Windows x86_64
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop-ai
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - name: Assemble package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging | Out-Null
+          Copy-Item target/release/desktop-ai.exe staging/桌面AI.exe
+          Copy-Item llama.dll staging/llama.dll
+          Compress-Archive -Path staging/* -DestinationPath 桌面AI-v$env:APP_VERSION-windows-x86_64.zip -Force
+        env:
+          APP_VERSION: ${{ github.ref_name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: desktop-ai/桌面AI-*.zip
+
+  linux:
+    name: Linux x86_64
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop-ai
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake pkg-config patchelf \
+            libssl-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libgtk-3-dev \
+            libgl1-mesa-dev
+      - name: Build libllama.so (llama.cpp b7700)
+        run: |
+          git clone --depth 1 --branch b7700 https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
+          cd /tmp/llama.cpp
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF \
+            -DLLAMA_BUILD_SERVER=OFF -DLLAMA_CURL=OFF
+          cmake --build build -j$(nproc)
+          # Self-contained: resolve ggml deps relative to libllama.so
+          patchelf --set-rpath '$ORIGIN' build/bin/libllama.so.0 \
+            build/bin/libggml.so.0 build/bin/libggml-cpu.so.0 build/bin/libggml-base.so.0
+          cp -f build/bin/libllama.so.0 ../libllama.so
+          cp -f build/bin/libggml.so.0 ../libggml.so.0
+          cp -f build/bin/libggml-cpu.so.0 ../libggml-cpu.so.0
+          cp -f build/bin/libggml-base.so.0 ../libggml-base.so.0
+      - run: cargo build --release
+      - name: Assemble package
+        run: |
+          mkdir -p staging
+          cp -f target/release/desktop-ai staging/
+          cp -f libllama.so libggml.so.0 libggml-cpu.so.0 libggml-base.so.0 staging/
+          tar czf ../desktop-ai-${{ github.ref_name }}-linux-x86_64.tar.gz staging
+        working-directory: desktop-ai
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: desktop-ai-*.tar.gz
+
+  release:
+    name: Publish GitHub Release
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          body: |
+            ## 桌面AI v${{ github.ref_name }}
+
+            ### 新特性
+            - SQLite 存储迁移：知识库与对话改用 SQLite(WAL 事务,崩溃不丢数据,增量写入)
+            - 会话增量落盘：长对话不再全量重写
+            - 模型下载断点续传：中断后自动续传,无需重新下载
+            - 日志文件：每日滚动日志写入数据目录,崩溃可排查
+            - API token 强随机化
+
+            ### 漏洞修复
+            - 新版 llama.cpp API 适配(采样器/vocab/后端初始化),修复模型加载崩溃与空输出
+            - ChatML 注入消毒扩展至全部特殊标记 + 对话历史统一消毒
+            - SSRF 防护补强(种子 URL 校验、重定向逐跳校验、IP 编码绕过拦截)
+            - API 请求总超时防慢速滴流、CORS 白名单回显
+            - config 原子写入、tokenize 缓冲扩容、decode 错误可见
+            - 依赖安全升级:pdf-extract 0.12(lopdf 0.42)、anyhow、event-listener、memmap2
+
+            ### 安装
+            - **Windows**:解压 `windows-x86_64` 压缩包,运行 `桌面AI.exe`
+            - **Linux**:解压 `linux-x86_64` tar.gz,运行 `desktop-ai`(需 glibc ≥ 2.35)
