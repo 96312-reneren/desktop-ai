@@ -118,11 +118,13 @@ fn handle_client(
     api_token: &str,
 ) {
     // Guard against slow-loris: a client sending 1 byte / minute would
-    // otherwise hold a connection slot indefinitely.
+    // otherwise hold a connection slot indefinitely. The per-read timeout
+    // bounds each syscall; the overall deadline bounds the whole request.
     if let Err(e) = stream.set_read_timeout(Some(std::time::Duration::from_secs(30))) {
         log::warn!("API set_read_timeout failed: {}", e);
     }
-    let raw = match read_http_request(&mut stream) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let raw = match read_http_request(&mut stream, deadline) {
         Ok(r) => r,
         Err(e) => {
             log::warn!("API read_http_request: {}", e);
@@ -163,7 +165,7 @@ fn handle_client(
         }
     }
 
-    let response = match (method, path.as_str()) {
+    let mut response = match (method, path.as_str()) {
         ("GET", "/health") => json_response(200, r#"{"status":"ok"}"#),
         ("GET", "/ready") => json_response(
             200,
@@ -189,6 +191,15 @@ fn handle_client(
         ),
         _ => json_response(404, r#"{"error":"not found"}"#),
     };
+
+    // Reflect the (already allow-listed) Origin instead of the wildcard so
+    // browsers never treat responses as readable cross-origin.
+    if let Some(ref origin) = origin {
+        response = response.replace(
+            "Access-Control-Allow-Origin: *",
+            &format!("Access-Control-Allow-Origin: {}", origin),
+        );
+    }
 
     let _ = stream.write_all(response.as_bytes());
 }
@@ -299,7 +310,8 @@ fn parse_http(raw: &str) -> (&str, String, &str, Option<String>) {
     let first: Vec<&str> = lines[0].split_whitespace().collect();
     let method = if !first.is_empty() { first[0] } else { "GET" };
     let path = if first.len() > 1 {
-        first[1].to_string()
+        // Strip query string so /v1/chat/completions?stream=true routes.
+        first[1].split('?').next().unwrap_or("/").to_string()
     } else {
         "/".into()
     };
@@ -348,13 +360,23 @@ fn cors_response(_origin: Option<&str>) -> String {
 /// bytes of body, honouring MAX_BODY_SIZE. Replaces the old single 64 KiB
 /// `read()` that silently truncated large JSON bodies and ignored TCP
 /// fragmentation.
-fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
+///
+/// `deadline` bounds the *total* time spent reading (headers + body) so a
+/// slow-loris client dribbling 1 byte / 30s cannot hold a connection slot
+/// indefinitely despite the per-read timeout.
+fn read_http_request(
+    stream: &mut TcpStream,
+    deadline: std::time::Instant,
+) -> Result<Vec<u8>, String> {
     let mut buf: Vec<u8> = Vec::with_capacity(8192);
     let mut tmp = [0u8; 4096];
     let mut header_end: Option<usize> = None;
 
     // Phase 1: read until we locate the end of headers.
     while header_end.is_none() {
+        if std::time::Instant::now() >= deadline {
+            return Err("请求超时".into());
+        }
         if buf.len() > MAX_BODY_SIZE + 8192 {
             return Err("请求头过大".into());
         }
@@ -386,6 +408,9 @@ fn read_http_request(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
     // Phase 3: keep reading until the body is complete.
     let needed = header_end + 4 + content_length;
     while buf.len() < needed {
+        if std::time::Instant::now() >= deadline {
+            return Err("请求超时".into());
+        }
         let n = stream
             .read(&mut tmp)
             .map_err(|e| format!("读取失败: {}", e))?;

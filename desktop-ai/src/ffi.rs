@@ -474,25 +474,42 @@ pub unsafe fn tokenize(model: *const LlamaModel, text: &str, add_special: bool) 
         return vec![1, 2];
     }
     let c_text = to_cstring_safe(text);
-    let max_tokens = (text.len() * 2).max(256);
-    let mut tokens = vec![0i32; max_tokens];
-    let count = call!(
-        llama_tokenize,
-        PfnTokenize,
-        first,
-        c_text.as_ptr(),
-        text.len() as i32,
-        tokens.as_mut_ptr(),
-        tokens.len() as i32,
-        add_special,
-        true
-    );
-    if count < 0 {
-        return vec![1, 2];
+    // Grow the buffer if the tokenizer reports a full buffer — a silent
+    // truncation would corrupt generation.
+    let mut capacity = (text.len() * 2).max(256);
+    let max_capacity = (text.len() * 8).max(4096);
+    loop {
+        let mut tokens = vec![0i32; capacity];
+        let count = call!(
+            llama_tokenize,
+            PfnTokenize,
+            first,
+            c_text.as_ptr(),
+            text.len() as i32,
+            tokens.as_mut_ptr(),
+            tokens.len() as i32,
+            add_special,
+            true
+        );
+        if count < 0 {
+            return vec![1, 2];
+        }
+        let count = count as usize;
+        if count < capacity {
+            tokens.truncate(count);
+            return tokens;
+        }
+        // Buffer exactly full — likely needs more room; retry once with a
+        // larger buffer, then give up rather than truncate silently.
+        if capacity >= max_capacity {
+            log::warn!(
+                "tokenize buffer exhausted ({} tokens) — returning partial result",
+                capacity
+            );
+            return tokens;
+        }
+        capacity *= 2;
     }
-    let count = (count as usize).min(tokens.len());
-    tokens.truncate(count);
-    tokens
 }
 
 /// # Safety
@@ -533,7 +550,14 @@ pub unsafe fn token_to_piece(model: *const LlamaModel, token: LlamaToken) -> Str
 pub unsafe fn decode(ctx: *mut LlamaContext, token: LlamaToken) {
     let mut t = token;
     let _batch = call!(llama_batch_get_one, PfnBatchGetOne, &mut t, 1);
-    call!(llama_decode, PfnDecode, ctx, _batch);
+    let rc = call!(llama_decode, PfnDecode, ctx, _batch);
+    // llama_decode returns 0 on success, >0 to retry the batch, <0 on error.
+    // Surface failures instead of silently producing garbage.
+    if rc < 0 {
+        log::error!("llama_decode failed with code {}", rc);
+    } else if rc > 0 {
+        log::warn!("llama_decode requested retry (code {}), result may be degraded", rc);
+    }
     // batch is consumed by decode, no free needed since llama_decode manages it
 }
 
