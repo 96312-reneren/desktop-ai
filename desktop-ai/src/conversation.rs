@@ -1,4 +1,4 @@
-﻿use chrono::Utc;
+use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
@@ -130,8 +130,9 @@ impl Conversation {
         }
         let messages: Vec<Message> = db
             .with_conn(|c| {
-                let mut stmt = c
-                    .prepare("SELECT role, content FROM messages WHERE conv_id = ?1 ORDER BY seq")?;
+                let mut stmt = c.prepare(
+                    "SELECT role, content FROM messages WHERE conv_id = ?1 ORDER BY seq",
+                )?;
                 let rows = stmt.query_map(params![id], |r| {
                     Ok(Message {
                         role: r.get(0)?,
@@ -180,7 +181,12 @@ impl Conversation {
                     "INSERT INTO messages (conv_id, role, content, seq) VALUES (?1, ?2, ?3, ?4)",
                 )?;
                 for (i, m) in new_messages.iter().enumerate() {
-                    stmt.execute(params![self.id, m.role, m.content, self.persisted_count + i])?;
+                    stmt.execute(params![
+                        self.id,
+                        m.role,
+                        m.content,
+                        self.persisted_count + i
+                    ])?;
                 }
             }
             tx.commit()
@@ -232,7 +238,9 @@ impl Conversation {
     }
 
     pub fn list_all() -> Vec<ConversationMeta> {
-        let Some(db) = CONV_DB.as_ref() else { return Vec::new() };
+        let Some(db) = CONV_DB.as_ref() else {
+            return Vec::new();
+        };
         db.with_conn(|c| {
             let mut stmt = c.prepare(
                 "SELECT c.id, c.title, c.created_at, COUNT(m.id)
