@@ -73,6 +73,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
     let _log_guard = log_guard; // keep the non-blocking writer alive
 
+    // Crash handling: route panics into the log file and clear the
+    // clean-exit marker so the next launch can offer crash recovery.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = std::fs::remove_file(desktop_ai::config::clean_exit_flag_path());
+        log::error!("PANIC: {}", info);
+        let bt = std::backtrace::Backtrace::force_capture();
+        log::error!("{}", bt);
+        default_hook(info);
+    }));
+
     // Ensure the llama shared library is accessible
     let exe_dir = std::env::current_exe()
         .ok()
@@ -121,6 +132,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(Box::new(app::DesktopAI::new()))
         }),
     )?;
+
+    // Clean shutdown: mark the exit so the next launch skips crash recovery.
+    desktop_ai::config::mark_clean_exit();
 
     Ok(())
 }

@@ -85,6 +85,15 @@ impl DesktopAI {
                         .color(Color32::GRAY),
                     );
                 }
+                // GPU backend availability check: the llama library must be
+                // built with CUDA/Vulkan/Metal, otherwise gpu_layers is a no-op.
+                if !crate::ffi::gpu_backend_available() {
+                    ui.label(
+                        RichText::new("⚠ 当前 llama 库为 CPU 版本，GPU 加速不会生效")
+                            .size(10.0)
+                            .color(Color32::from_rgb(230, 90, 80)),
+                    );
+                }
             } else {
                 ui.label(
                     RichText::new("使用纯 CPU 推理 (0 = CPU)")
