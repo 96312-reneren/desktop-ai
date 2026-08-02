@@ -156,6 +156,29 @@ pub fn sampling_is_v2() -> bool {
     SAMPLING_V2.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether the loaded llama library was built with a GPU (BLAS) backend.
+/// CPU-only builds report `BLAS = 0` in `llama_print_system_info`.
+/// Returns `false` before [`init`] has run.
+pub fn gpu_backend_available() -> bool {
+    if LLAMA_LIB.get().is_none() {
+        return false;
+    }
+    let info = unsafe {
+        let sym: Symbol<PfnPrintSystemInfo> = match lib().get(b"llama_print_system_info") {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let ptr = sym();
+        if ptr.is_null() {
+            return false;
+        }
+        CStr::from_ptr(ptr).to_string_lossy().to_string()
+    };
+    // `BLAS = 1` means an accelerated backend (CUDA / Vulkan / Metal /
+    // OpenBLAS) is compiled in; CPU-only builds print `BLAS = 0`.
+    info.contains("BLAS = 1")
+}
+
 // ─── Platform library name ─────────────────────────────
 
 /// Filename of the llama shared library for the current platform:

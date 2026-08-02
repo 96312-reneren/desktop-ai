@@ -162,6 +162,42 @@ pub fn log_dir() -> PathBuf {
     dir
 }
 
+/// Marker file written on clean shutdown and removed by the panic hook on
+/// crash. Its (non-)existence drives the crash-recovery notice at startup.
+pub fn clean_exit_flag_path() -> PathBuf {
+    app_dirs().data_dir().join(".clean_exit")
+}
+
+/// Marker written once on the first clean shutdown; distinguishes a fresh
+/// install (no marker yet) from a crashed run (marker exists, flag missing).
+fn initialized_marker_path() -> PathBuf {
+    app_dirs().data_dir().join(".initialized")
+}
+
+/// Write the clean-exit markers (called after the app shuts down normally).
+pub fn mark_clean_exit() {
+    let _ = std::fs::write(clean_exit_flag_path(), b"ok");
+    let _ = std::fs::write(initialized_marker_path(), b"ok");
+}
+
+/// Whether the previous run ended abnormally and should be surfaced to the
+/// user. A fresh install (never shut down cleanly before) is treated as
+/// clean: markers are seeded so it is never reported.
+pub fn should_show_crash_notice() -> bool {
+    let flag = clean_exit_flag_path();
+    if flag.exists() {
+        return false;
+    }
+    if !initialized_marker_path().exists() {
+        // Fresh install: seed both markers and skip the notice. This is
+        // order-independent of config.json / kb.db creation at startup.
+        let _ = std::fs::write(&flag, b"ok");
+        let _ = std::fs::write(initialized_marker_path(), b"ok");
+        return false;
+    }
+    true
+}
+
 pub fn load_config() -> Config {
     let path = config_path();
     let mut config = if path.exists() {

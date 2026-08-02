@@ -109,10 +109,70 @@ pub(crate) struct ModelLoadState {
 
 // ─── App ───────────────────────────────────────────────
 
+/// Startup diagnostics surfaced to the user once, in priority order:
+/// missing dependency > crash recovery > missing model > GPU unavailable.
+/// Only ONE notice is shown per launch so popups never stack.
+#[derive(Debug, Clone)]
+pub(crate) enum StartupNotice {
+    /// llama 依赖库缺失(致命,无法加载任何模型)
+    MissingDependency(String),
+    /// 上次异常退出,对话已自动保存
+    CrashRecovery,
+    /// 配置中选中的模型文件不存在
+    ModelMissing(String),
+    /// 配置了 GPU 加速但当前 llama 库为 CPU 版
+    GpuUnavailable,
+}
+
+/// Run the startup self-check. Returns the single highest-priority notice
+/// to display (or None when everything is fine).
+fn startup_notice(config: &Config) -> Option<StartupNotice> {
+    // 1. Runtime dependency (llama library) — fatal.
+    let lib_name = crate::ffi::llama_library_name();
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_default();
+    let lib_ok = [std::path::PathBuf::from(lib_name), exe_dir.join(lib_name)]
+        .iter()
+        .any(|p| {
+            p.exists()
+                && std::fs::metadata(p)
+                    .map(|m| m.len() >= 1_000_000)
+                    .unwrap_or(false)
+        });
+    if !lib_ok {
+        return Some(StartupNotice::MissingDependency(lib_name.to_string()));
+    }
+
+    // 2. Crash recovery (after deps so a broken install doesn't also nag).
+    if crate::config::should_show_crash_notice() {
+        return Some(StartupNotice::CrashRecovery);
+    }
+
+    // 3. Selected model file missing.
+    if let Some(id) = &config.selected_model_id {
+        if let Some(info) = crate::model_catalog::find_model(&config.model_catalog, id) {
+            if !crate::config::models_dir().join(&info.filename).exists() {
+                return Some(StartupNotice::ModelMissing(info.name.clone()));
+            }
+        }
+    }
+
+    // 4. GPU configured but the library has no BLAS backend.
+    if config.gpu_layers > 0 && !crate::ffi::gpu_backend_available() {
+        return Some(StartupNotice::GpuUnavailable);
+    }
+
+    None
+}
+
 pub struct DesktopAI {
     pub(crate) config: Config,
     pub(crate) inference: Option<Arc<Mutex<LlamaInference>>>,
     pub(crate) current_conv: Conversation,
+    /// Startup diagnostics popup (shown once, highest priority only).
+    pub(crate) startup_notice: Option<StartupNotice>,
 
     // Chat
     pub(crate) input_text: String,
@@ -494,11 +554,13 @@ impl DesktopAI {
         let gpu_info = detect_gpus();
         let vector_store = Arc::new(VectorStore::new(&config::kb_dir()));
         let sandbox = Sandbox::new(config::sandbox_dir());
+        let startup_notice = startup_notice(&config);
 
         Self {
             config,
             inference: None,
             current_conv,
+            startup_notice,
             input_text: String::new(),
             gen: None,
             gen_handle: None,
@@ -1534,6 +1596,75 @@ impl eframe::App for DesktopAI {
                         }
                         if ui.button("取消").clicked() {
                             self.confirm_action = None;
+                        }
+                    });
+                });
+        }
+
+        // ─── Startup notice (single, highest-priority popup) ──
+        if let Some(ref notice) = self.startup_notice.clone() {
+            let (title, body) = match notice {
+                StartupNotice::MissingDependency(lib) => (
+                    "启动检查：缺少依赖",
+                    format!(
+                        "未找到运行时依赖库 {}。\n\n请从 GitHub Releases 重新下载完整安装包，\
+                         或确认 {} 与程序位于同一目录。",
+                        lib, lib
+                    ),
+                ),
+                StartupNotice::CrashRecovery => (
+                    "上次异常退出",
+                    format!(
+                        "检测到上次运行异常退出（崩溃或强制结束）。\n\n您的对话已实时自动保存，\
+                         可以放心继续使用。\n崩溃日志位于：\n{}",
+                        config::log_dir().display()
+                    ),
+                ),
+                StartupNotice::ModelMissing(name) => (
+                    "模型文件缺失",
+                    format!(
+                        "上次选择的模型“{}”文件不存在。\n\n请到“切换模型”中重新下载，\
+                         或选择其他模型。",
+                        name
+                    ),
+                ),
+                StartupNotice::GpuUnavailable => (
+                    "GPU 加速不可用",
+                    "当前已配置 GPU 加速，但检测到 llama 库为 CPU 版本，\
+                     加速不会生效。\n\n可在设置中关闭 GPU 层数，\
+                     或更换带 CUDA/Vulkan 后端的库。"
+                        .to_string(),
+                ),
+            };
+            let red = egui::Color32::from_rgb(230, 90, 80);
+            egui::Window::new(title)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    let critical = matches!(
+                        notice,
+                        StartupNotice::MissingDependency(_) | StartupNotice::CrashRecovery
+                    );
+                    if critical {
+                        ui.label(RichText::new(&body).color(red));
+                    } else {
+                        ui.label(&body);
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("知道了").clicked() {
+                            self.startup_notice = None;
+                        }
+                        if matches!(notice, StartupNotice::CrashRecovery)
+                            && ui.button("打开日志目录").clicked()
+                        {
+                            let dir = config::log_dir();
+                            #[cfg(target_os = "windows")]
+                            let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+                            #[cfg(target_os = "linux")]
+                            let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
+                            self.startup_notice = None;
                         }
                     });
                 });
