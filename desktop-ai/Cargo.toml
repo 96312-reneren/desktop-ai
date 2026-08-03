@@ -2,15 +2,18 @@
 name = "desktop-ai"
 version = "6.1.4"
 edition = "2021"
-description = "妗岄潰AI - 鏈湴澶фā鍨嬭亰澶╁簲鐢?(RAG鐭ヨ瘑搴?"
+description = "桌面AI - 本地大模型聊天应用 (RAG知识库)"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-eframe = "0.31"
+eframe = { version = "0.31", features = ["android-native-activity"] }
 egui = "0.31"
 egui_extras = "0.31"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", features = ["blocking", "json"] }
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
 directories = "6"
 chrono = { version = "0.4", features = ["serde"] }
 pulldown-cmark = "0.12"
@@ -20,12 +23,18 @@ anyhow = "1"
 log = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-log = "0.2"
-rfd = "0.15"
 pdf-extract = "0.12"
 sha2 = "0.10"
 rusqlite = { version = "0.37", features = ["bundled"] }
 getrandom = "0.4.3"
 tracing-appender = "0.2.5"
+
+# rfd (native file dialogs) has no Android backend; kept off Android builds.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = "0.15"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Threading", "Win32_System_SystemInformation"] }
@@ -35,7 +44,3 @@ opt-level = 3
 lto = true
 strip = "symbols"
 panic = "unwind"
-
-
-
-

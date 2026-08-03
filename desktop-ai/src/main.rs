@@ -1,7 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(target_os = "android")]
+fn main() {
+    // Android builds use the cdylib entry point (android_main in lib.rs).
+}
+
+#[cfg(not(target_os = "android"))]
 use desktop_ai::app;
 
+#[cfg(not(target_os = "android"))]
 fn font_candidates() -> &'static [&'static str] {
     #[cfg(target_os = "windows")]
     {
@@ -40,6 +47,7 @@ fn font_candidates() -> &'static [&'static str] {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn load_chinese_fonts() -> Option<Vec<u8>> {
     for path in font_candidates() {
         if let Ok(data) = std::fs::read(path) {
@@ -52,6 +60,7 @@ fn load_chinese_fonts() -> Option<Vec<u8>> {
     None
 }
 
+#[cfg(not(target_os = "android"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Structured logging via tracing-subscriber with env-filter support.
     // Existing `log::info! / warn! / error!` macros are bridged via
