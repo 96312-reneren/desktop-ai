@@ -71,7 +71,45 @@ pub struct LlamaContextParams {
 
 impl Default for LlamaContextParams {
     fn default() -> Self {
-        unsafe { std::mem::zeroed() }
+        // Match llama_context_default_params() so model-provided settings
+        // (RoPE/YaRN, KV cache type, attention type) are NOT overridden:
+        // zeroed params previously forced yarn=0 / type_k=0 (F32) /
+        // attention=CAUSAL, which broke positional encoding on models with
+        // custom rope config (fragmented/garbage output).
+        Self {
+            n_ctx: 0,
+            n_batch: 0,
+            n_ubatch: 0,
+            n_seq_max: 0,
+            n_threads: 0,
+            n_threads_batch: 0,
+            rope_scaling_type: -1, // UNSPECIFIED
+            pooling_type: -1,      // UNSPECIFIED
+            attention_type: -1,    // UNSPECIFIED
+            flash_attn_type: -1,   // AUTO
+            rope_freq_base: 0.0,
+            rope_freq_scale: 0.0,
+            yarn_ext_factor: -1.0,
+            yarn_attn_factor: -1.0,
+            yarn_beta_fast: -1.0,
+            yarn_beta_slow: -1.0,
+            yarn_orig_ctx: 0,
+            defrag_thold: -1.0,
+            cb_eval: std::ptr::null(),
+            cb_eval_user_data: std::ptr::null(),
+            type_k: 1, // GGML_TYPE_F16
+            type_v: 1, // GGML_TYPE_F16
+            abort_callback: std::ptr::null(),
+            abort_callback_data: std::ptr::null(),
+            embeddings: false,
+            offload_kqv: true,
+            no_perf: true,
+            op_offload: true,
+            swa_full: true,
+            kv_unified: false,
+            samplers: std::ptr::null(),
+            n_samplers: 0,
+        }
     }
 }
 
@@ -127,10 +165,11 @@ type PfnBackendInit = unsafe extern "C" fn();
 type PfnVocabEos = unsafe extern "C" fn(*const c_void) -> LlamaToken;
 type PfnVocabEot = unsafe extern "C" fn(*const c_void) -> LlamaToken;
 type PfnTokenEosLegacy = unsafe extern "C" fn(*const LlamaModel) -> LlamaToken;
+type PfnGetMemory = unsafe extern "C" fn(*const LlamaContext) -> *const c_void;
+type PfnMemorySeqPosMax = unsafe extern "C" fn(*const c_void, i32) -> i32;
 
 // ─── Modern sampler API (llama.cpp ≥ b4xxx) ─────────────
 
-type PfnSamplerInitGreedy = unsafe extern "C" fn() -> *mut LlamaSampler;
 type PfnSamplerFree = unsafe extern "C" fn(*mut LlamaSampler);
 /// Sample and accept a token from the idx-th output of the last evaluation.
 type PfnSamplerSample =
@@ -144,6 +183,9 @@ pub struct LlamaSamplerChainParams {
 type PfnSamplerChainInit = unsafe extern "C" fn(LlamaSamplerChainParams) -> *mut LlamaSampler;
 type PfnSamplerChainAdd = unsafe extern "C" fn(*mut LlamaSampler, *mut LlamaSampler);
 type PfnSamplerInitPenalties = unsafe extern "C" fn(i32, f32, f32, f32) -> *mut LlamaSampler;
+type PfnSamplerInitTopK = unsafe extern "C" fn(i32) -> *mut LlamaSampler;
+type PfnSamplerInitTemp = unsafe extern "C" fn(f32) -> *mut LlamaSampler;
+type PfnSamplerInitDist = unsafe extern "C" fn(u32) -> *mut LlamaSampler;
 
 // ─── Sampling API version marker ──────────────────────
 
@@ -469,33 +511,38 @@ pub unsafe fn new_context(model: *mut LlamaModel, n_ctx: u32, n_threads: u32) ->
         params
     );
     if !ctx.is_null() && SAMPLING_V2.load(std::sync::atomic::Ordering::Relaxed) {
-        // Build a sampler chain (penalties + greedy). A bare greedy sampler
-        // degenerates into repetition loops (e.g. endless "hello") because
-        // there is no repetition penalty — same as the default llama-cli chain.
+        // Build a sampler chain (penalties + top-k + temperature + dist).
+        // Bare greedy sampling degenerates into fragmented/repetitive output
+        // (verified against official llama-simple-chat & Ollama, which both
+        // sample from the distribution); this matches the standard llama-cli
+        // chain (repeat 1.1, top-k 40, temp 0.7).
         let chain_params = LlamaSamplerChainParams { no_perf: true };
         let chain = call!(llama_sampler_chain_init, PfnSamplerChainInit, chain_params);
         if chain.is_null() {
             log::error!("llama_sampler_chain_init returned NULL");
         } else {
-            let pen = call!(
+            let add = |s: *mut LlamaSampler| {
+                if s.is_null() {
+                    log::warn!("sampler init returned NULL");
+                } else {
+                    call!(llama_sampler_chain_add, PfnSamplerChainAdd, chain, s);
+                }
+            };
+            add(call!(
                 llama_sampler_init_penalties,
                 PfnSamplerInitPenalties,
                 64,  // penalty_last_n
-                1.3, // penalty_repeat
+                1.1, // penalty_repeat
                 0.0, // penalty_freq
                 0.0  // penalty_present
-            );
-            if !pen.is_null() {
-                call!(llama_sampler_chain_add, PfnSamplerChainAdd, chain, pen);
-            } else {
-                log::warn!("llama_sampler_init_penalties returned NULL");
-            }
-            let greedy = call!(llama_sampler_init_greedy, PfnSamplerInitGreedy,);
-            if !greedy.is_null() {
-                call!(llama_sampler_chain_add, PfnSamplerChainAdd, chain, greedy);
-            } else {
-                log::warn!("llama_sampler_init_greedy returned NULL");
-            }
+            ));
+            add(call!(llama_sampler_init_top_k, PfnSamplerInitTopK, 40));
+            add(call!(llama_sampler_init_temp, PfnSamplerInitTemp, 0.7));
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u32)
+                .unwrap_or(0x5EED);
+            add(call!(llama_sampler_init_dist, PfnSamplerInitDist, seed));
             SAMPLER_REGISTRY
                 .lock()
                 .unwrap()
@@ -567,6 +614,17 @@ pub unsafe fn n_vocab(model: *const LlamaModel) -> i32 {
 /// End-of-sentence token of the model's vocabulary
 /// (`LLAMA_TOKEN_NULL` = -1 when the model has none).
 ///
+/// # Safety
+///
+/// `ctx` must be a valid context pointer.
+pub unsafe fn memory_seq_pos_max(ctx: *mut LlamaContext, seq_id: i32) -> i32 {
+    let memory = call!(llama_get_memory, PfnGetMemory, ctx);
+    if memory.is_null() {
+        return -1;
+    }
+    call!(llama_memory_seq_pos_max, PfnMemorySeqPosMax, memory, seq_id)
+}
+
 /// # Safety
 ///
 /// `model` must be a valid, non-null pointer.
@@ -904,15 +962,30 @@ mod tests {
     }
 
     #[test]
-    fn default_context_params_is_all_zero() {
+    fn default_context_params_match_llama_defaults() {
+        // Must match llama_context_default_params(): UNSPECIFIED enums (-1),
+        // YaRN fields -1.0, KV cache type F16, offload flags on. Zeroed
+        // values here override model-provided RoPE config and break
+        // positional encoding (garbage output).
         let p = LlamaContextParams::default();
-        let raw = &p as *const _ as *const u8;
-        let sz = std::mem::size_of::<LlamaContextParams>();
-        let slice = unsafe { std::slice::from_raw_parts(raw, sz) };
-        assert!(
-            slice.iter().all(|&b| b == 0),
-            "ContextParams default must be zeroed"
-        );
+        assert_eq!(p.rope_scaling_type, -1);
+        assert_eq!(p.pooling_type, -1);
+        assert_eq!(p.attention_type, -1);
+        assert_eq!(p.flash_attn_type, -1);
+        assert_eq!(p.yarn_ext_factor, -1.0);
+        assert_eq!(p.yarn_attn_factor, -1.0);
+        assert_eq!(p.yarn_beta_fast, -1.0);
+        assert_eq!(p.yarn_beta_slow, -1.0);
+        assert_eq!(p.defrag_thold, -1.0);
+        assert_eq!(p.type_k, 1); // GGML_TYPE_F16
+        assert_eq!(p.type_v, 1); // GGML_TYPE_F16
+        assert!(p.offload_kqv);
+        assert!(p.op_offload);
+        assert!(p.swa_full);
+        assert!(!p.embeddings);
+        assert!(!p.kv_unified);
+        // Embedding contexts override `embeddings`; chat contexts override
+        // n_ctx etc. — those stay consistent with official defaults.
     }
 
     // ─── DLL integrity verification ─────────────────────
