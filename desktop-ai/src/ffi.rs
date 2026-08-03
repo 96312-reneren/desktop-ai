@@ -377,21 +377,17 @@ fn to_cstring_safe(s: &str) -> CString {
 
 // ─── Safe wrapper functions ───────────────────────────
 
-/// # Safety
-///
-/// The llama library must have been loaded via [`init`] before calling this function.
-/// `path` must point to a valid GGUF model file accessible to the process.
-/// The caller is responsible for calling [`free_model`] on the returned pointer
-/// when it is no longer needed.
-pub unsafe fn load_model(path: &str) -> *mut LlamaModel {
+/// Load a model, retrying without mmap when the first attempt fails.
+/// Some file systems (e.g. FAT32 / exFAT on USB sticks) reject `mmap`,
+/// which makes llama.cpp fail to load; falling back to plain file reads
+/// keeps portable installs working.
+fn load_model_inner(path: &str, n_gpu_layers: i32, use_mmap: bool) -> *mut LlamaModel {
     let c_path = to_cstring_safe(path);
     let params = LlamaModelParams {
-        use_mmap: true,
+        use_mmap,
         use_mlock: false,
-        n_gpu_layers: 0,
-        // -1 selects "no device" mode, required on CPU-only builds where the
-        // device list is empty (GPU-only in modern llama.cpp).
-        main_gpu: -1,
+        n_gpu_layers,
+        main_gpu: if n_gpu_layers > 0 { 0 } else { -1 },
         ..LlamaModelParams::default()
     };
     call!(
@@ -404,23 +400,38 @@ pub unsafe fn load_model(path: &str) -> *mut LlamaModel {
 
 /// # Safety
 ///
+/// The llama library must have been loaded via [`init`] before calling this function.
+/// `path` must point to a valid GGUF model file accessible to the process.
+/// The caller is responsible for calling [`free_model`] on the returned pointer
+/// when it is no longer needed.
+pub unsafe fn load_model(path: &str) -> *mut LlamaModel {
+    let model = load_model_inner(path, 0, true);
+    if model.is_null() {
+        log::warn!(
+            "model load with mmap failed, retrying without mmap: {}",
+            path
+        );
+        load_model_inner(path, 0, false)
+    } else {
+        model
+    }
+}
+
+/// # Safety
+///
 /// Same preconditions as [`load_model`]. `n_gpu_layers` controls how many
 /// model layers are offloaded to GPU; pass 0 for CPU-only inference.
 pub unsafe fn load_model_gpu(path: &str, n_gpu_layers: i32) -> *mut LlamaModel {
-    let c_path = to_cstring_safe(path);
-    let params = LlamaModelParams {
-        use_mmap: true,
-        use_mlock: false,
-        n_gpu_layers,
-        main_gpu: if n_gpu_layers > 0 { 0 } else { -1 },
-        ..LlamaModelParams::default()
-    };
-    call!(
-        llama_load_model_from_file,
-        PfnLoadModelFromFile,
-        c_path.as_ptr(),
-        params
-    )
+    let model = load_model_inner(path, n_gpu_layers, true);
+    if model.is_null() {
+        log::warn!(
+            "model load with mmap failed, retrying without mmap: {}",
+            path
+        );
+        load_model_inner(path, n_gpu_layers, false)
+    } else {
+        model
+    }
 }
 
 /// # Safety

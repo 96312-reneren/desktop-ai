@@ -38,9 +38,18 @@ impl DesktopAI {
         for model in &self.config.model_catalog.clone() {
             let downloaded = config::models_dir().join(&model.filename).exists();
             let is_downloading = self.downloads.contains_key(&model.id);
+            let is_selected = self.config.selected_model_id.as_deref() == Some(&model.id);
+            let is_loaded = self.loaded_model_name.as_deref() == Some(&model.name);
             ui.group(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(&model.name).size(14.0).strong());
+                    let name = if is_loaded {
+                        format!("{}  ✓ 使用中", model.name)
+                    } else if is_selected {
+                        format!("{}  (已选择)", model.name)
+                    } else {
+                        model.name.clone()
+                    };
+                    ui.label(RichText::new(&name).size(14.0).strong());
                     for tag in &model.tags {
                         ui.label(
                             RichText::new(tag)
@@ -62,7 +71,8 @@ impl DesktopAI {
                             ui.label(
                                 RichText::new("✓ 已下载").color(Color32::from_rgb(76, 175, 80)),
                             );
-                            if ui.button("使用").clicked() {
+                            let btn_text = if is_loaded { "重新加载" } else { "使用" };
+                            if ui.button(btn_text).clicked() {
                                 self.config.selected_model_id = Some(model.id.clone());
                                 config::save_config(&self.config);
                                 self.load_selected_model();
