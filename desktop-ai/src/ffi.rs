@@ -124,6 +124,9 @@ type PfnPrintSystemInfo = unsafe extern "C" fn() -> *const c_char;
 type PfnGetVocab = unsafe extern "C" fn(*const LlamaModel) -> *const c_void;
 type PfnVocabNTokens = unsafe extern "C" fn(*const c_void) -> i32;
 type PfnBackendInit = unsafe extern "C" fn();
+type PfnVocabEos = unsafe extern "C" fn(*const c_void) -> LlamaToken;
+type PfnVocabEot = unsafe extern "C" fn(*const c_void) -> LlamaToken;
+type PfnTokenEosLegacy = unsafe extern "C" fn(*const LlamaModel) -> LlamaToken;
 
 // ─── Modern sampler API (llama.cpp ≥ b4xxx) ─────────────
 
@@ -132,6 +135,15 @@ type PfnSamplerFree = unsafe extern "C" fn(*mut LlamaSampler);
 /// Sample and accept a token from the idx-th output of the last evaluation.
 type PfnSamplerSample =
     unsafe extern "C" fn(*mut LlamaSampler, *mut LlamaContext, i32) -> LlamaToken;
+
+#[repr(C)]
+pub struct LlamaSamplerChainParams {
+    pub no_perf: bool,
+}
+
+type PfnSamplerChainInit = unsafe extern "C" fn(LlamaSamplerChainParams) -> *mut LlamaSampler;
+type PfnSamplerChainAdd = unsafe extern "C" fn(*mut LlamaSampler, *mut LlamaSampler);
+type PfnSamplerInitPenalties = unsafe extern "C" fn(i32, f32, f32, f32) -> *mut LlamaSampler;
 
 // ─── Sampling API version marker ──────────────────────
 
@@ -457,15 +469,37 @@ pub unsafe fn new_context(model: *mut LlamaModel, n_ctx: u32, n_threads: u32) ->
         params
     );
     if !ctx.is_null() && SAMPLING_V2.load(std::sync::atomic::Ordering::Relaxed) {
-        // Register a greedy sampler so `sample_greedy` can draw tokens.
-        let smpl = call!(llama_sampler_init_greedy, PfnSamplerInitGreedy,);
-        if smpl.is_null() {
-            log::error!("llama_sampler_init_greedy returned NULL");
+        // Build a sampler chain (penalties + greedy). A bare greedy sampler
+        // degenerates into repetition loops (e.g. endless "hello") because
+        // there is no repetition penalty — same as the default llama-cli chain.
+        let chain_params = LlamaSamplerChainParams { no_perf: true };
+        let chain = call!(llama_sampler_chain_init, PfnSamplerChainInit, chain_params);
+        if chain.is_null() {
+            log::error!("llama_sampler_chain_init returned NULL");
         } else {
+            let pen = call!(
+                llama_sampler_init_penalties,
+                PfnSamplerInitPenalties,
+                64,  // penalty_last_n
+                1.3, // penalty_repeat
+                0.0, // penalty_freq
+                0.0  // penalty_present
+            );
+            if !pen.is_null() {
+                call!(llama_sampler_chain_add, PfnSamplerChainAdd, chain, pen);
+            } else {
+                log::warn!("llama_sampler_init_penalties returned NULL");
+            }
+            let greedy = call!(llama_sampler_init_greedy, PfnSamplerInitGreedy,);
+            if !greedy.is_null() {
+                call!(llama_sampler_chain_add, PfnSamplerChainAdd, chain, greedy);
+            } else {
+                log::warn!("llama_sampler_init_greedy returned NULL");
+            }
             SAMPLER_REGISTRY
                 .lock()
                 .unwrap()
-                .insert(ctx as usize, smpl as usize);
+                .insert(ctx as usize, chain as usize);
         }
     }
     ctx
@@ -527,6 +561,42 @@ pub unsafe fn n_vocab(model: *const LlamaModel) -> i32 {
         call!(llama_vocab_n_tokens, PfnVocabNTokens, vocab)
     } else {
         call!(llama_n_vocab, PfnNVocab, model)
+    }
+}
+
+/// End-of-sentence token of the model's vocabulary
+/// (`LLAMA_TOKEN_NULL` = -1 when the model has none).
+///
+/// # Safety
+///
+/// `model` must be a valid, non-null pointer.
+pub unsafe fn eos_token(model: *const LlamaModel) -> LlamaToken {
+    if MODERN_VOCAB_API.load(std::sync::atomic::Ordering::Relaxed) {
+        let vocab = vocab_or_model(model);
+        if vocab.is_null() {
+            return -1;
+        }
+        call!(llama_vocab_eos, PfnVocabEos, vocab)
+    } else {
+        call!(llama_token_eos, PfnTokenEosLegacy, model)
+    }
+}
+
+/// End-of-turn token of the model's vocabulary
+/// (`LLAMA_TOKEN_NULL` = -1 when the model has none).
+///
+/// # Safety
+///
+/// `model` must be a valid, non-null pointer.
+pub unsafe fn eot_token(model: *const LlamaModel) -> LlamaToken {
+    if MODERN_VOCAB_API.load(std::sync::atomic::Ordering::Relaxed) {
+        let vocab = vocab_or_model(model);
+        if vocab.is_null() {
+            return -1;
+        }
+        call!(llama_vocab_eot, PfnVocabEot, vocab)
+    } else {
+        -1
     }
 }
 
