@@ -6,13 +6,21 @@ fn llama_library_name() -> &'static str {
     }
 }
 
-/// On Linux, libllama.so links against the ggml shared libraries, so copy
-/// those next to it when present (self-contained package, no ldconfig needed).
+/// Additional shared libraries that the platform llama library links
+/// against, copied next to it when present (self-contained package).
 fn ggml_library_names() -> Vec<&'static str> {
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-        Vec::new()
-    } else {
-        vec!["libggml.so.0", "libggml-cpu.so.0", "libggml-base.so.0"]
+    match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("windows") => vec![
+            "ggml.dll",
+            "ggml-base.dll",
+            "ggml-cpu.dll",
+            "libgcc_s_seh-1.dll",
+            "libstdc++-6.dll",
+            "libwinpthread-1.dll",
+            "libgomp-1.dll",
+        ],
+        Ok("macos") => Vec::new(),
+        _ => vec!["libggml.so.0", "libggml-cpu.so.0", "libggml-base.so.0"],
     }
 }
 
@@ -43,6 +51,13 @@ fn main() {
     }
 
     println!("cargo:rerun-if-changed=llama.dll");
+    println!("cargo:rerun-if-changed=ggml.dll");
+    println!("cargo:rerun-if-changed=ggml-base.dll");
+    println!("cargo:rerun-if-changed=ggml-cpu.dll");
+    println!("cargo:rerun-if-changed=libgcc_s_seh-1.dll");
+    println!("cargo:rerun-if-changed=libstdc++-6.dll");
+    println!("cargo:rerun-if-changed=libwinpthread-1.dll");
+    println!("cargo:rerun-if-changed=libgomp-1.dll");
     println!("cargo:rerun-if-changed=libllama.so");
     println!("cargo:rerun-if-changed=libllama.dylib");
     println!("cargo:rerun-if-changed=libggml.so.0");
