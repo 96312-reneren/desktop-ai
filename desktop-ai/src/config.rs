@@ -121,8 +121,16 @@ impl Default for Config {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 pub fn app_dirs() -> ProjectDirs {
     ProjectDirs::from("com", "desktopai", "DesktopAI").expect("failed to get project directories")
+}
+
+#[cfg(target_os = "android")]
+pub fn app_dirs() -> ProjectDirs {
+    // On Android the directories crate has no standard locations; the data
+    // root is the app-private files dir (see data_root).
+    ProjectDirs::from("", "", "").expect("failed to get project directories")
 }
 
 fn ensure_dir(dir: &std::path::Path, label: &str) {
@@ -149,25 +157,56 @@ fn portable_root() -> Option<PathBuf> {
 }
 
 /// Data root: `exe_dir/data` in portable mode, the system data dir otherwise.
+/// On Android: the app-private files directory (HOME is set to it by the
+/// native-activity runtime).
 pub fn data_root() -> PathBuf {
-    if let Some(root) = portable_root() {
-        root.join("data")
-    } else {
-        app_dirs().data_dir().to_path_buf()
+    #[cfg(target_os = "android")]
+    {
+        return std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/data/local/tmp"));
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        if let Some(root) = portable_root() {
+            root.join("data")
+        } else {
+            app_dirs().data_dir().to_path_buf()
+        }
     }
 }
 
 pub fn config_path() -> PathBuf {
-    let dir = if let Some(root) = portable_root() {
-        root.join("data").join("config")
-    } else {
-        app_dirs().config_dir().to_path_buf()
-    };
-    ensure_dir(&dir, "config");
-    dir.join("config.json")
+    #[cfg(target_os = "android")]
+    {
+        let dir = data_root().join("config");
+        ensure_dir(&dir, "config");
+        return dir.join("config.json");
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let dir = if let Some(root) = portable_root() {
+            root.join("data").join("config")
+        } else {
+            app_dirs().config_dir().to_path_buf()
+        };
+        ensure_dir(&dir, "config");
+        dir.join("config.json")
+    }
 }
 
 pub fn models_dir() -> PathBuf {
+    // Android: prefer user-visible external storage so models can be pushed
+    // via adb (/sdcard/DesktopAI/models), fall back to app-private storage.
+    #[cfg(target_os = "android")]
+    {
+        let ext = std::env::var("EXTERNAL_STORAGE").unwrap_or_default();
+        let candidate = std::path::Path::new(&ext).join("DesktopAI/models");
+        if !ext.is_empty() {
+            ensure_dir(&candidate, "models");
+            return candidate;
+        }
+    }
     let dir = data_root().join("models");
     ensure_dir(&dir, "models");
     dir

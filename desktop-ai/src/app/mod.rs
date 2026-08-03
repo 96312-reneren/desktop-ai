@@ -769,6 +769,7 @@ impl DesktopAI {
             self.error_message = Some("需要先加载模型才能使用知识库".into());
             return;
         }
+        #[cfg(not(target_os = "android"))]
         let path = if let Some(p) = rfd::FileDialog::new()
             .add_filter("文档", &["txt", "md", "pdf"])
             .pick_file()
@@ -777,6 +778,21 @@ impl DesktopAI {
         } else {
             let filepath = self.kb_title.trim().to_string();
             if filepath.is_empty() {
+                return;
+            }
+            let p = std::path::PathBuf::from(&filepath);
+            if !p.exists() {
+                self.error_message = Some(format!("文件不存在: {}", filepath));
+                return;
+            }
+            p
+        };
+        #[cfg(target_os = "android")]
+        let path = {
+            // Android: no native file dialog — use the typed path instead.
+            let filepath = self.kb_title.trim().to_string();
+            if filepath.is_empty() {
+                self.error_message = Some("请输入文件路径".into());
                 return;
             }
             let p = std::path::PathBuf::from(&filepath);
@@ -1239,6 +1255,7 @@ impl DesktopAI {
             return;
         }
         let default_name = format!("conversation_{}.json", self.current_conv.id);
+        #[cfg(not(target_os = "android"))]
         let path = match rfd::FileDialog::new()
             .set_file_name(&default_name)
             .add_filter("JSON", &["json"])
@@ -1246,6 +1263,11 @@ impl DesktopAI {
         {
             Some(p) => p,
             None => return,
+        };
+        #[cfg(target_os = "android")]
+        let path = {
+            // Android: no native save dialog — write to the app data dir.
+            crate::config::data_root().join(&default_name)
         };
         match self.current_conv.export_json() {
             Ok(json) => {
@@ -1259,6 +1281,7 @@ impl DesktopAI {
         }
     }
 
+    #[cfg(not(target_os = "android"))]
     pub(crate) fn import_conversation(&mut self) {
         let path = match rfd::FileDialog::new()
             .add_filter("JSON", &["json"])
@@ -1283,6 +1306,12 @@ impl DesktopAI {
             }
             Err(e) => self.error_message = Some(e),
         }
+    }
+
+    /// Android has no native file picker.
+    #[cfg(target_os = "android")]
+    pub(crate) fn import_conversation(&mut self) {
+        self.error_message = Some("安卓端暂不支持导入对话".into());
     }
 
     pub(crate) fn delete_model_file(&mut self, model_id: &str) {
