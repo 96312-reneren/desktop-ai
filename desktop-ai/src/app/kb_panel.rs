@@ -140,6 +140,54 @@ impl DesktopAI {
         ui.add_space(8.0);
 
         ui.separator();
+        // ── Keyword search (FTS5) ──
+        ui.label(RichText::new("关键词搜索").size(13.0).strong());
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                vec2(ui.available_width() - 60.0, 20.0),
+                TextEdit::singleline(&mut self.kb_search_query)
+                    .hint_text("输入关键词，如: 苹果"),
+            );
+            if ui.add(egui::Button::new("搜索")).clicked() {
+                self.kb_search_results = self
+                    .vector_store
+                    .search_text(&self.kb_search_query, 10)
+                    .unwrap_or_default();
+                self.kb_search_done = true;
+            }
+        });
+        if self.kb_search_done && !self.kb_search_query.trim().is_empty() {
+            if self.kb_search_results.is_empty() {
+                ui.label(
+                    RichText::new("未找到匹配内容")
+                        .size(11.0)
+                        .color(Color32::GRAY),
+                );
+            } else {
+                ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                    for hit in &self.kb_search_results {
+                        ui.group(|ui| {
+                            ui.label(
+                                RichText::new(format!("📄 {}", hit.source))
+                                    .size(11.0)
+                                    .strong(),
+                            );
+                            ui.label(
+                                RichText::new(if hit.chunk.len() > 120 {
+                                    format!("{}...", &hit.chunk[..120])
+                                } else {
+                                    hit.chunk.clone()
+                                })
+                                .size(10.0)
+                                .color(Color32::GRAY),
+                            );
+                        });
+                    }
+                });
+            }
+        }
+        ui.add_space(4.0);
+
         ui.label(RichText::new("已索引文档").size(13.0).strong());
         let docs = self.vector_store.documents();
         if docs.is_empty() {

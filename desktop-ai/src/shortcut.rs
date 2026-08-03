@@ -101,7 +101,9 @@ pub fn create_desktop_shortcut() -> Result<bool, String> {
             let target = desktop_dir.join("desktop-ai.desktop");
             std::fs::write(&target, &desktop_entry)
                 .map_err(|e| format!("写入桌面快捷方式失败: {}", e))?;
-            let _ = std::process::Command::new("chmod").args(["u+x", &target.to_string_lossy()]).status();
+            let _ = std::process::Command::new("chmod")
+                .args(["u+x", &target.to_string_lossy()])
+                .status();
             created = true;
         }
         // Applications menu entry (GNOME/KDE).

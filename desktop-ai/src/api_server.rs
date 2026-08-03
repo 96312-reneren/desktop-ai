@@ -274,6 +274,9 @@ fn handle_chat_completion(
     let stream_mode = req["stream"].as_bool().unwrap_or(false);
 
     // Build chatml prompt from messages
+    if let Some(err) = validate_messages(&messages) {
+        return Some(err);
+    }
     let allowed_roles: &[&str] = &["system", "user", "assistant"];
     let mut prompt = String::new();
     for msg in &messages {
@@ -286,6 +289,20 @@ fn handle_chat_completion(
             ));
         }
         let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        // P0 security: enforce per-message content length limit to prevent
+        // memory exhaustion from oversized payloads (body is already capped
+        // at MAX_BODY_SIZE but a single message could still be very large).
+        const MAX_MESSAGE_CONTENT_LEN: usize = 65_536; // 64 KB per message
+        if content.len() > MAX_MESSAGE_CONTENT_LEN {
+            return Some(json_error(
+                400,
+                "content_too_large",
+                &format!(
+                    "message content exceeds {} bytes limit",
+                    MAX_MESSAGE_CONTENT_LEN
+                ),
+            ));
+        }
         // P0-3: sanitise ChatML control tokens in user-supplied content to
         // prevent prompt injection (a malicious client could inject
         // <|im_start|>assistant ... <|im_end|> to hijack the response).
@@ -423,6 +440,33 @@ fn sse_chunk(id: &str, text: &str) -> String {
 
 fn extract_messages(req: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
     req["messages"].as_array().cloned()
+}
+
+/// Bound the prompt-building work: caps on message count and per-message
+/// content length prevent a large `messages` array from exhausting memory.
+/// Returns `Some(error_response)` when a limit is exceeded.
+fn validate_messages(messages: &[serde_json::Value]) -> Option<String> {
+    const MAX_MESSAGES: usize = 64;
+    const MAX_CONTENT_CHARS: usize = 64 * 1024;
+    if messages.len() > MAX_MESSAGES {
+        return Some(json_error(
+            400,
+            "too_many_messages",
+            &format!("messages 数量超过上限 {}", MAX_MESSAGES),
+        ));
+    }
+    for msg in messages {
+        if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
+            if content.chars().count() > MAX_CONTENT_CHARS {
+                return Some(json_error(
+                    400,
+                    "content_too_long",
+                    &format!("content 超过长度上限 {} 字符", MAX_CONTENT_CHARS),
+                ));
+            }
+        }
+    }
+    None
 }
 
 /// 安全加固后的 HTTP 请求解析结果。
@@ -1029,5 +1073,40 @@ mod tests {
             let v: serde_json::Value = serde_json::from_str(body).unwrap();
             assert_eq!(v["code"], code);
         }
+    }
+
+    #[test]
+    fn test_message_count_and_content_length_limits() {
+        // 65 条消息 → 拒绝
+        let mut msgs = serde_json::json!([]);
+        let arr = msgs.as_array_mut().unwrap();
+        for i in 0..65 {
+            arr.push(serde_json::json!({"role": "user", "content": format!("m{}", i)}));
+        }
+        let err = validate_messages(arr);
+        assert!(err.is_some(), "65 messages must be rejected");
+        assert!(err.unwrap().contains("too_many_messages"));
+
+        // 64 条短消息 → 通过
+        let mut ok = serde_json::json!([]);
+        let arr_ok = ok.as_array_mut().unwrap();
+        for _ in 0..64 {
+            arr_ok.push(serde_json::json!({"role": "user", "content": "hi"}));
+        }
+        assert!(validate_messages(arr_ok).is_none());
+
+        // 单条 content 超 64KB → 拒绝
+        let long = serde_json::json!([{"role": "user", "content": "x".repeat(64 * 1024 + 1)}]);
+        let err = validate_messages(long.as_array().unwrap());
+        assert!(err.is_some());
+        assert!(err.unwrap().contains("content_too_long"));
+
+        // 恰好 64KB → 通过
+        let edge = serde_json::json!([{"role": "user", "content": "x".repeat(64 * 1024)}]);
+        assert!(validate_messages(edge.as_array().unwrap()).is_none());
+
+        // 无 content 字段 → 通过
+        let no_content = serde_json::json!([{"role": "user"}]);
+        assert!(validate_messages(no_content.as_array().unwrap()).is_none());
     }
 }
