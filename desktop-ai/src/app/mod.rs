@@ -173,6 +173,8 @@ pub struct DesktopAI {
     pub(crate) current_conv: Conversation,
     /// Startup diagnostics popup (shown once, highest priority only).
     pub(crate) startup_notice: Option<StartupNotice>,
+    /// First-run "create desktop shortcut?" prompt (shown once).
+    pub(crate) show_shortcut_prompt: bool,
 
     // Chat
     pub(crate) input_text: String,
@@ -555,12 +557,16 @@ impl DesktopAI {
         let vector_store = Arc::new(VectorStore::new(&config::kb_dir()));
         let sandbox = Sandbox::new(config::sandbox_dir());
         let startup_notice = startup_notice(&config);
+        // First-run desktop shortcut prompt (only when one doesn't exist yet
+        // and the user hasn't answered before).
+        let show_shortcut_prompt = !config.shortcut_prompted && !crate::shortcut::shortcut_exists();
 
         Self {
             config,
             inference: None,
             current_conv,
             startup_notice,
+            show_shortcut_prompt,
             input_text: String::new(),
             gen: None,
             gen_handle: None,
@@ -1255,7 +1261,7 @@ impl DesktopAI {
     }
 
     pub(crate) fn reset_app(&mut self) {
-        let app_dir = config::app_dirs().data_dir().to_path_buf();
+        let app_dir = config::data_root();
         if let Err(e) = std::fs::remove_dir_all(&app_dir) {
             log::warn!("reset_app: failed to remove data dir: {}", e);
         }
@@ -1273,7 +1279,7 @@ impl DesktopAI {
     }
 
     pub(crate) fn uninstall_app(&mut self) {
-        let app_dir = config::app_dirs().data_dir().to_path_buf();
+        let app_dir = config::data_root();
         let _ = std::fs::remove_dir_all(&app_dir);
         let config_file = config::config_path();
         let _ = std::fs::remove_file(&config_file);
@@ -1665,6 +1671,46 @@ impl eframe::App for DesktopAI {
                             #[cfg(target_os = "linux")]
                             let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
                             self.startup_notice = None;
+                        }
+                    });
+                });
+        }
+
+        // ─── First-run desktop shortcut prompt ──────────
+        if self.show_shortcut_prompt && self.startup_notice.is_none() {
+            egui::Window::new("创建桌面快捷方式")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("是否在桌面创建一个启动快捷方式？");
+                    ui.label(
+                        RichText::new("(可在设置中随时重新创建)")
+                            .size(10.0)
+                            .color(egui::Color32::GRAY),
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("创建").clicked() {
+                            match crate::shortcut::create_desktop_shortcut() {
+                                Ok(true) => {
+                                    self.status_message = "桌面快捷方式已创建".into();
+                                }
+                                Ok(false) => {
+                                    self.status_message = "未创建快捷方式".into();
+                                }
+                                Err(e) => {
+                                    self.error_message = Some(format!("创建快捷方式失败: {}", e));
+                                }
+                            }
+                            self.config.shortcut_prompted = true;
+                            config::save_config(&self.config);
+                            self.show_shortcut_prompt = false;
+                        }
+                        if ui.button("跳过").clicked() {
+                            self.config.shortcut_prompted = true;
+                            config::save_config(&self.config);
+                            self.show_shortcut_prompt = false;
                         }
                     });
                 });

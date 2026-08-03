@@ -51,8 +51,12 @@ pub struct Config {
     pub kb_enabled: bool,
     #[serde(default)]
     pub gpu_layers: i32,
-    #[serde(default = "default_api_token")]
+    #[serde(default)]
     pub api_token: String,
+    /// True once the first-run "create desktop shortcut?" prompt has been
+    /// answered, so it never shows again.
+    #[serde(default)]
+    pub shortcut_prompted: bool,
 }
 
 fn default_api_port() -> u16 {
@@ -112,6 +116,7 @@ impl Default for Config {
             kb_enabled: false,
             gpu_layers: 0,
             api_token: default_api_token(),
+            shortcut_prompted: false,
         }
     }
 }
@@ -126,38 +131,68 @@ fn ensure_dir(dir: &std::path::Path, label: &str) {
     }
 }
 
+/// Portable-mode marker file placed next to the executable. When present,
+/// ALL user data (config, conversations, knowledge base, models, logs) is
+/// stored in a `data/` folder beside the exe instead of the system dirs —
+/// the app becomes a green/portable build that can run from a USB stick.
+const PORTABLE_MARKER: &str = ".portable";
+
+/// Portable-mode root: the executable's directory when the `.portable`
+/// marker exists next to it.
+fn portable_root() -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    if exe_dir.join(PORTABLE_MARKER).exists() {
+        Some(exe_dir)
+    } else {
+        None
+    }
+}
+
+/// Data root: `exe_dir/data` in portable mode, the system data dir otherwise.
+pub fn data_root() -> PathBuf {
+    if let Some(root) = portable_root() {
+        root.join("data")
+    } else {
+        app_dirs().data_dir().to_path_buf()
+    }
+}
+
 pub fn config_path() -> PathBuf {
-    let dir = app_dirs().config_dir().to_path_buf();
+    let dir = if let Some(root) = portable_root() {
+        root.join("data").join("config")
+    } else {
+        app_dirs().config_dir().to_path_buf()
+    };
     ensure_dir(&dir, "config");
     dir.join("config.json")
 }
 
 pub fn models_dir() -> PathBuf {
-    let dir = app_dirs().data_dir().join("models");
+    let dir = data_root().join("models");
     ensure_dir(&dir, "models");
     dir
 }
 
 pub fn conversations_dir() -> PathBuf {
-    let dir = app_dirs().data_dir().join("conversations");
+    let dir = data_root().join("conversations");
     ensure_dir(&dir, "conversations");
     dir
 }
 
 pub fn kb_dir() -> PathBuf {
-    let dir = app_dirs().data_dir().join("knowledge_base");
+    let dir = data_root().join("knowledge_base");
     ensure_dir(&dir, "knowledge_base");
     dir
 }
 
 pub fn sandbox_dir() -> PathBuf {
-    let dir = app_dirs().data_dir().join("sandbox");
+    let dir = data_root().join("sandbox");
     ensure_dir(&dir, "sandbox");
     dir
 }
 
 pub fn log_dir() -> PathBuf {
-    let dir = app_dirs().data_dir().join("logs");
+    let dir = data_root().join("logs");
     ensure_dir(&dir, "logs");
     dir
 }
@@ -165,13 +200,13 @@ pub fn log_dir() -> PathBuf {
 /// Marker file written on clean shutdown and removed by the panic hook on
 /// crash. Its (non-)existence drives the crash-recovery notice at startup.
 pub fn clean_exit_flag_path() -> PathBuf {
-    app_dirs().data_dir().join(".clean_exit")
+    data_root().join(".clean_exit")
 }
 
 /// Marker written once on the first clean shutdown; distinguishes a fresh
 /// install (no marker yet) from a crashed run (marker exists, flag missing).
 fn initialized_marker_path() -> PathBuf {
-    app_dirs().data_dir().join(".initialized")
+    data_root().join(".initialized")
 }
 
 /// Write the clean-exit markers (called after the app shuts down normally).

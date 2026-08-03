@@ -14,4 +14,5 @@ pub mod markdown;
 pub mod model_catalog;
 pub mod sandbox;
 pub mod search;
+pub mod shortcut;
 pub mod vector_store;
