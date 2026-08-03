@@ -230,6 +230,11 @@ pub struct DesktopAI {
     pub(crate) error_message: Option<String>,
     pub(crate) theme_applied: bool,
     pub(crate) confirm_action: Option<ConfirmAction>,
+    /// Conversation list cache (sidebar). Refreshed only when dirty.
+    pub(crate) conv_cache: Vec<crate::conversation::ConversationMeta>,
+    pub(crate) conv_cache_dirty: bool,
+    /// Display name of the currently loaded model (None = not loaded).
+    pub(crate) loaded_model_name: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -607,6 +612,12 @@ impl DesktopAI {
             error_message: None,
             theme_applied: false,
             confirm_action: None,
+            // Conversation list cache: avoids a SQLite query every frame in
+            // the sidebar. Marked dirty by every conversation-mutating action.
+            conv_cache: Vec::new(),
+            conv_cache_dirty: true,
+            // Current model display name (None = nothing loaded yet).
+            loaded_model_name: None,
         }
     }
 
@@ -723,9 +734,13 @@ impl DesktopAI {
                     }
                 }
                 self.inference = Some(inf);
+                self.loaded_model_name = Some(model_name.clone());
             }
             ModelLoadResult::Error(e) => {
                 self.status_message = format!("加载失败: {}", e);
+                // Surface the failure prominently instead of only in the
+                // status line, so "模型未加载" is never a mystery.
+                self.error_message = Some(format!("模型加载失败: {}", e));
             }
         }
     }
@@ -982,7 +997,17 @@ impl DesktopAI {
 
         for id in finished {
             self.downloads.remove(&id);
-            if self.config.selected_model_id.as_deref() == Some(&id) {
+            // Auto-load: either the downloaded model was already selected,
+            // or nothing is loaded yet — pick the fresh model so a user who
+            // downloaded models from the USB/portable build can chat right
+            // away without hunting through the model picker.
+            let already_selected = self.config.selected_model_id.as_deref() == Some(&id);
+            let nothing_loaded = self.inference.is_none() && self.model_load.is_none();
+            if already_selected || nothing_loaded {
+                if !already_selected {
+                    self.config.selected_model_id = Some(id.clone());
+                    config::save_config(&self.config);
+                }
                 self.load_selected_model();
             }
         }
@@ -1157,6 +1182,7 @@ impl DesktopAI {
 
             if let Some(mut conv) = Conversation::load(&conv_id) {
                 conv.add_message("assistant", &response);
+                self.conv_cache_dirty = true;
             }
 
             self.gen = None;
@@ -1168,8 +1194,17 @@ impl DesktopAI {
 
     // ─── Conversation management ────────────────────────
 
+    /// Refresh the cached conversation list (lazy: only when dirty).
+    pub(crate) fn refresh_conv_cache(&mut self) {
+        if self.conv_cache_dirty {
+            self.conv_cache = Conversation::list_all();
+            self.conv_cache_dirty = false;
+        }
+    }
+
     pub(crate) fn new_conversation(&mut self) {
         self.current_conv = Conversation::new();
+        self.conv_cache_dirty = true;
     }
 
     pub(crate) fn load_conversation(&mut self, id: &str) {
@@ -1182,6 +1217,7 @@ impl DesktopAI {
 
     pub(crate) fn delete_conversation(&mut self, id: &str) {
         Conversation::delete(id);
+        self.conv_cache_dirty = true;
         if self.current_conv.id == id {
             self.current_conv = Conversation::new();
         }
@@ -1232,6 +1268,7 @@ impl DesktopAI {
             Ok(mut conv) => {
                 conv.save();
                 self.current_conv = conv;
+                self.conv_cache_dirty = true;
                 self.error_message = Some("导入成功".into());
             }
             Err(e) => self.error_message = Some(e),
