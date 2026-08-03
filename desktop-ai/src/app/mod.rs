@@ -570,7 +570,7 @@ impl DesktopAI {
         // and the user hasn't answered before).
         let show_shortcut_prompt = !config.shortcut_prompted && !crate::shortcut::shortcut_exists();
 
-        Self {
+        let mut app = Self {
             config,
             inference: None,
             current_conv,
@@ -618,7 +618,15 @@ impl DesktopAI {
             conv_cache_dirty: true,
             // Current model display name (None = nothing loaded yet).
             loaded_model_name: None,
+        };
+
+        // Auto-load the previously selected model so a restart (or a
+        // portable/USB run) drops straight into a ready chat instead of
+        // showing "请先加载模型". Loading runs on a background thread.
+        if app.config.selected_model_id.is_some() {
+            app.load_selected_model();
         }
+        app
     }
 
     pub(crate) fn is_generating(&self) -> bool {
@@ -735,8 +743,10 @@ impl DesktopAI {
                 }
                 self.inference = Some(inf);
                 self.loaded_model_name = Some(model_name.clone());
+                log::info!("model loaded: {}", model_name);
             }
             ModelLoadResult::Error(e) => {
+                log::error!("model load failed: {}", e);
                 self.status_message = format!("加载失败: {}", e);
                 // Surface the failure prominently instead of only in the
                 // status line, so "模型未加载" is never a mystery.
