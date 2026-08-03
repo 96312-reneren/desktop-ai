@@ -99,6 +99,12 @@ pub fn run_inference(
             return;
         }
         let vocab = ffi::n_vocab(model);
+        // Stop on the model's real EOS/EOT tokens (e.g. <|endoftext|> /
+        // <|im_end|> for Qwen), not just the legacy 1/2 sentinels —
+        // otherwise generation keeps going past the natural end and
+        // degenerates into repetition loops.
+        let eos = ffi::eos_token(model);
+        let eot = ffi::eot_token(model);
         for chunk in tokens.chunks(512) {
             for &t in chunk {
                 ffi::decode(ctx, t);
@@ -110,7 +116,12 @@ pub fn run_inference(
                 break;
             }
             let token = ffi::sample_greedy(ctx);
-            if token == 1 || token == 2 || token >= vocab {
+            if token == 1
+                || token == 2
+                || token >= vocab
+                || (eos >= 0 && token == eos)
+                || (eot >= 0 && token == eot)
+            {
                 break;
             }
             count += 1;

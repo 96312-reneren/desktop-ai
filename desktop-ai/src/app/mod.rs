@@ -1543,14 +1543,16 @@ impl eframe::App for DesktopAI {
                 self.render_sidebar(ui);
             });
 
+        // ─── Input bar (BEFORE CentralPanel: egui panels added after the
+        // central panel overlap it instead of reducing its space — this was
+        // hiding the bottom of the chat output behind the input box) ─────
+        egui::TopBottomPanel::bottom("input").show(ctx, |ui| {
+            self.render_input_bar(ui);
+        });
+
         // ─── Chat area ─────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
             self.render_chat_area(ctx, ui);
-        });
-
-        // ─── Input bar ─────────────────────────────
-        egui::TopBottomPanel::bottom("input").show(ctx, |ui| {
-            self.render_input_bar(ui);
         });
 
         // ─── Model select window ───────────────────
