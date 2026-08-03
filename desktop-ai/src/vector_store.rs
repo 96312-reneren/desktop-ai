@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     embedding BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(doc_id UNINDEXED, text);
 ";
 
 fn embed_to_blob(v: &[f32]) -> Vec<u8> {
@@ -95,6 +96,9 @@ impl VectorStore {
                 }
                 c.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             }
+            // One-time FTS backfill: index any chunks that were stored before
+            // the FTS table existed (or if a partial index was interrupted).
+            rebuild_fts_if_stale(c)?;
             Ok(())
         }) {
             log::error!("kb schema init failed: {}", e);
@@ -161,8 +165,11 @@ impl VectorStore {
                 let mut stmt = tx.prepare(
                     "INSERT INTO chunks (doc_id, idx, text, embedding) VALUES (?1, ?2, ?3, ?4)",
                 )?;
+                let mut fts =
+                    tx.prepare("INSERT INTO chunks_fts (doc_id, text) VALUES (?1, ?2)")?;
                 for (i, (chunk_text, vec)) in embedded.iter().enumerate() {
                     stmt.execute(params![id, i as i64, chunk_text, embed_to_blob(vec)])?;
+                    fts.execute(params![id, chunk_text])?;
                 }
             }
             tx.commit()
@@ -171,8 +178,10 @@ impl VectorStore {
 
     pub fn delete_document(&self, id: &str) -> Result<(), String> {
         self.db.with_conn(|c| {
-            c.execute("DELETE FROM documents WHERE id = ?1", params![id])?;
-            Ok(())
+            let tx = c.transaction()?;
+            tx.execute("DELETE FROM chunks_fts WHERE doc_id = ?1", params![id])?;
+            tx.execute("DELETE FROM documents WHERE id = ?1", params![id])?;
+            tx.commit()
         })
     }
 
@@ -191,6 +200,45 @@ impl VectorStore {
 
     pub fn documents_snapshot(&self) -> Vec<StoredDocument> {
         self.documents()
+    }
+
+    /// Full-text keyword search over indexed chunks (FTS5).
+    /// Query syntax follows FTS5 MATCH; quotes are neutralised so user
+    /// input cannot break out of the query grammar.
+    pub fn search_text(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>, String> {
+        let q = query.replace('"', " ");
+        let q = q.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.db.with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT f.doc_id, d.title, f.text, bm25(chunks_fts) AS rank
+                 FROM chunks_fts f
+                 JOIN documents d ON d.id = f.doc_id
+                 WHERE chunks_fts MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![q, top_k as i64], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            let mut hits = Vec::new();
+            for row in rows {
+                let (doc_id, title, text) = row?;
+                let _ = doc_id;
+                hits.push(SearchHit {
+                    chunk: text,
+                    score: 1.0,
+                    source: title,
+                });
+            }
+            Ok(hits)
+        })
     }
 }
 
@@ -294,6 +342,35 @@ fn migrate_from_json(store_dir: &std::path::Path, c: &mut Connection) -> Result<
         data.documents.len()
     );
     Ok(())
+}
+
+/// Rebuild the FTS index if chunks exist but the FTS table is empty
+/// (e.g. data created before FTS support was added). Cheap to run and
+/// idempotent: only fires when the counts disagree.
+fn rebuild_fts_if_stale(c: &mut Connection) -> rusqlite::Result<()> {
+    let chunk_count: i64 = c.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
+    let fts_count: i64 = c.query_row("SELECT COUNT(*) FROM chunks_fts", [], |r| r.get(0))?;
+    if chunk_count == 0 || chunk_count == fts_count {
+        return Ok(());
+    }
+    log::info!(
+        "rebuilding FTS index ({} chunks, {} indexed)",
+        chunk_count,
+        fts_count
+    );
+    let tx = c.transaction()?;
+    tx.execute("DELETE FROM chunks_fts", [])?;
+    {
+        let mut select = tx.prepare("SELECT doc_id, text FROM chunks")?;
+        let mut insert = tx.prepare("INSERT INTO chunks_fts (doc_id, text) VALUES (?1, ?2)")?;
+        let rows =
+            select.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (doc_id, text) = row?;
+            insert.execute(params![doc_id, text])?;
+        }
+    }
+    tx.commit()
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -452,6 +529,64 @@ mod tests {
         assert_eq!(docs[0].chunks.len(), 1);
         assert_eq!(docs[0].chunks[0].text, "旧文本");
         assert_eq!(docs[0].chunks[0].embedding, vec![1.0, 0.0, 0.0]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn fts5_module_available_in_bundled_sqlite() {
+        let (store, dir) = temp_store();
+        let result = store.db.with_conn(|c| {
+            c.execute_batch("CREATE VIRTUAL TABLE IF NOT EXISTS _fts_probe USING fts5(x)")
+        });
+        assert!(
+            result.is_ok(),
+            "bundled SQLite must support FTS5: {:?}",
+            result
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn fts_backfill_indexes_existing_chunks() {
+        let dir = std::env::temp_dir().join(format!(
+            "desktop_ai_kb_fts_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Insert a chunk directly (bypassing add_document) to simulate data
+        // that predates the FTS table, then reopen to trigger the backfill.
+        {
+            let store = VectorStore::new(&dir);
+            let _ = store.db.with_conn(|c| {
+                c.execute(
+                    "INSERT INTO documents (id, title, created_at) VALUES ('d1', '测试文档', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                c.execute(
+                    "INSERT INTO chunks (doc_id, idx, text, embedding) VALUES ('d1', 0, '含有关键词 苹果 的描述', x'00000000')",
+                    [],
+                )
+            });
+        }
+        let store = VectorStore::new(&dir);
+        let hits = store.search_text("苹果", 5).expect("search_text");
+        assert_eq!(hits.len(), 1, "backfilled chunk must be searchable");
+        assert_eq!(hits[0].source, "测试文档");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn search_text_quote_and_empty_safe() {
+        let (store, dir) = temp_store();
+        // 引号被中和,不会语法错误
+        let hits = store.search_text("a\"b", 5).expect("no crash");
+        assert!(hits.is_empty());
+        // 空查询返回空结果
+        let hits = store.search_text("   ", 5).expect("no crash");
+        assert!(hits.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

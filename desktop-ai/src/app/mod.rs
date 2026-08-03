@@ -209,6 +209,10 @@ pub struct DesktopAI {
     pub(crate) kb_index_progress: f32,
     pub(crate) kb_index_status: String,
     pub(crate) kb_job: Option<KbJobState>,
+    // Keyword search (FTS5)
+    pub(crate) kb_search_query: String,
+    pub(crate) kb_search_results: Vec<crate::vector_store::SearchHit>,
+    pub(crate) kb_search_done: bool,
 
     // Search
     pub(crate) show_search_panel: bool,
@@ -587,6 +591,9 @@ impl DesktopAI {
             kb_index_progress: 0.0,
             kb_index_status: String::new(),
             kb_job: None,
+            kb_search_query: String::new(),
+            kb_search_results: Vec::new(),
+            kb_search_done: false,
             show_search_panel: false,
             search_query: String::new(),
             search_results: Vec::new(),

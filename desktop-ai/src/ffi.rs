@@ -218,6 +218,27 @@ fn verify_dll(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// SHA-256 of a file (hex), used for the library audit trail.
+fn sha256_of_file(path: &std::path::Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        use std::io::Read;
+        let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect())
+}
+
 // ─── Global API ───────────────────────────────────────
 
 static LLAMA_LIB: OnceCell<Library> = OnceCell::new();
@@ -261,6 +282,11 @@ pub unsafe fn init() -> Result<(), String> {
             let lib_path = resolve_lib_path();
             let lib_path_str = lib_path.to_string_lossy();
             verify_dll(&lib_path_str)?;
+            // Audit trail: record the loaded library's SHA-256 so a replaced
+            // or tampered file is identifiable in the logs after the fact.
+            if let Ok(hash) = sha256_of_file(&lib_path) {
+                log::info!("llama library SHA-256: {}", hash);
+            }
             let lib = Library::new(lib_path_str.as_ref())
                 .map_err(|e| format!("加载 {} 失败: {}", lib_path_str, e))?;
             check_dll_version(&lib)?;
@@ -740,25 +766,36 @@ mod tests {
 
     #[test]
     fn llama_model_params_is_correctly_sized() {
-        // 3*i32 + 3*ptr + 1*ptr + 1*ptr + 4*bool (padded)
-        // On 64-bit: i32=4, bool=1, ptr=8. With alignment padding.
+        // Layout for llama.cpp b7700 on 64-bit (see llama.h):
+        // 2 ptr (devices, tensor_buft_overrides) + 3×i32 + 1 ptr (tensor_split)
+        // + 1 fn ptr (progress_callback) + 2 ptr + 8 bool → 72 bytes.
         let sz = std::mem::size_of::<LlamaModelParams>();
-        // Must be > 0 and a sane size (llama.cpp 层直接通过值传递)
-        assert!(
-            (30..=128).contains(&sz),
-            "LlamaModelParams size insane: {}",
-            sz
-        );
+        if cfg!(target_pointer_width = "64") {
+            assert_eq!(sz, 72, "LlamaModelParams layout drift (llama.cpp b7700)");
+        } else {
+            assert!(
+                (30..=128).contains(&sz),
+                "LlamaModelParams size insane: {}",
+                sz
+            );
+        }
     }
 
     #[test]
     fn llama_context_params_is_correctly_sized() {
+        // Layout for llama.cpp b7700 on 64-bit: 6×u32/i32 + 4 enums (i32)
+        // + 6 floats + u32 + f32 + 2 fn/void ptr + 2 i32 + 2 fn/void ptr
+        // + 6 bool + ptr + usize → 136 bytes.
         let sz = std::mem::size_of::<LlamaContextParams>();
-        assert!(
-            (50..=256).contains(&sz),
-            "LlamaContextParams size insane: {}",
-            sz
-        );
+        if cfg!(target_pointer_width = "64") {
+            assert_eq!(sz, 136, "LlamaContextParams layout drift (llama.cpp b7700)");
+        } else {
+            assert!(
+                (50..=256).contains(&sz),
+                "LlamaContextParams size insane: {}",
+                sz
+            );
+        }
     }
 
     #[test]
