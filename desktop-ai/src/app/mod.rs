@@ -329,16 +329,23 @@ fn run_kb_job(
                     format!("正在爬取: {}", url)
                 },
             });
-            let results = if depth > 1 {
-                let config = crate::crawler::CrawlConfig {
-                    max_depth: depth,
-                    max_pages: 15,
-                    ..Default::default()
-                };
-                crate::crawler::crawl_with_depth(&url, config)
-            } else {
-                vec![crate::crawler::crawl_url(&url)]
-            };
+            let results = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if depth > 1 {
+                    let config = crate::crawler::CrawlConfig {
+                        max_depth: depth,
+                        max_pages: 15,
+                        ..Default::default()
+                    };
+                    crate::crawler::crawl_with_depth(&url, config)
+                } else {
+                    vec![crate::crawler::crawl_url(&url)]
+                }
+            }))
+            .unwrap_or_else(|_| {
+                // A panic inside the crawler must not kill the job silently.
+                let _ = tx.send(KbIndexMsg::Error("爬取过程发生内部错误，已中止".into()));
+                Vec::new()
+            });
 
             let total = results.len();
             let mut added = 0usize;
