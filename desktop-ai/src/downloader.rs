@@ -264,11 +264,6 @@ fn download_single_file(
         }
     };
 
-    let mut req = client.get(url);
-    if existing_size > 0 {
-        req = req.header("Range", format!("bytes={}-", existing_size));
-    }
-
     // Follow redirects manually (up to 5 hops), re-validating each target
     // with the crawler's SSRF checks (private/loopback addresses rejected).
     let mut current_url = url.to_string();
