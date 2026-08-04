@@ -55,9 +55,9 @@ if not exist "%KEYSTORE%" (
   "%JAVA%\keytool.exe" -genkeypair -v -keystore "%KEYSTORE%" -alias desktopai -keyalg RSA -keysize 2048 -validity 10000 -storepass desktopai123 -keypass desktopai123 -dname "CN=DesktopAI" >nul
 )
 "%BT%\zipalign.exe" -f 4 "%OUT%\base.apk" "%OUT%\aligned.apk"
-call "%BT%\apksigner.bat" sign --ks "%KEYSTORE%" --ks-pass pass:desktopai123 --key-pass pass:desktopai123 --out "%OUT%\DesktopAI-v6.1.4.apk" "%OUT%\aligned.apk"
+call "%BT%\apksigner.bat" sign --ks "%KEYSTORE%" --ks-pass pass:desktopai123 --key-pass pass:desktopai123 --out "%OUT%\DesktopAI-v6.1.6.apk" "%OUT%\aligned.apk"
 if errorlevel 1 exit /b 1
 
 echo == 7. result ==
-dir "%OUT%\DesktopAI-v6.1.4.apk"
+dir "%OUT%\DesktopAI-v6.1.6.apk"
 echo BUILD_OK
