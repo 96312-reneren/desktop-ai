@@ -200,7 +200,13 @@ fn handle_client(
     // P0-2: /v1/* endpoints require Bearer token.
     // /health and /ready are intentionally unauthenticated for liveness
     // probes; CORS preflights (OPTIONS) carry no credentials by spec.
+    // An empty server token means authentication is impossible — reject.
     if path.starts_with("/v1/") && method != "OPTIONS" {
+        if api_token.is_empty() {
+            log::error!("API server has an empty token; refusing /v1/* requests");
+            let _ = stream.write_all(json_error(401, "unauthorized", "unauthorized").as_bytes());
+            return;
+        }
         let auth = parsed
             .headers
             .iter()

@@ -6,6 +6,11 @@ use std::path::PathBuf;
 #[allow(dead_code)]
 const MAX_FILE_SIZE: u64 = 500_000;
 
+/// Hard cap for binary writes when no explicit [`Sandbox::with_max_size`]
+/// was configured (256 MiB) — prevents unbounded write amplification.
+#[allow(dead_code)]
+const MAX_BINARY_FILE_SIZE: u64 = 256 * 1024 * 1024;
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct FileEntry {
@@ -195,12 +200,13 @@ impl Sandbox {
 
     /// 二进制文件写入。默认无大小上限；通过 [`Sandbox::with_max_size`]
     /// 可配置上限（适用于 Agent 工具调用场景防滥用）。
+    /// 无显式配置时采用 256 MiB 硬上限，防止写入放大攻击。
     pub fn write_bytes(&self, relative: &str, content: &[u8]) -> Result<(), String> {
         let path = self.safe_path(relative)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
         }
-        self.check_size(content.len() as u64, u64::MAX)?;
+        self.check_size(content.len() as u64, MAX_BINARY_FILE_SIZE)?;
         let mut f = fs::File::create(&path).map_err(|e| format!("创建文件失败: {}", e))?;
         f.write_all(content)
             .map_err(|e| format!("写入失败: {}", e))?;

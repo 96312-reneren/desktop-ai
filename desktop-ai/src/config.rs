@@ -302,6 +302,13 @@ pub fn load_config() -> Config {
                             }
                         }
                     }
+                    // Backfill a missing/empty api_token (old config files
+                    // lack the field): an empty token would make the local
+                    // API effectively unauthenticated.
+                    if config.api_token.is_empty() {
+                        config.api_token = default_api_token();
+                        save_config(&config);
+                    }
                     config
                 }
                 Err(e) => {
