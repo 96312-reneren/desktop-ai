@@ -279,7 +279,7 @@ fn fetch_url(url: &str, cfg: &CrawlConfig) -> Result<(String, String), String> {
 
         // Build a fresh client per hop so each target host is DNS-pinned
         // (single resolution, validated, then pinned — rebinding-proof).
-        let mut builder = reqwest::blocking::Client::builder()
+        let builder = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(cfg.timeout_secs))
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopAI/5.7")
             // P0-5: disable auto-redirect so we can re-validate each hop.
