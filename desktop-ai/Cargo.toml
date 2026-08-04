@@ -1,6 +1,6 @@
 [package]
 name = "desktop-ai"
-version = "6.1.4"
+version = "6.1.6"
 edition = "2021"
 description = "桌面AI - 本地大模型聊天应用 (RAG知识库)"
 
