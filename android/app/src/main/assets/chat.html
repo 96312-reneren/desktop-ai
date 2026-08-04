@@ -175,8 +175,8 @@
 
 <script>
 "use strict";
-// Port is injected by Kotlin after the Rust service allocates it.
-const API_PORT = window.__API_PORT || 11434;
+// Port is allocated by Rust at runtime; the Kotlin bridge reports it.
+const API_PORT = (window.AndroidBridge && parseInt(window.AndroidBridge.getApiPort(), 10)) || 11434;
 const API = "http://127.0.0.1:" + API_PORT + "/v1/chat/completions";
 const READY_URL = "http://127.0.0.1:" + API_PORT + "/ready";
 const LS_KEY = "desktopai.convs.v1";

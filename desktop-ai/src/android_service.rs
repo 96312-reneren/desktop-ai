@@ -31,7 +31,9 @@ extern "C" {
 pub(crate) fn android_log(msg: &str) {
     let tag = b"DesktopAI-N\0";
     let m = msg.replace('%', "%%");
-    let Ok(m) = std::ffi::CString::new(m) else { return };
+    let Ok(m) = std::ffi::CString::new(m) else {
+        return;
+    };
     unsafe {
         __android_log_print(
             3,
@@ -167,7 +169,10 @@ fn start_service(api_port: u16, api_token: String) {
     }
     let Some(model_path) = model_path else {
         log::error!("no model found in {}", models_dir.display());
-        android_log(&format!("start_service: NO MODEL in {}", models_dir.display()));
+        android_log(&format!(
+            "start_service: NO MODEL in {}",
+            models_dir.display()
+        ));
         return;
     };
     log::info!("loading model: {}", model_path.display());
@@ -196,7 +201,10 @@ fn start_service(api_port: u16, api_token: String) {
     // listener thread exits immediately.
     let mut _server = crate::api_server::ApiServer::start(inf, api_port, name, api_token);
     log::info!("api server on 127.0.0.1:{}", api_port);
-    android_log(&format!("start_service: api server on 127.0.0.1:{}", api_port));
+    android_log(&format!(
+        "start_service: api server on 127.0.0.1:{}",
+        api_port
+    ));
 
     // Keep the server alive (dropping ApiServer stops the listener) and
     // keep the process alive.
