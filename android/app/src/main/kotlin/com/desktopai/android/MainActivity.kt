@@ -67,6 +67,9 @@ class MainActivity : Activity() {
         //    the local API base so a compromised page cannot exfiltrate data.
         web.addJavascriptInterface(object {
             @JavascriptInterface
+            fun getApiPort(): String = apiPort.toString()
+
+            @JavascriptInterface
             fun postJson(url: String, body: String, cb: String) {
                 val allowed = apiBase + "/v1/"
                 if (!url.startsWith(allowed)) {

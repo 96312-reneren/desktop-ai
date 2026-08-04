@@ -8,7 +8,7 @@
 
 ---
 
-## 当前版本：v6.1.0
+## 当前版本：v6.1.6
 
 ### 区别于上一版（v5.8）的关键变更
 - **SQLite 存储迁移**：知识库与对话从 JSON 迁移至 SQLite（WAL 事务、崩溃不丢数据、增量写入），旧数据首次启动自动迁移
@@ -70,7 +70,7 @@
 - Release profile：`opt-level=3` + `lto=true` + `strip="symbols"`
 
 ### 工程质量
-- **85 个测试**全部通过（77 unit + 8 integration），覆盖 11 个模块
+- **142 个测试**全部通过（134 unit + 8 integration），覆盖 11 个模块
 - **0 个 Clippy 错误、0 个 Clippy 警告**（pristine baseline）
 - 全部 unsafe 函数含 `# Safety` 文档说明
 - 结构化日志：`tracing-subscriber` + `tracing-log` 桥接 `log::*!` 宏，落盘到数据目录 `logs/`

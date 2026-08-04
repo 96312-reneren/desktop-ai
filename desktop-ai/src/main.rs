@@ -114,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1000.0, 680.0])
             .with_min_inner_size([750.0, 500.0])
-            .with_title("桌面AI v6.1.4"),
+            .with_title("桌面AI v6.1.6"),
         ..Default::default()
     };
 

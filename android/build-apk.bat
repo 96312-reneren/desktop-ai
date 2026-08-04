@@ -49,13 +49,12 @@ copy /y "%LLAMA%\libomp.so" "%OUT%\lib\arm64-v8a\" >nul
 python "%~dp0add-files.py" "%OUT%" "%SRC%"
 
 echo == 6. align+sign ==
-rem keystore lives outside the repo/build dirs (never shipped with the APK)
-if not exist "%KEYSTORE%" (
-  if not exist "%USERPROFILE%\.desktopai-android" mkdir "%USERPROFILE%\.desktopai-android"
-  "%JAVA%\keytool.exe" -genkeypair -v -keystore "%KEYSTORE%" -alias desktopai -keyalg RSA -keysize 2048 -validity 10000 -storepass desktopai123 -keypass desktopai123 -dname "CN=DesktopAI" >nul
-)
+rem keystore + random password live outside the repo/build dirs (see
+rem keystore-mgr.py); never hardcode the signing password in this file.
+python "%~dp0keystore-mgr.py" ensure
+for /f "delims=" %%p in ('python "%~dp0keystore-mgr.py" pass') do set "KSPASS=%%p"
 "%BT%\zipalign.exe" -f 4 "%OUT%\base.apk" "%OUT%\aligned.apk"
-call "%BT%\apksigner.bat" sign --ks "%KEYSTORE%" --ks-pass pass:desktopai123 --key-pass pass:desktopai123 --out "%OUT%\DesktopAI-v6.1.6.apk" "%OUT%\aligned.apk"
+call "%BT%\apksigner.bat" sign --ks "%KEYSTORE%" --ks-pass pass:%KSPASS% --key-pass pass:%KSPASS% --out "%OUT%\DesktopAI-v6.1.6.apk" "%OUT%\aligned.apk"
 if errorlevel 1 exit /b 1
 
 echo == 7. result ==
