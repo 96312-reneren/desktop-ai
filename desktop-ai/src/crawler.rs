@@ -81,7 +81,7 @@ pub fn extract_pdf_safe(path: &std::path::Path) -> Result<String, String> {
 /// hostname checks only (no DNS resolution, so DNS-rebinding is out of
 /// scope); sufficient to block `http://127.0.0.1`, `http://localhost`,
 /// `http://192.168.x.x`, `http://169.254.169.254`, etc.
-fn is_ssrf_url(url: &str) -> bool {
+pub(crate) fn is_ssrf_url(url: &str) -> bool {
     let host = match extract_host(url) {
         Some(h) => h,
         None => return false,
@@ -218,6 +218,44 @@ fn read_local_file(path: &str) -> Result<(String, String), String> {
     Ok((format.to_string(), raw))
 }
 
+/// Resolve `host` once, reject private/loopback results, and pin the
+/// host→IP mapping into the client builder. Pinning defeats DNS rebinding:
+/// the connection uses the validated address, not a re-resolved one.
+fn pin_host(
+    mut builder: reqwest::blocking::ClientBuilder,
+    url: &str,
+) -> Result<reqwest::blocking::ClientBuilder, String> {
+    let host = extract_host(url).ok_or("无法解析 URL 主机名")?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if parse_ipv4(host).is_some() || host.contains(':') {
+        // Literal IP: literal checks in is_ssrf_url already applied.
+        return Ok(builder);
+    }
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<std::net::SocketAddr> = format!("{}:443", host)
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS 解析失败: {}", e))?
+        .collect();
+    if addrs.is_empty() {
+        return Err("DNS 解析无结果".into());
+    }
+    for a in &addrs {
+        let private = match a.ip() {
+            std::net::IpAddr::V4(v4) => is_private_ipv4(v4.octets()),
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback() || v6.is_unspecified() || v6.segments().starts_with(&[0xfe80])
+            }
+        };
+        if private {
+            return Err(format!("DNS 解析到内网地址，已拦截: {}", a.ip()));
+        }
+    }
+    for a in addrs {
+        builder = builder.resolve(host, a);
+    }
+    Ok(builder)
+}
+
 fn fetch_url(url: &str, cfg: &CrawlConfig) -> Result<(String, String), String> {
     if is_stopped(cfg) {
         return Err("已取消".into());
@@ -226,17 +264,6 @@ fn fetch_url(url: &str, cfg: &CrawlConfig) -> Result<(String, String), String> {
     if is_ssrf_url(url) {
         return Err("禁止访问内网或回环地址".into());
     }
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(cfg.timeout_secs))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopAI/5.7")
-        // P0-5: disable auto-redirect so we can re-validate each hop.
-        .redirect(reqwest::redirect::Policy::none())
-        // Explicit TLS verification (default, but stated for consistency with
-        // downloader.rs / search.rs and to prevent silent regressions).
-        .danger_accept_invalid_certs(false)
-        .danger_accept_invalid_hostnames(false)
-        .build()
-        .map_err(|e| format!("连接失败: {}", e))?;
 
     let mut current_url = url.to_string();
     let mut hops: u32 = 0;
@@ -249,6 +276,21 @@ fn fetch_url(url: &str, cfg: &CrawlConfig) -> Result<(String, String), String> {
         if hops >= max_hops {
             return Err("重定向次数过多".into());
         }
+
+        // Build a fresh client per hop so each target host is DNS-pinned
+        // (single resolution, validated, then pinned — rebinding-proof).
+        let mut builder = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(cfg.timeout_secs))
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopAI/5.7")
+            // P0-5: disable auto-redirect so we can re-validate each hop.
+            .redirect(reqwest::redirect::Policy::none())
+            // Explicit TLS verification (default, but stated for consistency
+            // with downloader.rs / search.rs and to prevent silent regressions).
+            .danger_accept_invalid_certs(false)
+            .danger_accept_invalid_hostnames(false);
+        let client = pin_host(builder, &current_url)?
+            .build()
+            .map_err(|e| format!("连接失败: {}", e))?;
 
         // Exponential backoff on 429 / 503.
         let mut attempt = 0u32;
@@ -321,7 +363,10 @@ fn is_html_content(ct: &str) -> bool {
 
 fn extract_links(html: &str, base_url: &str) -> Vec<String> {
     let mut links = Vec::new();
-    let lower = html.to_lowercase();
+    // to_ascii_lowercase keeps byte offsets identical to the original string
+    // (only ASCII a-z changes; multi-byte UTF-8 is untouched), so slicing
+    // the original `html` with offsets found in `lower` is always in bounds.
+    let lower = html.to_ascii_lowercase();
     let mut search_from = 0usize;
 
     while let Some(pos) = lower[search_from..].find("href") {
@@ -373,7 +418,7 @@ fn extract_links(html: &str, base_url: &str) -> Vec<String> {
     links
 }
 
-fn resolve_url(link: &str, base: &str) -> String {
+pub(crate) fn resolve_url(link: &str, base: &str) -> String {
     if link.starts_with("http://") || link.starts_with("https://") {
         return link.to_string();
     }

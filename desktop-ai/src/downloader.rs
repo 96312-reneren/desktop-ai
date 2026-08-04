@@ -250,6 +250,8 @@ fn download_single_file(
 
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        // No auto-redirect: hops are re-validated against SSRF rules.
+        .redirect(reqwest::redirect::Policy::none())
         .danger_accept_invalid_certs(false)
         .danger_accept_invalid_hostnames(false)
         .build();
@@ -267,14 +269,45 @@ fn download_single_file(
         req = req.header("Range", format!("bytes={}-", existing_size));
     }
 
-    let response = match req.send() {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = tx.send(DownloadMsg::Error(format!("连接失败: {}", e)));
-            return Err(e.to_string());
+    // Follow redirects manually (up to 5 hops), re-validating each target
+    // with the crawler's SSRF checks (private/loopback addresses rejected).
+    let mut current_url = url.to_string();
+    let mut hops: u32 = 0;
+    let response = loop {
+        if hops >= 5 {
+            let _ = tx.send(DownloadMsg::Error("重定向次数过多".into()));
+            return Err("重定向次数过多".into());
         }
+        if crate::crawler::is_ssrf_url(&current_url) {
+            let _ = tx.send(DownloadMsg::Error("禁止访问内网地址".into()));
+            return Err("禁止访问内网地址".into());
+        }
+        let mut req = client.get(&current_url);
+        if existing_size > 0 {
+            req = req.header("Range", format!("bytes={}-", existing_size));
+        }
+        let resp = match req.send() {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(DownloadMsg::Error(format!("连接失败: {}", e)));
+                return Err(e.to_string());
+            }
+        };
+        if resp.status().is_redirection() {
+            let location = resp
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| {
+                    let _ = tx.send(DownloadMsg::Error("重定向缺少 Location".into()));
+                    "重定向缺少 Location".to_string()
+                })?;
+            current_url = crate::crawler::resolve_url(location.trim(), &current_url);
+            hops += 1;
+            continue;
+        }
+        break resp;
     };
-
     let status = response.status();
     let (total_size, mut downloaded, mut file) = if status == 206 {
         let total = response
