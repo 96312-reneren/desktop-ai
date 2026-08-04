@@ -333,11 +333,19 @@ fn resolve_lib_path() -> std::path::PathBuf {
 pub unsafe fn init() -> Result<(), String> {
     LLAMA_LIB
         .get_or_try_init(|| {
+            // On Android the .so files live inside the APK; they are already
+            // loaded by the system linker as dependencies of libdesktop_ai.so,
+            // so dlopen with the bare name resolves against the loaded list.
+            #[cfg(target_os = "android")]
+            let lib_path = std::path::PathBuf::from(llama_library_name());
+            #[cfg(not(target_os = "android"))]
             let lib_path = resolve_lib_path();
             let lib_path_str = lib_path.to_string_lossy();
+            #[cfg(not(target_os = "android"))]
             verify_dll(&lib_path_str)?;
             // Audit trail: record the loaded library's SHA-256 so a replaced
             // or tampered file is identifiable in the logs after the fact.
+            #[cfg(not(target_os = "android"))]
             if let Ok(hash) = sha256_of_file(&lib_path) {
                 log::info!("llama library SHA-256: {}", hash);
             }

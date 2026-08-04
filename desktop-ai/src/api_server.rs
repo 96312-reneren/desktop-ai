@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+﻿use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
@@ -176,11 +176,21 @@ fn handle_client(
     let body = parsed.body;
     let origin = parsed.origin;
 
+    #[cfg(target_os = "android")]
+    crate::android_service::android_log(&format!(
+        "req: {} {} origin={:?}",
+        method,
+        path,
+        origin.as_deref().unwrap_or("(none)")
+    ));
+
     // CORS: browser origins must be on the allow-list; command-line (no
     // Origin) is always permitted.
     if let Some(ref origin) = origin {
         if !origin_allowed(origin) {
             log::warn!("API rejected Origin: {}", origin);
+            #[cfg(target_os = "android")]
+            crate::android_service::android_log(&format!("REJECTED origin: {}", origin));
             let _ = stream
                 .write_all(json_error(403, "origin_not_allowed", "origin not allowed").as_bytes());
             return;
@@ -188,8 +198,9 @@ fn handle_client(
     }
 
     // P0-2: /v1/* endpoints require Bearer token.
-    // /health and /ready are intentionally unauthenticated for liveness probes.
-    if path.starts_with("/v1/") {
+    // /health and /ready are intentionally unauthenticated for liveness
+    // probes; CORS preflights (OPTIONS) carry no credentials by spec.
+    if path.starts_with("/v1/") && method != "OPTIONS" {
         let auth = parsed
             .headers
             .iter()
@@ -670,7 +681,7 @@ fn inject_cors_headers(response: &str, origin: Option<&str>) -> String {
 fn cors_preflight_response(origin: Option<&str>) -> String {
     let origin_value = origin.unwrap_or("null");
     format!(
-        "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: {}\r\nAccess-Control-Allow-Headers: {}\r\nAccess-Control-Max-Age: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: {}\r\nAccess-Control-Allow-Headers: {}\r\nAccess-Control-Allow-Private-Network: true\r\nAccess-Control-Max-Age: {}\r\nConnection: close\r\n\r\n",
         origin_value, CORS_ALLOWED_METHODS, CORS_ALLOWED_HEADERS, CORS_MAX_AGE
     )
 }
@@ -772,6 +783,10 @@ fn parse_content_length(headers: &str) -> Option<usize> {
 /// before comparing the host, preventing `http://localhost:evil@attacker.com`
 /// style bypasses.
 fn origin_allowed(origin: &str) -> bool {
+    // file:// pages (e.g. the Android WebView UI) send Origin: null.
+    if origin == "null" {
+        return true;
+    }
     for host in &ALLOWED_ORIGIN_HOSTS {
         for scheme in &["http://", "https://"] {
             let rest = match origin.strip_prefix(scheme) {

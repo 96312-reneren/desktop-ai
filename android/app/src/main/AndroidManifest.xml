@@ -7,14 +7,12 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="桌面AI"
-        android:hasCode="false"
-        android:allowBackup="true">
+        android:allowBackup="true"
+        android:usesCleartextTraffic="true">
         <activity
-            android:name="android.app.NativeActivity"
+            android:name=".MainActivity"
             android:exported="true"
-            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
-            android:launchMode="singleTask">
-            <meta-data android:name="android.app.lib_name" android:value="desktop_ai"/>
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
