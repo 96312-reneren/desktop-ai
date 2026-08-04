@@ -83,11 +83,14 @@ fn html_to_text(html: &str) -> String {
 }
 
 fn extract_title(html: &str) -> String {
-    let lower = html.to_lowercase();
+    // to_ascii_lowercase keeps byte offsets identical to the original string
+    // (only ASCII changes; multi-byte UTF-8 untouched), so every slice below
+    // is in bounds even for malicious Unicode input.
+    let lower = html.to_ascii_lowercase();
     if let Some(start) = lower.find("<title") {
         if let Some(content_start) = html[start..].find('>') {
             let content = &html[start + content_start + 1..];
-            if let Some(end) = content.to_lowercase().find("</title") {
+            if let Some(end) = content.to_ascii_lowercase().find("</title") {
                 return html_to_text(&content[..end]);
             }
         }
@@ -163,6 +166,18 @@ fn decode_entities(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_extract_title_unicode_no_panic() {
+        // Unicode before <title> must not shift byte offsets (regression for
+        // the old to_lowercase-based indexing which could panic).
+        let html = "标题<title>中文标题</title>";
+        let t = extract_title(html);
+        assert_eq!(t, "中文标题");
+        let html2 = "<title>İstanbul</title>"; // İ lowercases to 2 chars
+        let t2 = extract_title(html2);
+        assert_eq!(t2, "İstanbul");
+    }
 
     #[test]
     fn test_html_cleaning() {
