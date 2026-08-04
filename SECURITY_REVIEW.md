@@ -128,3 +128,35 @@ android/build/
 桌面端（Rust）安全工程成熟度良好，核心防护完备且测试覆盖到位；**安卓分支存在 2 项高危（认证 token 硬编码、固定端口可劫持）与多项中危（桥 URL 无白名单、file 访问、备份/明文流量、v1 签名）问题**，直接威胁用户对话隐私，应作为下个版本的首要修复目标。同时建议尽快恢复安卓构建源的可追溯性，消除源码-产物不一致带来的供应链与维护风险。
 
 *注：本报告基于 2026-08-04 工作区代码与构建产物。由于安卓无源码，A1-A10 的结论来自产物静态分析；修复后建议对安卓分支做一次基于源码的复查。*
+
+---
+
+## 七、修复状态（2026-08-04 后续）
+
+| 编号 | 状态 | 修复说明 |
+|------|------|----------|
+| A1 | ✅ 已修复 | 随机 token 由 Kotlin 每次启动在内存生成，经 JNI 传入 Rust；不再存在于 APK/.so/JS |
+| A2 | ✅ 已修复 | 端口改为 `bind 127.0.0.1:0` 动态分配，回传 Kotlin 注入 WebView |
+| A3 | ✅ 已修复 | JS 桥 URL 白名单：仅 `http://127.0.0.1:<port>/v1/*` |
+| A4 | ✅ 已修复 | `allowFileAccess=false`（页面位于 android_asset） |
+| A5 | ✅ 已修复 | `allowBackup=false` |
+| A6 | ✅ 已修复 | `networkSecurityConfig` 仅放行回环明文；移除全局 `usesCleartextTraffic` |
+| A7 | ✅ 已验证 | 当前产物 v2+v3 签名（apksigner 默认输出）；报告针对旧 v1 产物 |
+| A8 | ✅ 已修复 | keystore 移至 `%USERPROFILE%\.desktopai-android`（构建目录外） |
+| A9 | — | 标准启动 Activity 配置，维持现状 |
+| A10 | ✅ 已修复 | 对话存储 XOR+Base64 轻量混淆 |
+| D1 | ✅ 已修复 | `Origin: null` 仅 Android 放行（cfg 门控），桌面严格白名单 |
+| D2 | ✅ 已修复 | `release/` 二进制产物移出 git，改用 GitHub Releases |
+| D3 | — | 有意的设计（回环无 TLS / OPTIONS 免认证 / 存活探测），维持现状 |
+
+### 第二轮回调问题（2026-08-04）
+
+| 问题 | 状态 | 修复说明 |
+|------|------|----------|
+| 空 API token 边界 | ✅ 已修复 | `load_config()` 回填随机 token 并持久化；`api_server` 拒绝空 token 的 `/v1/*` 请求 |
+| llama.dll 信任链 | ✅ 已修复 | SHA-256 基线文件（`data_root/llama_library.sha256`）比对，不一致时告警并刷新基线；布局漂移由符号探测兜底 |
+| crawler Unicode 偏移 panic | ✅ 已修复 | `to_lowercase` → `to_ascii_lowercase`（字节偏移与原文严格对齐） |
+| crawler DNS rebinding | ✅ 已修复 | 每跳先解析并校验全部 IP（拒私网），再用 `ClientBuilder::resolve` 固定 host→IP |
+| sandbox 写入无上限 | ✅ 已修复 | `write_bytes` 默认 256 MiB 硬上限（`with_max_size` 可覆盖） |
+| downloader 重定向策略 | ✅ 已修复 | `redirect(Policy::none)` + 逐跳 SSRF 校验（复用 crawler 校验） |
+| sandbox 无进程隔离 | ⚠️ 未做 | 需要子进程+seccomp 架构改造；当前为路径围栏文件助手，接入 Agent 工具协议前需评审 |
