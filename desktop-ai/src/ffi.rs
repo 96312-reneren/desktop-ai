@@ -343,11 +343,36 @@ pub unsafe fn init() -> Result<(), String> {
             let lib_path_str = lib_path.to_string_lossy();
             #[cfg(not(target_os = "android"))]
             verify_dll(&lib_path_str)?;
-            // Audit trail: record the loaded library's SHA-256 so a replaced
-            // or tampered file is identifiable in the logs after the fact.
+            // Audit trail: compare the loaded library's SHA-256 against the
+            // baseline recorded on first run. A mismatch means either a
+            // legitimate upgrade or a tampered file — log it loudly and
+            // refresh the baseline so a planted DLL cannot go unnoticed.
             #[cfg(not(target_os = "android"))]
-            if let Ok(hash) = sha256_of_file(&lib_path) {
-                log::info!("llama library SHA-256: {}", hash);
+            {
+                use std::io::Write;
+                let baseline = crate::config::data_root().join("llama_library.sha256");
+                if let Ok(hash) = sha256_of_file(&lib_path) {
+                    match std::fs::read_to_string(&baseline) {
+                        Ok(stored) if stored.trim() == hash => {
+                            log::info!("llama library SHA-256 verified: {}", hash);
+                        }
+                        Ok(stored) => {
+                            log::warn!(
+                                "llama library SHA-256 MISMATCH — file may have been \
+                                 tampered with or upgraded: baseline={} actual={}",
+                                stored.trim(),
+                                hash
+                            );
+                            let _ = std::fs::File::create(&baseline)
+                                .and_then(|mut f| f.write_all(hash.as_bytes()));
+                        }
+                        Err(_) => {
+                            log::info!("llama library SHA-256 baseline: {}", hash);
+                            let _ = std::fs::File::create(&baseline)
+                                .and_then(|mut f| f.write_all(hash.as_bytes()));
+                        }
+                    }
+                }
             }
             let lib = Library::new(lib_path_str.as_ref())
                 .map_err(|e| format!("加载 {} 失败: {}", lib_path_str, e))?;
