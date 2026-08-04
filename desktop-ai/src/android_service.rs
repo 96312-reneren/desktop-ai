@@ -51,15 +51,18 @@ pub extern "C" fn android_main(_app: android_activity::AndroidApp) {
     std::process::abort();
 }
 
-/// Called by Java: `startRust(internalDir, externalDir, apiPort)`.
+/// Called by Java: `startRust(internalDir, externalDir, apiToken)`.
+/// Returns the dynamically allocated API port (0 on failure). The token is
+/// generated on the Java side (never stored, never embedded in the APK), so
+/// no other app can authenticate to the local API.
 #[no_mangle]
 pub extern "C" fn Java_com_desktopai_android_MainActivity_startRust(
     mut env: JNIEnv,
     _class: JClass,
     internal_dir: JString,
     external_dir: JString,
-    api_port: jni::sys::jint,
-) {
+    api_token: JString,
+) -> jni::sys::jint {
     let internal: String = env
         .get_string(&internal_dir)
         .map(|s| s.into())
@@ -68,7 +71,16 @@ pub extern "C" fn Java_com_desktopai_android_MainActivity_startRust(
         .get_string(&external_dir)
         .map(|s| s.into())
         .unwrap_or_default();
-    android_log(&format!("startRust: internal={} external={} port={}", internal, external, api_port));
+    let api_token: String = env
+        .get_string(&api_token)
+        .map(|s| s.into())
+        .unwrap_or_default();
+    android_log(&format!(
+        "startRust: internal={} external={} token={}",
+        internal,
+        external,
+        api_token.chars().take(6).collect::<String>()
+    ));
 
     // Logs and panics go to the internal dir (always writable). The external
     // dir is preferred for models (adb-pushable) but is not guaranteed
@@ -109,9 +121,21 @@ pub extern "C" fn Java_com_desktopai_android_MainActivity_startRust(
         .with_writer(appender)
         .try_init();
 
+    // Pick a free port (bind 127.0.0.1:0, drop, reuse). A malicious app could
+    // squat the fixed Ollama port; a dynamic port removes that attack.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .map(|a| a.port())
+        .unwrap_or(0);
+    if port == 0 {
+        android_log("startRust: port probe failed");
+        return 0;
+    }
+    android_log(&format!("startRust: allocated port {}", port));
+
     std::thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            start_service(api_port as u16);
+            start_service(port, api_token);
         }));
         if let Err(e) = result {
             let msg = format!("SERVICE PANIC: {:?}\n", e);
@@ -124,9 +148,11 @@ pub extern "C" fn Java_com_desktopai_android_MainActivity_startRust(
             let _ = std::fs::write(&pf, msg);
         }
     });
+
+    port as jni::sys::jint
 }
 
-fn start_service(api_port: u16) {
+fn start_service(api_port: u16, api_token: String) {
     // 1. Pick the first downloaded model.
     let models_dir = config::models_dir();
     let mut model_path = None;
@@ -163,14 +189,12 @@ fn start_service(api_port: u16) {
     log::info!("model loaded");
     android_log("start_service: model loaded");
 
-    // 3. Start the OpenAI-compatible API server. The token is fixed on
-    // Android so the WebView UI can talk to it.
-    let mut cfg = config::Config::default();
-    cfg.api_token = "desktopai".to_string();
+    // 3. Start the OpenAI-compatible API server with the caller-provided
+    // random token (never embedded in the APK).
     let name = "desktop-ai".to_string();
     // Keep the server alive: dropping it sets the stop flag and the
     // listener thread exits immediately.
-    let mut _server = crate::api_server::ApiServer::start(inf, api_port, name, cfg.api_token.clone());
+    let mut _server = crate::api_server::ApiServer::start(inf, api_port, name, api_token);
     log::info!("api server on 127.0.0.1:{}", api_port);
     android_log(&format!("start_service: api server on 127.0.0.1:{}", api_port));
 
