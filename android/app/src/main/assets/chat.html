@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>桌面AI</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:-apple-system,"Noto Sans CJK SC",sans-serif; background:#0f1115; color:#e6e6e6; height:100vh; display:flex; flex-direction:column; }
+  #status { padding:10px 14px; font-size:13px; background:#1a1d24; border-bottom:1px solid #2a2e38; color:#9aa3b2; }
+  #status.ready { color:#4caf50; }
+  #status.error { color:#e05555; }
+  #msgs { flex:1; overflow-y:auto; padding:14px; }
+  .msg { max-width:85%; padding:10px 12px; border-radius:12px; margin-bottom:10px; white-space:pre-wrap; word-break:break-word; font-size:15px; line-height:1.55; }
+  .user { background:#1565c0; color:#fff; margin-left:auto; }
+  .bot { background:#262b35; color:#e6e6e6; }
+  .bot .think { color:#8a93a6; font-style:italic; margin-bottom:6px; white-space:pre-wrap; }
+  .empty { color:#5a6272; text-align:center; margin-top:30vh; font-size:14px; }
+  #bar { display:flex; gap:8px; padding:10px 12px; background:#1a1d24; border-top:1px solid #2a2e38; }
+  #input { flex:1; background:#262b35; border:1px solid #3a4150; border-radius:20px; color:#e6e6e6; font-size:16px; padding:10px 16px; outline:none; }
+  #send { background:#1565c0; color:#fff; border:none; border-radius:20px; padding:0 20px; font-size:15px; }
+  #send:disabled { opacity:.4; }
+</style>
+</head>
+<body>
+<div id="status">正在启动本地推理服务...</div>
+<div id="msgs"><div class="empty">模型加载完成后即可对话(完全离线)</div></div>
+<div id="bar">
+  <input id="input" placeholder="输入消息...">
+  <button id="send">发送</button>
+</div>
+<script>
+const API = "http://127.0.0.1:11434/v1/chat/completions";
+let ready = false;
+const $ = s => document.querySelector(s);
+const status = $("#status"), msgs = $("#msgs"), input = $("#input"), send = $("#send");
+
+function addMsg(role, text) {
+  const el = document.createElement("div");
+  el.className = "msg " + (role === "user" ? "user" : "bot");
+  // split <think> blocks for Qwen3
+  let html = "";
+  const parts = text.split(/(<think>[\s\S]*?<\/think>)/g);
+  for (const p of parts) {
+    if (p.startsWith("<think>")) {
+      html += `<div class="think">${esc(p.slice(7, -8))}</div>`;
+    } else if (p) {
+      html += esc(p);
+    }
+  }
+  el.innerHTML = html || " ";
+  msgs.appendChild(el);
+  msgs.scrollTop = msgs.scrollHeight;
+  return el;
+}
+function esc(s) {
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+async function checkReady() {
+  try {
+    const r = await fetch("http://127.0.0.1:11434/ready", { timeout: 3000 });
+    if (r.ok) {
+      ready = true;
+      status.textContent = "● 模型就绪 — 完全离线本地推理";
+      status.className = "ready";
+      return;
+    }
+  } catch (e) {}
+  setTimeout(checkReady, 1500);
+}
+
+async function sendMessage() {
+  const text = input.value.trim();
+  if (!text || !ready) return;
+  input.value = "";
+  addMsg("user", text);
+  const botEl = addMsg("bot", "");
+  botEl.textContent = "…";
+  const history = [];
+  document.querySelectorAll(".msg").forEach(m => {
+    if (m === botEl) return;
+    const role = m.classList.contains("user") ? "user" : "assistant";
+    let content = m.innerText;
+    history.push({ role, content });
+  });
+  if (window.AndroidBridge) {
+    // POST goes through the Java network stack (no CORS/PNA restrictions).
+    const payload = JSON.stringify({ model: "desktop-ai", stream: false, messages: history });
+    window.AndroidBridge.postJson(API, payload, "chat");
+  } else {
+    botEl.textContent = "(无法连接本地服务)";
+  }
+}
+
+window.addEventListener("aiResp", (e) => {
+  const msgsEl = document.querySelectorAll(".msg.bot");
+  const botEl = msgsEl[msgsEl.length - 1];
+  if (!botEl) return;
+  let text = e.detail;
+  try {
+    const j = JSON.parse(text);
+    if (j.error) { botEl.textContent = "错误: " + j.error; return; }
+    text = j.choices?.[0]?.message?.content ?? "(空回复)";
+  } catch (err) {
+    botEl.textContent = "解析失败: " + text.slice(0, 200);
+    return;
+  }
+  renderBot(botEl, text);
+  input.disabled = false;
+  send.disabled = false;
+});
+
+function renderBot(el, text) {
+  el.innerHTML = "";
+  const parts = text.split(/(<think>[\s\S]*?<\/think>)/g);
+  for (const p of parts) {
+    if (p.startsWith("<think>")) {
+      const d = document.createElement("div");
+      d.className = "think";
+      d.textContent = p.slice(7, -8);
+      el.appendChild(d);
+    } else if (p) {
+      el.appendChild(document.createTextNode(p));
+    }
+  }
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+send.onclick = sendMessage;
+input.addEventListener("keydown", e => { if (e.key === "Enter") sendMessage(); });
+checkReady();
+</script>
+</body>
+</html>

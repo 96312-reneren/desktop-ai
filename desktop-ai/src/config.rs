@@ -196,10 +196,17 @@ pub fn config_path() -> PathBuf {
 }
 
 pub fn models_dir() -> PathBuf {
-    // Android: prefer user-visible external storage so models can be pushed
-    // via adb (/sdcard/DesktopAI/models), fall back to app-private storage.
+    // Android: prefer the app-specific external dir (Android/data/<pkg>/files
+    // — writable without permissions, adb-pushable); fall back to user-visible
+    // storage for legacy setups.
     #[cfg(target_os = "android")]
     {
+        let ext = std::env::var("ANDROID_EXTERNAL_DIR").unwrap_or_default();
+        if !ext.is_empty() {
+            let candidate = std::path::Path::new(&ext).join("DesktopAI/models");
+            ensure_dir(&candidate, "models");
+            return candidate;
+        }
         let ext = std::env::var("EXTERNAL_STORAGE").unwrap_or_default();
         let candidate = std::path::Path::new(&ext).join("DesktopAI/models");
         if !ext.is_empty() {

@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "desktop-ai"
 version = "6.1.4"
 edition = "2021"
@@ -8,6 +8,9 @@ description = "桌面AI - 本地大模型聊天应用 (RAG知识库)"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+# eframe/egui power the desktop UI. On Android the app uses a WebView UI +
+# JNI service entry instead (see android_service.rs), but eframe stays in the
+# dependency graph so the UI modules compile on the Android target too.
 eframe = { version = "0.31", features = ["android-native-activity"] }
 egui = "0.31"
 egui_extras = "0.31"
@@ -33,8 +36,12 @@ tracing-appender = "0.2.5"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = "0.15"
 
+# Android: JNI for the MainActivity bridge; android-activity is required by
+# the winit/eframe chain and forces the .so to export `android_main`, which
+# System.loadLibrary needs to resolve — see the placeholder in android_service.rs.
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
+jni = "0.21"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Threading", "Win32_System_SystemInformation"] }
