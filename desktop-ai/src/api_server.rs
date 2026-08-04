@@ -783,9 +783,13 @@ fn parse_content_length(headers: &str) -> Option<usize> {
 /// before comparing the host, preventing `http://localhost:evil@attacker.com`
 /// style bypasses.
 fn origin_allowed(origin: &str) -> bool {
-    // file:// pages (e.g. the Android WebView UI) send Origin: null.
+    // file:// pages send Origin: null. Only tolerated on Android (loopback +
+    // token-gated API); on desktop the strict host allow-list applies.
     if origin == "null" {
+        #[cfg(target_os = "android")]
         return true;
+        #[cfg(not(target_os = "android"))]
+        return false;
     }
     for host in &ALLOWED_ORIGIN_HOSTS {
         for scheme in &["http://", "https://"] {
