@@ -1,7 +1,5 @@
 pub mod api_server;
 pub mod app;
-#[cfg(target_os = "android")]
-pub mod android_service;
 pub mod chunker;
 pub mod cleaner;
 pub mod config;
@@ -18,4 +16,3 @@ pub mod sandbox;
 pub mod search;
 pub mod shortcut;
 pub mod vector_store;
-

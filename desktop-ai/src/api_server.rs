@@ -176,21 +176,11 @@ fn handle_client(
     let body = parsed.body;
     let origin = parsed.origin;
 
-    #[cfg(target_os = "android")]
-    crate::android_service::android_log(&format!(
-        "req: {} {} origin={:?}",
-        method,
-        path,
-        origin.as_deref().unwrap_or("(none)")
-    ));
-
     // CORS: browser origins must be on the allow-list; command-line (no
     // Origin) is always permitted.
     if let Some(ref origin) = origin {
         if !origin_allowed(origin) {
             log::warn!("API rejected Origin: {}", origin);
-            #[cfg(target_os = "android")]
-            crate::android_service::android_log(&format!("REJECTED origin: {}", origin));
             let _ = stream
                 .write_all(json_error(403, "origin_not_allowed", "origin not allowed").as_bytes());
             return;
