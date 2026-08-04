@@ -175,10 +175,24 @@
 
 <script>
 "use strict";
-const API = "http://127.0.0.1:11434/v1/chat/completions";
-const READY_URL = "http://127.0.0.1:11434/ready";
+// Port is injected by Kotlin after the Rust service allocates it.
+const API_PORT = window.__API_PORT || 11434;
+const API = "http://127.0.0.1:" + API_PORT + "/v1/chat/completions";
+const READY_URL = "http://127.0.0.1:" + API_PORT + "/ready";
 const LS_KEY = "desktopai.convs.v1";
 const SUGGESTIONS = ["用一句话介绍你自己", "讲个简短的笑话", "1+1等于几?", "写一首五言绝句"];
+
+/* light obfuscation so plaintext conversations are not readable in backups */
+function obf(s) {
+  return btoa(unescape(encodeURIComponent(s)).split("").map((c, i) =>
+    String.fromCharCode(c.charCodeAt(0) ^ 0x5a)).join(""));
+}
+function deobf(s) {
+  try {
+    return decodeURIComponent(escape(atob(s).split("").map((c, i) =>
+      String.fromCharCode(c.charCodeAt(0) ^ 0x5a)).join("")));
+  } catch (e) { return ""; }
+}
 
 let ready = false, busy = false;
 let convs = loadConvs(), activeId = null;
@@ -191,12 +205,15 @@ const hDot = $("#hDot"), hStatus = $("#hStatus"), hName = $("#hName");
 function loadConvs() {
   try {
     const raw = localStorage.getItem(LS_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const dec = deobf(raw);
+      if (dec) return JSON.parse(dec);
+    }
   } catch (e) {}
   return [];
 }
 function saveConvs() {
-  try { localStorage.setItem(LS_KEY, JSON.stringify(convs)); } catch (e) {}
+  try { localStorage.setItem(LS_KEY, obf(JSON.stringify(convs))); } catch (e) {}
 }
 function newConv() {
   const c = { id: Date.now().toString(36) + Math.random().toString(36).slice(2,6),
