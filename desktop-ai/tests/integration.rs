@@ -4,8 +4,10 @@
 // Tests that need a loaded model are guarded by `model_available()` and
 // will be skipped with a clear message when the model is absent.
 
-use desktop_ai::config::{self, Config};
-use desktop_ai::conversation::Conversation;
+use desktop_ai::{
+    chunk_text, clean_text, find_model, llama_library_name, load_config, models_dir, save_config,
+    ApiServer, Config, Conversation, LlamaInference,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -20,9 +22,9 @@ fn cleaner_handles_random_binary_without_panic() {
         let garbage: String = (0..len)
             .map(|j| ((i as u8).wrapping_add(j as u8)) as char)
             .collect();
-        let _ = desktop_ai::cleaner::clean_text(&garbage, "text");
-        let _ = desktop_ai::cleaner::clean_text(&garbage, "html");
-        let _ = desktop_ai::cleaner::clean_text(&garbage, "markdown");
+        let _ = clean_text(&garbage, "text");
+        let _ = clean_text(&garbage, "html");
+        let _ = clean_text(&garbage, "markdown");
     }
 }
 
@@ -34,14 +36,14 @@ fn cleaner_handles_gbk_like_bytes() {
     ];
     let mixed = String::from_utf8_lossy(&raw);
     // Feed this lossy string through the cleaner — must not panic
-    let (title, body) = desktop_ai::cleaner::clean_text(&mixed, "html");
+    let (title, body) = clean_text(&mixed, "html");
     assert!(!title.is_empty() || !body.is_empty());
 }
 
 #[test]
 fn cleaner_empty_input() {
-    assert!(desktop_ai::cleaner::clean_text("", "text").1.is_empty());
-    assert!(desktop_ai::cleaner::clean_text("", "html").1.is_empty());
+    assert!(clean_text("", "text").1.is_empty());
+    assert!(clean_text("", "html").1.is_empty());
 }
 
 // ─── 2. Edge-case: chunker fed with random long strings ───
@@ -58,7 +60,7 @@ fn chunker_handles_random_long_sized_strings() {
                 _ => 'A',
             })
             .collect();
-        let chunks = desktop_ai::chunker::chunk_text(&s, 500, 50);
+        let chunks = chunk_text(&s, 500, 50);
         for c in &chunks {
             let cc = c.chars().count();
             assert!(cc <= 500, "chunk {} chars > 500 (len={})", cc, cc);
@@ -69,7 +71,7 @@ fn chunker_handles_random_long_sized_strings() {
 #[test]
 fn chunker_huge_repeated_line() {
     let s = "A".repeat(500_000);
-    let chunks = desktop_ai::chunker::chunk_text(&s, 500, 50);
+    let chunks = chunk_text(&s, 500, 50);
     for c in &chunks {
         assert!(c.chars().count() <= 500);
     }
@@ -119,23 +121,23 @@ fn config_save_load_roundtrip() {
     cfg.font_size = 18;
     cfg.api_enabled = true;
     cfg.api_port = 9999;
-    config::save_config(&cfg);
+    save_config(&cfg);
 
-    let loaded = config::load_config();
+    let loaded = load_config();
     assert_eq!(loaded.theme, "light");
     assert_eq!(loaded.font_size, 18);
     assert!(loaded.api_enabled);
     assert_eq!(loaded.api_port, 9999);
 
     let def = Config::default();
-    config::save_config(&def);
+    save_config(&def);
 }
 
 // ─── 5. API smoke test (requires model) ────────────────
 
 fn model_available() -> bool {
-    std::path::Path::new(desktop_ai::ffi::llama_library_name()).exists()
-        && std::fs::read_dir(config::models_dir())
+    std::path::Path::new(llama_library_name()).exists()
+        && std::fs::read_dir(models_dir())
             .map(|iter| {
                 iter.flatten()
                     .any(|e| e.file_name().to_string_lossy().ends_with(".gguf"))
@@ -148,12 +150,12 @@ fn api_server_smoke_test() {
     if !model_available() {
         eprintln!(
             "SKIP api_server_smoke_test: no GGUF model found in {:?}",
-            config::models_dir()
+            models_dir()
         );
         return;
     }
 
-    let config = config::load_config();
+    let config = load_config();
     let model_id = match &config.selected_model_id {
         Some(id) => id.clone(),
         None => {
@@ -162,7 +164,7 @@ fn api_server_smoke_test() {
         }
     };
 
-    let model_info = match desktop_ai::model_catalog::find_model(&config.model_catalog, &model_id) {
+    let model_info = match find_model(&config.model_catalog, &model_id) {
         Some(i) => i.clone(),
         None => {
             eprintln!("SKIP: model not in catalog");
@@ -170,28 +172,24 @@ fn api_server_smoke_test() {
         }
     };
 
-    let model_path = config::models_dir().join(&model_info.filename);
+    let model_path = models_dir().join(&model_info.filename);
     if !model_path.exists() {
         eprintln!("SKIP: model file missing: {:?}", model_path);
         return;
     }
 
-    let inf = match desktop_ai::inference::LlamaInference::load_ex(
-        &model_path.to_string_lossy(),
-        2048,
-        4,
-        config.gpu_layers,
-    ) {
-        Ok(i) => i,
-        Err(e) => {
-            eprintln!("SKIP: model load failed: {}", e);
-            return;
-        }
-    };
+    let inf =
+        match LlamaInference::load_ex(&model_path.to_string_lossy(), 2048, 4, config.gpu_layers) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("SKIP: model load failed: {}", e);
+                return;
+            }
+        };
     let inference = Arc::new(std::sync::Mutex::new(inf));
 
     let test_port = 11435u16;
-    let mut server = desktop_ai::api_server::ApiServer::start(
+    let mut server = ApiServer::start(
         Arc::clone(&inference),
         test_port,
         model_id.clone(),

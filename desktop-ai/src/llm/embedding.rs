@@ -1,6 +1,6 @@
 use crate::ffi;
 
-pub struct EmbeddingEngine {
+pub(crate) struct EmbeddingEngine {
     model: *mut ffi::LlamaModel,
     ctx: *mut ffi::LlamaContext,
     dim: usize,
@@ -12,7 +12,7 @@ pub struct EmbeddingEngine {
 unsafe impl Send for EmbeddingEngine {}
 
 impl EmbeddingEngine {
-    pub fn load(model_path: &str, n_ctx: u32, n_threads: u32) -> Result<Self, String> {
+    pub(crate) fn load(model_path: &str, n_ctx: u32, n_threads: u32) -> Result<Self, String> {
         unsafe {
             ffi::init()?;
         }
@@ -42,7 +42,7 @@ impl EmbeddingEngine {
         Ok(Self { model, ctx, dim })
     }
 
-    pub fn embed(&self, text: &str) -> Vec<f32> {
+    pub(crate) fn embed(&self, text: &str) -> Vec<f32> {
         unsafe {
             let tokens = ffi::tokenize(self.model, text, true);
             if tokens.is_empty() {
@@ -80,7 +80,7 @@ impl EmbeddingEngine {
     }
 
     #[allow(dead_code)]
-    pub fn dim(&self) -> usize {
+    pub(crate) fn dim(&self) -> usize {
         self.dim
     }
 

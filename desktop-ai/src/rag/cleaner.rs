@@ -111,7 +111,7 @@ fn extract_first_heading(md: &str) -> String {
     md.lines().next().unwrap_or("未命名").to_string()
 }
 
-pub fn normalize_text(text: &str) -> String {
+pub(crate) fn normalize_text(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     let mut prev_was_newline = false;
     let mut prev_was_space = false;

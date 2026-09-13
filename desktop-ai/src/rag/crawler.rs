@@ -5,14 +5,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[allow(dead_code)]
-pub struct CrawledPage {
+pub(crate) struct CrawledPage {
     pub url: String,
     pub title: String,
     pub text: String,
     pub text_size: usize,
 }
 
-pub struct CrawlConfig {
+pub(crate) struct CrawlConfig {
     pub max_depth: u32,
     pub max_pages: usize,
     pub max_size_per_page: usize,
@@ -66,7 +66,7 @@ fn strip_file_prefix(s: &str) -> &str {
 
 /// 提取 PDF 文本，panic 安全（pdf_extract 在损坏文件上可能 panic）。
 /// 供爬虫与知识库文件索引共用。
-pub fn extract_pdf_safe(path: &std::path::Path) -> Result<String, String> {
+pub(crate) fn extract_pdf_safe(path: &std::path::Path) -> Result<String, String> {
     let path = path.to_path_buf();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         pdf_extract::extract_text(&path)
@@ -453,7 +453,7 @@ pub(crate) fn resolve_url(link: &str, base: &str) -> String {
     format!("{}/{}", base_dir, link.trim_start_matches("./"))
 }
 
-pub fn crawl_url(src: &str) -> Result<CrawledPage, String> {
+pub(crate) fn crawl_url(src: &str) -> Result<CrawledPage, String> {
     let cfg = CrawlConfig::default();
     crawl_single(src, &cfg).map(|(page, _)| page)
 }
@@ -524,7 +524,10 @@ fn crawl_single(src: &str, cfg: &CrawlConfig) -> Result<(CrawledPage, String), S
     ))
 }
 
-pub fn crawl_with_depth(start_url: &str, config: CrawlConfig) -> Vec<Result<CrawledPage, String>> {
+pub(crate) fn crawl_with_depth(
+    start_url: &str,
+    config: CrawlConfig,
+) -> Vec<Result<CrawledPage, String>> {
     let mut results = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
     let mut to_visit: Vec<(String, u32)> = vec![(start_url.to_string(), 0)];
@@ -572,7 +575,7 @@ pub fn crawl_with_depth(start_url: &str, config: CrawlConfig) -> Vec<Result<Craw
 }
 
 #[allow(dead_code)]
-pub fn crawl_multiple(urls: &[String]) -> Vec<Result<CrawledPage, String>> {
+pub(crate) fn crawl_multiple(urls: &[String]) -> Vec<Result<CrawledPage, String>> {
     urls.iter().map(|url| crawl_url(url)).collect()
 }
 

@@ -13,14 +13,14 @@ const MAX_BINARY_FILE_SIZE: u64 = 256 * 1024 * 1024;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub struct FileEntry {
+pub(crate) struct FileEntry {
     pub name: String,
     pub path: PathBuf,
     pub size: u64,
     pub is_dir: bool,
 }
 
-pub struct Sandbox {
+pub(crate) struct Sandbox {
     root: PathBuf,
     resolved_root: PathBuf,
     /// Optional size cap for binary read/write operations.
@@ -29,7 +29,7 @@ pub struct Sandbox {
 }
 
 impl Sandbox {
-    pub fn new(dir: PathBuf) -> Self {
+    pub(crate) fn new(dir: PathBuf) -> Self {
         fs::create_dir_all(&dir).ok();
         let resolved = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
         Self {
@@ -42,7 +42,9 @@ impl Sandbox {
     /// Configure an explicit size cap (in bytes) for binary operations
     /// (`write_bytes` / `read_bytes`). Text `write`/`read` keep the built-in
     /// 500 KB cap. Call this before the sandbox is used.
-    pub fn with_max_size(mut self, max: u64) -> Self {
+    /// 测试覆盖；保留为沙盒完整 API（二进制大小上限配置）。
+    #[allow(dead_code)]
+    pub(crate) fn with_max_size(mut self, max: u64) -> Self {
         self.max_size = Some(max);
         self
     }
@@ -108,7 +110,7 @@ impl Sandbox {
     /// unit tests and must not be removed before the Agent protocol is
     /// implemented.
     #[allow(dead_code)]
-    pub fn read(&self, relative: &str) -> Result<String, String> {
+    pub(crate) fn read(&self, relative: &str) -> Result<String, String> {
         let path = self.safe_path(relative)?;
         if !path.exists() {
             return Err(format!("文件不存在: {}", relative));
@@ -126,7 +128,7 @@ impl Sandbox {
     }
 
     #[allow(dead_code)]
-    pub fn write(&self, relative: &str, content: &str) -> Result<(), String> {
+    pub(crate) fn write(&self, relative: &str, content: &str) -> Result<(), String> {
         let path = self.safe_path(relative)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
@@ -138,7 +140,7 @@ impl Sandbox {
         Ok(())
     }
 
-    pub fn list(&self, relative: &str) -> Result<Vec<FileEntry>, String> {
+    pub(crate) fn list(&self, relative: &str) -> Result<Vec<FileEntry>, String> {
         let dir = self.safe_path(relative)?;
         if !dir.exists() {
             return Ok(Vec::new());
@@ -194,14 +196,16 @@ impl Sandbox {
         Ok(s)
     }
 
-    pub fn root_path(&self) -> &PathBuf {
+    pub(crate) fn root_path(&self) -> &PathBuf {
         &self.root
     }
 
     /// 二进制文件写入。默认无大小上限；通过 [`Sandbox::with_max_size`]
     /// 可配置上限（适用于 Agent 工具调用场景防滥用）。
     /// 无显式配置时采用 256 MiB 硬上限，防止写入放大攻击。
-    pub fn write_bytes(&self, relative: &str, content: &[u8]) -> Result<(), String> {
+    /// 测试覆盖；保留为沙盒完整 API。
+    #[allow(dead_code)]
+    pub(crate) fn write_bytes(&self, relative: &str, content: &[u8]) -> Result<(), String> {
         let path = self.safe_path(relative)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
@@ -215,7 +219,9 @@ impl Sandbox {
 
     /// 二进制文件读取。默认无大小上限；通过 [`Sandbox::with_max_size`]
     /// 可配置上限。
-    pub fn read_bytes(&self, relative: &str) -> Result<Vec<u8>, String> {
+    /// 测试覆盖；保留为沙盒完整 API。
+    #[allow(dead_code)]
+    pub(crate) fn read_bytes(&self, relative: &str) -> Result<Vec<u8>, String> {
         let path = self.safe_path(relative)?;
         if !path.exists() {
             return Err(format!("文件不存在: {}", relative));
@@ -229,7 +235,9 @@ impl Sandbox {
     }
 
     /// 删除文件（路径遍历防护）。
-    pub fn delete(&self, relative: &str) -> Result<(), String> {
+    /// 删除文件（路径遍历防护）。测试覆盖；保留为沙盒完整 API。
+    #[allow(dead_code)]
+    pub(crate) fn delete(&self, relative: &str) -> Result<(), String> {
         let path = self.safe_path(relative)?;
         if !path.exists() {
             return Err(format!("文件不存在: {}", relative));
@@ -243,7 +251,9 @@ impl Sandbox {
     }
 
     /// 检查文件是否存在。
-    pub fn exists(&self, relative: &str) -> bool {
+    /// 检查文件是否存在。测试覆盖；保留为沙盒完整 API。
+    #[allow(dead_code)]
+    pub(crate) fn exists(&self, relative: &str) -> bool {
         self.safe_path(relative)
             .map(|p| p.exists())
             .unwrap_or(false)

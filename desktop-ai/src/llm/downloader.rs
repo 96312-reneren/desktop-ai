@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 /// 验证下载目标路径不超出模型目录范围，防止路径遍历攻击。
 /// 检查文件名不包含 `..`、`/` 或 `\`，且解析后的绝对路径以 `models_dir` 为前缀。
-pub fn validate_download_path(dest: &Path) -> Result<(), String> {
+pub(crate) fn validate_download_path(dest: &Path) -> Result<(), String> {
     // 检查路径中不包含 .. 组件（防止路径遍历攻击）。
     // Path::components() 将 .. 解析为 ParentDir，将正常名称解析为 Normal。
     // 必须遍历所有组件，而不能只检查 file_name()，因为 .. 可能出现在任意祖先目录中。
@@ -79,7 +79,7 @@ fn safe_filename_from_url(url: &str) -> Result<String, String> {
 }
 
 #[derive(Debug)]
-pub enum DownloadMsg {
+pub(crate) enum DownloadMsg {
     Progress {
         percent: u32,
         downloaded_mb: f64,
@@ -90,7 +90,7 @@ pub enum DownloadMsg {
     Error(String),
 }
 
-pub fn download_model(
+pub(crate) fn download_model(
     url: &str,
     dest: PathBuf,
     cancel: Arc<AtomicBool>,

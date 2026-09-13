@@ -312,7 +312,7 @@ impl State {
     }
 }
 
-pub fn render_markdown(ui: &mut Ui, text: &str, font_size: f32) {
+pub(crate) fn render_markdown(ui: &mut Ui, text: &str, font_size: f32) {
     let parser = Parser::new(text);
     let mut st = State::new(font_size);
 

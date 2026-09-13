@@ -85,15 +85,15 @@ fn default_api_token() -> String {
 
 /// Maximum chat-input graphemes (NOT bytes). Enforced via
 /// `TextEdit::char_limit` + a visual truncation hint in `chat.rs`.
-pub const MAX_INPUT_GRAPHEMES: usize = 1500;
+pub(crate) const MAX_INPUT_GRAPHEMES: usize = 1500;
 
 /// Estimated character limit for a single RAG document before
 /// auto-chunking is triggered (≈ 4 000 tokens × 4 chars/token).
-pub const KB_SINGLE_DOC_CHARS: usize = 16000;
+pub(crate) const KB_SINGLE_DOC_CHARS: usize = 16000;
 
 /// Strip zero-width characters that cause visual deception and
 /// noise in vector retrieval.
-pub fn strip_zero_width(s: &str) -> String {
+pub(crate) fn strip_zero_width(s: &str) -> String {
     s.chars()
         .filter(|c| !matches!(*c, '\u{200B}' | '\u{200C}' | '\u{200D}'))
         .collect()
@@ -109,7 +109,7 @@ impl Default for Config {
             last_conversation_id: None,
             selected_model_id: None,
             system_prompt: "You are a helpful assistant.".into(),
-            model_catalog: super::model_catalog::default_catalog(),
+            model_catalog: crate::model_catalog::default_catalog(),
             api_enabled: false,
             api_port: 11434,
             search_enabled: false,
@@ -122,12 +122,12 @@ impl Default for Config {
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn app_dirs() -> ProjectDirs {
+pub(crate) fn app_dirs() -> ProjectDirs {
     ProjectDirs::from("com", "desktopai", "DesktopAI").expect("failed to get project directories")
 }
 
 #[cfg(target_os = "android")]
-pub fn app_dirs() -> ProjectDirs {
+pub(crate) fn app_dirs() -> ProjectDirs {
     // On Android the directories crate has no standard locations; the data
     // root is the app-private files dir (see data_root).
     ProjectDirs::from("", "", "").expect("failed to get project directories")
@@ -159,7 +159,7 @@ fn portable_root() -> Option<PathBuf> {
 /// Data root: `exe_dir/data` in portable mode, the system data dir otherwise.
 /// On Android: the app-private files directory (HOME is set to it by the
 /// native-activity runtime).
-pub fn data_root() -> PathBuf {
+pub(crate) fn data_root() -> PathBuf {
     #[cfg(target_os = "android")]
     {
         return std::env::var("HOME")
@@ -176,7 +176,7 @@ pub fn data_root() -> PathBuf {
     }
 }
 
-pub fn config_path() -> PathBuf {
+pub(crate) fn config_path() -> PathBuf {
     #[cfg(target_os = "android")]
     {
         let dir = data_root().join("config");
@@ -219,25 +219,25 @@ pub fn models_dir() -> PathBuf {
     dir
 }
 
-pub fn conversations_dir() -> PathBuf {
+pub(crate) fn conversations_dir() -> PathBuf {
     let dir = data_root().join("conversations");
     ensure_dir(&dir, "conversations");
     dir
 }
 
-pub fn kb_dir() -> PathBuf {
+pub(crate) fn kb_dir() -> PathBuf {
     let dir = data_root().join("knowledge_base");
     ensure_dir(&dir, "knowledge_base");
     dir
 }
 
-pub fn sandbox_dir() -> PathBuf {
+pub(crate) fn sandbox_dir() -> PathBuf {
     let dir = data_root().join("sandbox");
     ensure_dir(&dir, "sandbox");
     dir
 }
 
-pub fn log_dir() -> PathBuf {
+pub(crate) fn log_dir() -> PathBuf {
     let dir = data_root().join("logs");
     ensure_dir(&dir, "logs");
     dir
@@ -245,7 +245,7 @@ pub fn log_dir() -> PathBuf {
 
 /// Marker file written on clean shutdown and removed by the panic hook on
 /// crash. Its (non-)existence drives the crash-recovery notice at startup.
-pub fn clean_exit_flag_path() -> PathBuf {
+pub(crate) fn clean_exit_flag_path() -> PathBuf {
     data_root().join(".clean_exit")
 }
 
@@ -256,7 +256,7 @@ fn initialized_marker_path() -> PathBuf {
 }
 
 /// Write the clean-exit markers (called after the app shuts down normally).
-pub fn mark_clean_exit() {
+pub(crate) fn mark_clean_exit() {
     let _ = std::fs::write(clean_exit_flag_path(), b"ok");
     let _ = std::fs::write(initialized_marker_path(), b"ok");
 }
@@ -264,7 +264,7 @@ pub fn mark_clean_exit() {
 /// Whether the previous run ended abnormally and should be surfaced to the
 /// user. A fresh install (never shut down cleanly before) is treated as
 /// clean: markers are seeded so it is never reported.
-pub fn should_show_crash_notice() -> bool {
+pub(crate) fn should_show_crash_notice() -> bool {
     let flag = clean_exit_flag_path();
     if flag.exists() {
         return false;
@@ -286,14 +286,14 @@ pub fn load_config() -> Config {
             Ok(data) => match serde_json::from_str::<Config>(&data) {
                 Ok(mut config) => {
                     if config.model_catalog.is_empty() {
-                        config.model_catalog = super::model_catalog::default_catalog();
+                        config.model_catalog = crate::model_catalog::default_catalog();
                     } else {
                         // Backfill `parts` for known catalog ids from older
                         // config files (e.g. the 7B split-file entry) so
                         // existing users automatically get the fixed URLs.
                         // Only ids matched against the default catalog are
                         // touched; user-customised entries keep their data.
-                        let defaults = super::model_catalog::default_catalog();
+                        let defaults = crate::model_catalog::default_catalog();
                         for info in config.model_catalog.iter_mut() {
                             if info.parts.is_empty() {
                                 if let Some(def) = defaults.iter().find(|d| d.id == info.id) {

@@ -6,20 +6,20 @@ use crate::db::Db;
 use crate::embedding::EmbeddingEngine;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredChunk {
+pub(crate) struct StoredChunk {
     pub text: String,
     pub embedding: Vec<f32>,
 }
 
 #[derive(Debug, Clone)]
-pub struct SearchHit {
+pub(crate) struct SearchHit {
     pub chunk: String,
     pub score: f32,
     pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredDocument {
+pub(crate) struct StoredDocument {
     pub id: String,
     pub title: String,
     pub chunks: Vec<StoredChunk>,
@@ -37,7 +37,7 @@ pub struct StoredDocument {
 /// time. Both paths lock the same mutex, so inference is serialised and the
 /// engine is only ever touched by one thread at a time. Keep heavy work
 /// inside the lock to a minimum.
-pub struct VectorStore {
+pub(crate) struct VectorStore {
     db: Db,
     engine: Option<Arc<Mutex<EmbeddingEngine>>>,
 }
@@ -78,7 +78,7 @@ fn blob_to_embed(bytes: &[u8]) -> Vec<f32> {
 }
 
 impl VectorStore {
-    pub fn new(store_dir: &std::path::Path) -> Self {
+    pub(crate) fn new(store_dir: &std::path::Path) -> Self {
         let db = crate::db::open(&store_dir.join("kb.db")).unwrap_or_else(|e| {
             log::error!("failed to open kb.db: {} — using in-memory fallback", e);
             crate::db::open(
@@ -114,21 +114,21 @@ impl VectorStore {
     /// NOT `Sync`. All subsequent embedding access goes through
     /// `VectorStore::embed_query` / `add_document` / `search` which borrow
     /// `&self` internally.
-    pub fn set_engine(&mut self, engine: EmbeddingEngine) {
+    pub(crate) fn set_engine(&mut self, engine: EmbeddingEngine) {
         self.engine = Some(Arc::new(Mutex::new(engine)));
     }
 
-    pub fn has_engine(&self) -> bool {
+    pub(crate) fn has_engine(&self) -> bool {
         self.engine.is_some()
     }
 
-    pub fn documents(&self) -> Vec<StoredDocument> {
+    pub(crate) fn documents(&self) -> Vec<StoredDocument> {
         self.db
             .with_conn(|c| load_all_documents(c))
             .unwrap_or_default()
     }
 
-    pub fn add_document(
+    pub(crate) fn add_document(
         &self,
         title: &str,
         text: &str,
@@ -176,7 +176,7 @@ impl VectorStore {
         })
     }
 
-    pub fn delete_document(&self, id: &str) -> Result<(), String> {
+    pub(crate) fn delete_document(&self, id: &str) -> Result<(), String> {
         self.db.with_conn(|c| {
             let tx = c.transaction()?;
             tx.execute("DELETE FROM chunks_fts WHERE doc_id = ?1", params![id])?;
@@ -186,26 +186,26 @@ impl VectorStore {
     }
 
     #[allow(dead_code)]
-    pub fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>, String> {
+    pub(crate) fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>, String> {
         let engine = self.engine.as_ref().ok_or("embedding engine not loaded")?;
         let query_vec = engine.lock().unwrap().embed(query);
         let docs = self.documents();
         Ok(search_by_vector(&docs, &query_vec, top_k))
     }
 
-    pub fn embed_query(&self, query: &str) -> Result<Vec<f32>, String> {
+    pub(crate) fn embed_query(&self, query: &str) -> Result<Vec<f32>, String> {
         let engine = self.engine.as_ref().ok_or("embedding engine not loaded")?;
         Ok(engine.lock().unwrap().embed(query))
     }
 
-    pub fn documents_snapshot(&self) -> Vec<StoredDocument> {
+    pub(crate) fn documents_snapshot(&self) -> Vec<StoredDocument> {
         self.documents()
     }
 
     /// Full-text keyword search over indexed chunks (FTS5).
     /// Query syntax follows FTS5 MATCH; quotes are neutralised so user
     /// input cannot break out of the query grammar.
-    pub fn search_text(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>, String> {
+    pub(crate) fn search_text(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>, String> {
         let q = query.replace('"', " ");
         let q = q.trim();
         if q.is_empty() {
@@ -391,7 +391,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (na.sqrt() * nb.sqrt())
 }
 
-pub fn search_by_vector(
+pub(crate) fn search_by_vector(
     docs: &[StoredDocument],
     query_vec: &[f32],
     top_k: usize,
