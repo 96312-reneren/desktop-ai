@@ -1,6 +1,6 @@
 use crate::config::ModelInfo;
 
-pub fn default_catalog() -> Vec<ModelInfo> {
+pub(crate) fn default_catalog() -> Vec<ModelInfo> {
     vec![
         ModelInfo {
             id: "qwen2.5-0.5b".into(),

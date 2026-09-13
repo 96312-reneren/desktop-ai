@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 /// True when a shortcut for the current executable already exists.
-pub fn shortcut_exists() -> bool {
+pub(crate) fn shortcut_exists() -> bool {
     shortcut_path().map(|p| p.exists()).unwrap_or(false)
 }
 
@@ -44,7 +44,7 @@ fn shortcut_path() -> Option<PathBuf> {
 /// Create a desktop shortcut for the running executable.
 /// Returns `Ok(true)` on success, `Ok(false)` when skipped (no desktop),
 /// `Err` with a message on failure.
-pub fn create_desktop_shortcut() -> Result<bool, String> {
+pub(crate) fn create_desktop_shortcut() -> Result<bool, String> {
     let exe = std::env::current_exe().map_err(|e| format!("获取程序路径失败: {}", e))?;
     let exe_dir = exe
         .parent()

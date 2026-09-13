@@ -15,11 +15,11 @@ use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
-pub struct Db {
+pub(crate) struct Db {
     conn: Mutex<Connection>,
 }
 
-pub fn open(path: &Path) -> Result<Db, String> {
+pub(crate) fn open(path: &Path) -> Result<Db, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {:?}: {}", parent, e))?;
     }
@@ -43,7 +43,7 @@ pub fn open(path: &Path) -> Result<Db, String> {
 
 impl Db {
     /// Run a short transaction under the connection lock.
-    pub fn with_conn<T>(
+    pub(crate) fn with_conn<T>(
         &self,
         f: impl FnOnce(&mut Connection) -> rusqlite::Result<T>,
     ) -> Result<T, String> {
@@ -55,7 +55,7 @@ impl Db {
     /// when several statements must share one transaction. Keep the guard
     /// alive for as short as possible and never call other `Db` methods
     /// while holding it.
-    pub fn lock(&self) -> MutexGuard<'_, Connection> {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().expect("db mutex poisoned")
     }
 }

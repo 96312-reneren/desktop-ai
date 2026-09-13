@@ -6,7 +6,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 
 #[repr(C)]
 #[derive(Clone)]
-pub struct LlamaModelParams {
+pub(crate) struct LlamaModelParams {
     pub devices: *const c_void,
     pub tensor_buft_overrides: *const c_void,
     pub n_gpu_layers: i32,
@@ -34,7 +34,7 @@ impl Default for LlamaModelParams {
 
 #[repr(C)]
 #[derive(Clone)]
-pub struct LlamaContextParams {
+pub(crate) struct LlamaContextParams {
     pub n_ctx: u32,
     pub n_batch: u32,
     pub n_ubatch: u32,
@@ -113,13 +113,13 @@ impl Default for LlamaContextParams {
     }
 }
 
-pub type LlamaToken = i32;
-pub type LlamaModel = c_void;
-pub type LlamaContext = c_void;
-pub type LlamaSampler = c_void;
+pub(crate) type LlamaToken = i32;
+pub(crate) type LlamaModel = c_void;
+pub(crate) type LlamaContext = c_void;
+pub(crate) type LlamaSampler = c_void;
 
 #[repr(C)]
-pub struct LlamaBatch {
+pub(crate) struct LlamaBatch {
     pub n_tokens: i32,
     pub token: *mut LlamaToken,
     pub embd: *mut f32,
@@ -165,7 +165,10 @@ type PfnBackendInit = unsafe extern "C" fn();
 type PfnVocabEos = unsafe extern "C" fn(*const c_void) -> LlamaToken;
 type PfnVocabEot = unsafe extern "C" fn(*const c_void) -> LlamaToken;
 type PfnTokenEosLegacy = unsafe extern "C" fn(*const LlamaModel) -> LlamaToken;
+// 预留：llama.cpp memory 访问器（当前未被调用，保留为内部 FFI 兼容接口）
+#[allow(dead_code)]
 type PfnGetMemory = unsafe extern "C" fn(*const LlamaContext) -> *const c_void;
+#[allow(dead_code)]
 type PfnMemorySeqPosMax = unsafe extern "C" fn(*const c_void, i32) -> i32;
 
 // ─── Modern sampler API (llama.cpp ≥ b4xxx) ─────────────
@@ -176,7 +179,7 @@ type PfnSamplerSample =
     unsafe extern "C" fn(*mut LlamaSampler, *mut LlamaContext, i32) -> LlamaToken;
 
 #[repr(C)]
-pub struct LlamaSamplerChainParams {
+pub(crate) struct LlamaSamplerChainParams {
     pub no_perf: bool,
 }
 
@@ -206,14 +209,16 @@ static SAMPLER_REGISTRY: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<usize, usize>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-pub fn sampling_is_v2() -> bool {
+// 预留：采样器 API 版本探测（诊断用，暂未接入调用方）
+#[allow(dead_code)]
+pub(crate) fn sampling_is_v2() -> bool {
     SAMPLING_V2.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Whether the loaded llama library was built with a GPU (BLAS) backend.
 /// CPU-only builds report `BLAS = 0` in `llama_print_system_info`.
 /// Returns `false` before [`init`] has run.
-pub fn gpu_backend_available() -> bool {
+pub(crate) fn gpu_backend_available() -> bool {
     if LLAMA_LIB.get().is_none() {
         return false;
     }
@@ -330,7 +335,7 @@ fn resolve_lib_path() -> std::path::PathBuf {
 ///
 /// This function must be called exactly once before any other FFI function.
 /// The library is loaded into a global static and shared across all subsequent calls.
-pub unsafe fn init() -> Result<(), String> {
+pub(crate) unsafe fn init() -> Result<(), String> {
     LLAMA_LIB
         .get_or_try_init(|| {
             // On Android the .so files live inside the APK; they are already
@@ -491,7 +496,7 @@ fn load_model_inner(path: &str, n_gpu_layers: i32, use_mmap: bool) -> *mut Llama
 /// `path` must point to a valid GGUF model file accessible to the process.
 /// The caller is responsible for calling [`free_model`] on the returned pointer
 /// when it is no longer needed.
-pub unsafe fn load_model(path: &str) -> *mut LlamaModel {
+pub(crate) unsafe fn load_model(path: &str) -> *mut LlamaModel {
     let model = load_model_inner(path, 0, true);
     if model.is_null() {
         log::warn!(
@@ -508,7 +513,7 @@ pub unsafe fn load_model(path: &str) -> *mut LlamaModel {
 ///
 /// Same preconditions as [`load_model`]. `n_gpu_layers` controls how many
 /// model layers are offloaded to GPU; pass 0 for CPU-only inference.
-pub unsafe fn load_model_gpu(path: &str, n_gpu_layers: i32) -> *mut LlamaModel {
+pub(crate) unsafe fn load_model_gpu(path: &str, n_gpu_layers: i32) -> *mut LlamaModel {
     let model = load_model_inner(path, n_gpu_layers, true);
     if model.is_null() {
         log::warn!(
@@ -526,7 +531,11 @@ pub unsafe fn load_model_gpu(path: &str, n_gpu_layers: i32) -> *mut LlamaModel {
 /// `model` must be a valid, non-null pointer returned by [`load_model`] or
 /// [`load_model_gpu`]. The returned context pointer must be freed with
 /// [`free_context`].
-pub unsafe fn new_context(model: *mut LlamaModel, n_ctx: u32, n_threads: u32) -> *mut LlamaContext {
+pub(crate) unsafe fn new_context(
+    model: *mut LlamaModel,
+    n_ctx: u32,
+    n_threads: u32,
+) -> *mut LlamaContext {
     let params = LlamaContextParams {
         n_ctx,
         n_batch: 512,
@@ -602,14 +611,14 @@ fn release_sampler(ctx: *mut LlamaContext) {
 ///
 /// `model` must be a valid pointer from [`load_model`] or [`load_model_gpu`].
 /// After this call the pointer is invalid and must not be used again.
-pub unsafe fn free_model(model: *mut LlamaModel) {
+pub(crate) unsafe fn free_model(model: *mut LlamaModel) {
     call!(llama_free_model, PfnFreeModel, model);
 }
 /// # Safety
 ///
 /// `ctx` must be a valid pointer from [`new_context`] or [`new_embedding_context`].
 /// After this call the pointer is invalid.
-pub unsafe fn free_context(ctx: *mut LlamaContext) {
+pub(crate) unsafe fn free_context(ctx: *mut LlamaContext) {
     release_sampler(ctx);
     call!(llama_free, PfnFree, ctx);
 }
@@ -632,7 +641,7 @@ fn vocab_or_model(model: *const LlamaModel) -> *const LlamaModel {
 /// # Safety
 ///
 /// `model` must be a valid, non-null pointer.
-pub unsafe fn n_vocab(model: *const LlamaModel) -> i32 {
+pub(crate) unsafe fn n_vocab(model: *const LlamaModel) -> i32 {
     if MODERN_VOCAB_API.load(std::sync::atomic::Ordering::Relaxed) {
         let vocab = vocab_or_model(model);
         if vocab.is_null() {
@@ -650,7 +659,9 @@ pub unsafe fn n_vocab(model: *const LlamaModel) -> i32 {
 /// # Safety
 ///
 /// `ctx` must be a valid context pointer.
-pub unsafe fn memory_seq_pos_max(ctx: *mut LlamaContext, seq_id: i32) -> i32 {
+// 预留：读取 KV/记忆位置（诊断用，暂未接入调用方）
+#[allow(dead_code)]
+pub(crate) unsafe fn memory_seq_pos_max(ctx: *mut LlamaContext, seq_id: i32) -> i32 {
     let memory = call!(llama_get_memory, PfnGetMemory, ctx);
     if memory.is_null() {
         return -1;
@@ -661,7 +672,7 @@ pub unsafe fn memory_seq_pos_max(ctx: *mut LlamaContext, seq_id: i32) -> i32 {
 /// # Safety
 ///
 /// `model` must be a valid, non-null pointer.
-pub unsafe fn eos_token(model: *const LlamaModel) -> LlamaToken {
+pub(crate) unsafe fn eos_token(model: *const LlamaModel) -> LlamaToken {
     if MODERN_VOCAB_API.load(std::sync::atomic::Ordering::Relaxed) {
         let vocab = vocab_or_model(model);
         if vocab.is_null() {
@@ -679,7 +690,7 @@ pub unsafe fn eos_token(model: *const LlamaModel) -> LlamaToken {
 /// # Safety
 ///
 /// `model` must be a valid, non-null pointer.
-pub unsafe fn eot_token(model: *const LlamaModel) -> LlamaToken {
+pub(crate) unsafe fn eot_token(model: *const LlamaModel) -> LlamaToken {
     if MODERN_VOCAB_API.load(std::sync::atomic::Ordering::Relaxed) {
         let vocab = vocab_or_model(model);
         if vocab.is_null() {
@@ -695,7 +706,11 @@ pub unsafe fn eot_token(model: *const LlamaModel) -> LlamaToken {
 ///
 /// `model` must be a valid pointer. `text` will be sanitised internally via
 /// [`to_cstring_safe`].
-pub unsafe fn tokenize(model: *const LlamaModel, text: &str, add_special: bool) -> Vec<LlamaToken> {
+pub(crate) unsafe fn tokenize(
+    model: *const LlamaModel,
+    text: &str,
+    add_special: bool,
+) -> Vec<LlamaToken> {
     let first = vocab_or_model(model);
     if first.is_null() {
         return vec![1, 2];
@@ -742,7 +757,7 @@ pub unsafe fn tokenize(model: *const LlamaModel, text: &str, add_special: bool) 
 /// # Safety
 ///
 /// `model` must be a valid pointer. `token` must be a valid llama token ID.
-pub unsafe fn token_to_piece(model: *const LlamaModel, token: LlamaToken) -> String {
+pub(crate) unsafe fn token_to_piece(model: *const LlamaModel, token: LlamaToken) -> String {
     let first = vocab_or_model(model);
     if first.is_null() {
         return String::new();
@@ -774,7 +789,7 @@ pub unsafe fn token_to_piece(model: *const LlamaModel, token: LlamaToken) -> Str
 ///
 /// `ctx` must be a valid context pointer. `token` must be a valid token ID
 /// previously obtained from the tokenizer.
-pub unsafe fn decode(ctx: *mut LlamaContext, token: LlamaToken) {
+pub(crate) unsafe fn decode(ctx: *mut LlamaContext, token: LlamaToken) {
     let mut t = token;
     let _batch = call!(llama_batch_get_one, PfnBatchGetOne, &mut t, 1);
     let rc = call!(llama_decode, PfnDecode, ctx, _batch);
@@ -794,7 +809,7 @@ pub unsafe fn decode(ctx: *mut LlamaContext, token: LlamaToken) {
 /// # Safety
 ///
 /// `ctx` must be a valid context pointer.
-pub unsafe fn sample_greedy(ctx: *mut LlamaContext) -> LlamaToken {
+pub(crate) unsafe fn sample_greedy(ctx: *mut LlamaContext) -> LlamaToken {
     if SAMPLING_V2.load(std::sync::atomic::Ordering::Relaxed) {
         let smpl = SAMPLER_REGISTRY
             .lock()
@@ -826,7 +841,7 @@ pub unsafe fn sample_greedy(ctx: *mut LlamaContext) -> LlamaToken {
 ///
 /// `model` must be a valid pointer. The returned context has `embeddings=true`
 /// and must be freed with [`free_embd_context`].
-pub unsafe fn new_embedding_context(
+pub(crate) unsafe fn new_embedding_context(
     model: *mut LlamaModel,
     n_ctx: u32,
     n_threads: u32,
@@ -853,14 +868,14 @@ pub unsafe fn new_embedding_context(
 /// # Safety
 ///
 /// `model` must be a valid pointer.
-pub unsafe fn n_embd(model: *const LlamaModel) -> i32 {
+pub(crate) unsafe fn n_embd(model: *const LlamaModel) -> i32 {
     call!(llama_n_embd, PfnNEmbd, model)
 }
 
 /// # Safety
 ///
 /// `ctx` must be a valid embedding context pointer.
-pub unsafe fn get_embeddings_ith(ctx: *mut LlamaContext, i: i32) -> *mut f32 {
+pub(crate) unsafe fn get_embeddings_ith(ctx: *mut LlamaContext, i: i32) -> *mut f32 {
     call!(llama_get_embeddings_ith, PfnGetEmbeddingsIth, ctx, i)
 }
 
@@ -868,7 +883,7 @@ pub unsafe fn get_embeddings_ith(ctx: *mut LlamaContext, i: i32) -> *mut f32 {
 ///
 /// `ctx` must be a valid embedding context pointer. After this call the pointer
 /// is invalid and must not be used again.
-pub unsafe fn free_embd_context(ctx: *mut LlamaContext) {
+pub(crate) unsafe fn free_embd_context(ctx: *mut LlamaContext) {
     release_sampler(ctx);
     call!(llama_free, PfnFreeContext, ctx);
 }

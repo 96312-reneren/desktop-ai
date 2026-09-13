@@ -6,7 +6,7 @@ use egui::{vec2, Color32, RichText, ScrollArea, TextEdit};
 
 /// 对敏感信息（如 API token）进行脱敏处理。
 /// 只显示前 4 个字符 + "****"，长度不足 4 则全部遮掩。
-pub fn mask_sensitive(s: &str) -> String {
+pub(crate) fn mask_sensitive(s: &str) -> String {
     let visible: String = s.chars().take(4).collect();
     if s.chars().count() <= 4 {
         "****".to_string()

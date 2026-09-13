@@ -167,7 +167,7 @@ fn startup_notice(config: &Config) -> Option<StartupNotice> {
     None
 }
 
-pub struct DesktopAI {
+pub(crate) struct DesktopAI {
     pub(crate) config: Config,
     pub(crate) inference: Option<Arc<Mutex<LlamaInference>>>,
     pub(crate) current_conv: Conversation,
@@ -509,7 +509,7 @@ fn get_total_ram_gb() -> f64 {
 }
 
 #[derive(Clone, Debug)]
-pub struct GpuInfo {
+pub(crate) struct GpuInfo {
     pub name: String,
     pub vram_gb: f64,
 }
@@ -560,7 +560,7 @@ fn detect_gpus() -> Vec<GpuInfo> {
 
 #[allow(clippy::new_without_default)]
 impl DesktopAI {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let config = config::load_config();
         let current_conv = if let Some(ref id) = config.last_conversation_id {
             Conversation::load(id).unwrap_or_else(Conversation::new)

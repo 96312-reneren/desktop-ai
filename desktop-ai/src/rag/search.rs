@@ -1,12 +1,12 @@
 use std::time::Duration;
 
-pub struct SearchResult {
+pub(crate) struct SearchResult {
     pub title: String,
     pub url: String,
     pub snippet: String,
 }
 
-pub fn search_duckduckgo(query: &str) -> Result<Vec<SearchResult>, String> {
+pub(crate) fn search_duckduckgo(query: &str) -> Result<Vec<SearchResult>, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(5))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")

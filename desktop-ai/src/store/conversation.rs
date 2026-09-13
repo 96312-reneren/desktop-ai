@@ -16,7 +16,7 @@ pub struct Message {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConversationMeta {
+pub(crate) struct ConversationMeta {
     pub id: String,
     pub title: String,
     pub created_at: String,
@@ -150,7 +150,7 @@ impl Conversation {
         })
     }
 
-    pub fn save(&mut self) {
+    pub(crate) fn save(&mut self) {
         if !sanitize_id(&self.id) {
             log::warn!("refusing to save conversation with unsafe id: {}", self.id);
             return;
@@ -219,7 +219,7 @@ impl Conversation {
 
     /// Delete every conversation (both the SQLite store and any leftover
     /// legacy JSON files).
-    pub fn delete_all() {
+    pub(crate) fn delete_all() {
         if let Some(db) = CONV_DB.as_ref() {
             let _ = db.with_conn(|c| {
                 c.execute("DELETE FROM messages", [])?;
@@ -237,7 +237,7 @@ impl Conversation {
         }
     }
 
-    pub fn list_all() -> Vec<ConversationMeta> {
+    pub(crate) fn list_all() -> Vec<ConversationMeta> {
         let Some(db) = CONV_DB.as_ref() else {
             return Vec::new();
         };
@@ -262,7 +262,7 @@ impl Conversation {
         .unwrap_or_default()
     }
 
-    pub fn context_messages(&self, system_prompt: Option<&str>, max: usize) -> Vec<Message> {
+    pub(crate) fn context_messages(&self, system_prompt: Option<&str>, max: usize) -> Vec<Message> {
         let mut msgs = vec![];
         if let Some(sp) = system_prompt {
             msgs.push(Message {
@@ -282,7 +282,7 @@ impl Conversation {
     /// Export this conversation as a pretty-printed JSON string.
     /// Includes id, title, created_at, and messages. Suitable for
     /// backup/migration. Returns Err with a descriptive message on failure.
-    pub fn export_json(&self) -> Result<String, String> {
+    pub(crate) fn export_json(&self) -> Result<String, String> {
         let data = ConversationData {
             id: self.id.clone(),
             title: conversation_title(&self.messages),
@@ -295,7 +295,7 @@ impl Conversation {
     /// Import a conversation from JSON produced by export_json.
     /// Returns a fully populated Conversation. Returns Err with a
     /// descriptive message on parse failure.
-    pub fn import_json(json: &str) -> Result<Self, String> {
+    pub(crate) fn import_json(json: &str) -> Result<Self, String> {
         let conv: ConversationData =
             serde_json::from_str(json).map_err(|e| format!("解析失败: {}", e))?;
         // Validate the imported id is safe (sanitized) before use

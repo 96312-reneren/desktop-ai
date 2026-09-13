@@ -1,7 +1,7 @@
 use crate::ffi;
 use std::sync::{Arc, Mutex};
 
-pub enum StreamToken {
+pub(crate) enum StreamToken {
     Text(String),
     Done,
     Error(String),
@@ -20,7 +20,7 @@ unsafe impl Send for LlamaInference {}
 
 impl LlamaInference {
     #[allow(dead_code)]
-    pub fn load(model_path: &str, n_ctx: u32, n_threads: u32) -> Result<Self, String> {
+    pub(crate) fn load(model_path: &str, n_ctx: u32, n_threads: u32) -> Result<Self, String> {
         Self::load_ex(model_path, n_ctx, n_threads, 0)
     }
 
@@ -54,7 +54,7 @@ impl LlamaInference {
         Ok(Self { model, ctx })
     }
 
-    pub fn model_ctx(&self) -> (*mut ffi::LlamaModel, *mut ffi::LlamaContext) {
+    pub(crate) fn model_ctx(&self) -> (*mut ffi::LlamaModel, *mut ffi::LlamaContext) {
         (self.model, self.ctx)
     }
 
@@ -83,7 +83,7 @@ impl Drop for LlamaInference {
 /// Run streaming inference. The `Arc<Mutex<LlamaInference>>` is locked for
 /// the entire generation so concurrent callers (UI chat + API requests) are
 /// serialised — llama.cpp contexts are not thread-safe.
-pub fn run_inference(
+pub(crate) fn run_inference(
     inf: Arc<Mutex<LlamaInference>>,
     prompt: String,
     stop_flag: Arc<std::sync::atomic::AtomicBool>,
@@ -142,7 +142,7 @@ pub fn run_inference(
 }
 
 #[allow(dead_code)]
-pub fn format_chatml(messages: &[crate::conversation::Message]) -> String {
+pub(crate) fn format_chatml(messages: &[crate::conversation::Message]) -> String {
     let mut s = String::new();
     for msg in messages {
         s.push_str(&format!(
@@ -157,7 +157,7 @@ pub fn format_chatml(messages: &[crate::conversation::Message]) -> String {
 
 /// Build a RAG-augmented ChatML prompt.
 /// Injects kb_context and/or search_context between the system prompt and the conversation history.
-pub fn build_rag_prompt(
+pub(crate) fn build_rag_prompt(
     base_messages: &[crate::conversation::Message],
     kb_context: Option<&str>,
     search_context: Option<&str>,
@@ -211,7 +211,7 @@ pub fn build_rag_prompt(
 /// prompt cannot伪造 system / assistant turns or trigger special modes by
 /// embedding `<|im_start|>` etc. Qwen-family models recognise a dozen+
 /// special tokens, so the whole set is neutralised.
-pub fn sanitize_chatml(s: &str) -> String {
+pub(crate) fn sanitize_chatml(s: &str) -> String {
     let mut out = s.to_string();
     for tok in [
         "<|im_start|>",
