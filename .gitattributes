@@ -1,0 +1,8 @@
+# 行尾统一：默认按文本处理并存为 LF，避免 Windows 上 LF/CRLF 反复告警，
+# 也保证重命名检测不被行尾抖动干扰。二进制文件由 Git 自动识别，不受影响。
+* text=auto eol=lf
+
+# Windows 批处理/脚本保留 CRLF，避免 cmd.exe 解析异常
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
