@@ -145,6 +145,20 @@ fn ensure_dir(dir: &std::path::Path, label: &str) {
 /// the app becomes a green/portable build that can run from a USB stick.
 const PORTABLE_MARKER: &str = ".portable";
 
+/// Environment override for the whole data root. Takes precedence over
+/// portable mode and the system directories. Used by the test suites (and
+/// CI) so they never read or write real user data; also useful when a user
+/// wants an explicit data location without the portable marker.
+const DATA_DIR_ENV: &str = "DESKTOP_AI_DATA_DIR";
+
+/// Data root from `DESKTOP_AI_DATA_DIR`, if set to a non-empty path.
+pub(crate) fn env_data_root() -> Option<PathBuf> {
+    match std::env::var(DATA_DIR_ENV) {
+        Ok(dir) if !dir.trim().is_empty() => Some(PathBuf::from(dir)),
+        _ => None,
+    }
+}
+
 /// Portable-mode root: the executable's directory when the `.portable`
 /// marker exists next to it.
 fn portable_root() -> Option<PathBuf> {
@@ -156,7 +170,8 @@ fn portable_root() -> Option<PathBuf> {
     }
 }
 
-/// Data root: `exe_dir/data` in portable mode, the system data dir otherwise.
+/// Data root: `DESKTOP_AI_DATA_DIR` override, else `exe_dir/data` in
+/// portable mode, else the system data dir.
 /// On Android: the app-private files directory (HOME is set to it by the
 /// native-activity runtime).
 pub(crate) fn data_root() -> PathBuf {
@@ -168,7 +183,9 @@ pub(crate) fn data_root() -> PathBuf {
     }
     #[cfg(not(target_os = "android"))]
     {
-        if let Some(root) = portable_root() {
+        if let Some(root) = env_data_root() {
+            root
+        } else if let Some(root) = portable_root() {
             root.join("data")
         } else {
             app_dirs().data_dir().to_path_buf()
@@ -185,7 +202,9 @@ pub(crate) fn config_path() -> PathBuf {
     }
     #[cfg(not(target_os = "android"))]
     {
-        let dir = if let Some(root) = portable_root() {
+        let dir = if let Some(root) = env_data_root() {
+            root.join("config")
+        } else if let Some(root) = portable_root() {
             root.join("data").join("config")
         } else {
             app_dirs().config_dir().to_path_buf()

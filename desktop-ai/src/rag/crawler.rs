@@ -671,13 +671,11 @@ mod tests {
         let garbage: String = "\u{FFFD}".repeat(20);
         let mixed = format!("{}{}", prefix, garbage);
 
-        let dir = std::env::temp_dir().join("desktop_ai_dirty_test");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("garbled.txt");
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("garbled.txt");
         std::fs::write(&path, &mixed).ok();
 
         let result = crawl_url(&path.to_string_lossy());
-        let _ = std::fs::remove_dir_all(&dir);
 
         assert!(
             result.is_err(),
@@ -688,13 +686,11 @@ mod tests {
     #[test]
     fn test_dirty_data_filter_allows_clean_text() {
         let clean = "这是一段正常的中文文本，用于测试清洗管道是否正确放行。".repeat(5);
-        let dir = std::env::temp_dir().join("desktop_ai_clean_test");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("clean.txt");
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("clean.txt");
         std::fs::write(&path, &clean).ok();
 
         let result = crawl_url(&path.to_string_lossy());
-        let _ = std::fs::remove_dir_all(&dir);
 
         assert!(result.is_ok(), "clean Chinese text must pass the guard");
     }
