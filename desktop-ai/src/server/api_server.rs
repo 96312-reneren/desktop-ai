@@ -674,7 +674,7 @@ fn inject_cors_headers(response: &str, origin: Option<&str>) -> String {
     if let Some(pos) = response.find("\r\n") {
         let (status_line, rest) = response.split_at(pos);
         format!(
-            "{}\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: {}\r\nAccess-Control-Allow-Headers: {}{}",
+            "{}\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: {}\r\nAccess-Control-Allow-Headers: {}\r\nVary: Origin{}",
             status_line, origin, CORS_ALLOWED_METHODS, CORS_ALLOWED_HEADERS, rest
         )
     } else {
@@ -687,7 +687,7 @@ fn inject_cors_headers(response: &str, origin: Option<&str>) -> String {
 fn cors_preflight_response(origin: Option<&str>) -> String {
     let origin_value = origin.unwrap_or("null");
     format!(
-        "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: {}\r\nAccess-Control-Allow-Headers: {}\r\nAccess-Control-Allow-Private-Network: true\r\nAccess-Control-Max-Age: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: {}\r\nAccess-Control-Allow-Headers: {}\r\nVary: Origin\r\nAccess-Control-Allow-Private-Network: true\r\nAccess-Control-Max-Age: {}\r\nConnection: close\r\n\r\n",
         origin_value, CORS_ALLOWED_METHODS, CORS_ALLOWED_HEADERS, CORS_MAX_AGE
     )
 }
@@ -861,6 +861,19 @@ mod tests {
         assert!(!origin_allowed("http://localhost:evil@attacker.com"));
         // 子域名伪装
         assert!(!origin_allowed("http://localhost.evil.com"));
+    }
+
+    /// 白名单回显必须只回显已验证的 Origin，并带 Vary: Origin（缓存正确性）。
+    #[test]
+    fn test_cors_reflects_validated_origin_with_vary() {
+        let resp = json_response(200, "{}");
+        let out = inject_cors_headers(&resp, Some("http://localhost:5173"));
+        assert!(out.contains("Access-Control-Allow-Origin: http://localhost:5173"));
+        assert!(out.contains("Vary: Origin"), "回显 Origin 时必须带 Vary");
+        let out2 = inject_cors_headers(&resp, None);
+        assert!(!out2.contains("Access-Control-Allow-Origin"));
+        assert!(!out2.contains("Vary: Origin"));
+        assert!(cors_preflight_response(Some("http://localhost:5173")).contains("Vary: Origin"));
     }
 
     #[test]

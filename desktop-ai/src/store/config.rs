@@ -259,6 +259,12 @@ pub(crate) fn sandbox_dir() -> PathBuf {
 pub(crate) fn log_dir() -> PathBuf {
     let dir = data_root().join("logs");
     ensure_dir(&dir, "logs");
+    // 日志可能包含提示词/文档片段等敏感内容，Unix 下收紧到仅属主可访问。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
     dir
 }
 
@@ -515,5 +521,19 @@ mod tests {
         // ~4000 tokens × 4 chars/token = 16000
         assert!(KB_SINGLE_DOC_CHARS >= 4000);
         assert!(KB_SINGLE_DOC_CHARS <= 64000);
+    }
+
+    /// API token 必须是 128-bit 强随机（32 位十六进制），且不得重复。
+    #[test]
+    fn test_api_token_is_strong_and_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..16 {
+            let t = default_api_token();
+            assert!(t.starts_with("da-"), "token 前缀异常: {}", t);
+            let hex = &t[3..];
+            assert_eq!(hex.len(), 32, "应为 128-bit 随机（32 hex 字符）");
+            assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+            assert!(seen.insert(t), "token 重复");
+        }
     }
 }
