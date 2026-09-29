@@ -9,9 +9,28 @@ use desktop_ai::{
     ApiServer, Config, Conversation, LlamaInference,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
+
+/// Point the whole data root at `target/test-data/integration` (recreated on
+/// every run, wiped by `cargo clean`) so tests never read/write real user
+/// data (%APPDATA%, models, conversations) nor leave junk in the OS temp
+/// folder. Must be called before any disk-touching API.
+fn test_data_dir() -> &'static std::path::Path {
+    static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-data")
+            .join("integration");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create integration test data dir");
+        std::env::set_var("DESKTOP_AI_DATA_DIR", &root);
+        root
+    })
+    .as_path()
+}
 
 // ─── 1. Edge-case: cleaner fed with random binary / GBK-like bytes ───
 
@@ -86,6 +105,7 @@ fn chunker_huge_repeated_line() {
 
 #[test]
 fn concurrent_conversation_crud_no_race() {
+    test_data_dir();
     let done = Arc::new(AtomicBool::new(false));
     let mut handles = vec![];
 
@@ -114,6 +134,7 @@ fn concurrent_conversation_crud_no_race() {
 
 #[test]
 fn config_save_load_roundtrip() {
+    test_data_dir();
     let mut cfg = Config {
         theme: "light".into(),
         ..Default::default()
@@ -128,9 +149,9 @@ fn config_save_load_roundtrip() {
     assert_eq!(loaded.font_size, 18);
     assert!(loaded.api_enabled);
     assert_eq!(loaded.api_port, 9999);
-
-    let def = Config::default();
-    save_config(&def);
+    // The config must land inside the isolated temp data dir, not the real
+    // user profile — the old test clobbered the actual config.json here.
+    assert!(test_data_dir().join("config").join("config.json").exists());
 }
 
 // ─── 5. API smoke test (requires model) ────────────────
@@ -147,6 +168,7 @@ fn model_available() -> bool {
 
 #[test]
 fn api_server_smoke_test() {
+    test_data_dir();
     if !model_available() {
         eprintln!(
             "SKIP api_server_smoke_test: no GGUF model found in {:?}",

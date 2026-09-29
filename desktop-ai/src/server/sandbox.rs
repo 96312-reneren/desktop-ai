@@ -264,29 +264,25 @@ impl Sandbox {
 mod tests {
     use super::*;
 
-    static NEXT_TEST_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-    /// Each test gets a unique temp directory so parallel or sequential runs
-    /// never collide — the old shared `desktop_ai_sandbox_test` directory
-    /// caused flaky failures on Windows when `remove_dir_all` couldn't
-    /// acquire the handle in time.
-    fn test_sandbox() -> Sandbox {
-        let n = NEXT_TEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("desktop_ai_sandbox_test_{}", n));
-        let _ = fs::remove_dir_all(&dir);
-        Sandbox::new(dir)
+    /// Each test gets its own `tempfile::TempDir` (auto-deleted on drop), so
+    /// parallel or sequential runs never collide and no test data survives
+    /// in the user temp folder.
+    fn test_sandbox() -> (Sandbox, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sb = Sandbox::new(dir.path().to_path_buf());
+        (sb, dir)
     }
 
     #[test]
     fn test_write_and_read() {
-        let sb = test_sandbox();
+        let (sb, _dir) = test_sandbox();
         sb.write("test.txt", "hello world").unwrap();
         assert_eq!(sb.read("test.txt").unwrap(), "hello world");
     }
 
     #[test]
     fn test_path_traversal_blocked() {
-        let sb = test_sandbox();
+        let (sb, _dir) = test_sandbox();
         assert!(sb.write("../escape.txt", "evil").is_err());
         assert!(sb.write("..\\escape.txt", "evil").is_err());
     }
@@ -296,18 +292,20 @@ mod tests {
     /// returned `Ok(())` and wrote the file to the parent directory.
     #[test]
     fn test_path_traversal_no_side_effect() {
-        let dir = std::env::temp_dir().join("desktop_ai_sandbox_noescape");
-        let _ = fs::remove_dir_all(&dir);
-        let sb = Sandbox::new(dir.clone());
+        let dir = tempfile::TempDir::new().unwrap();
+        let sb = Sandbox::new(dir.path().to_path_buf());
 
-        let outside = dir.parent().unwrap().join("escape_audit_noescape.txt");
+        let outside = dir
+            .path()
+            .parent()
+            .unwrap()
+            .join("escape_audit_noescape.txt");
         let _ = fs::remove_file(&outside);
 
         let res = sb.write("../escape_audit_noescape.txt", "evil");
         let leaked = outside.exists();
 
         let _ = fs::remove_file(&outside);
-        let _ = fs::remove_dir_all(&dir);
 
         assert!(res.is_err(), "write must be rejected");
         assert!(!leaked, "PATH TRAVERSAL REGRESSION: file escaped sandbox");
@@ -315,7 +313,7 @@ mod tests {
 
     #[test]
     fn test_create_subdir() {
-        let sb = test_sandbox();
+        let (sb, _dir) = test_sandbox();
         sb.write("sub/dir/file.txt", "nested").unwrap();
         assert_eq!(sb.read("sub/dir/file.txt").unwrap(), "nested");
         let entries = sb.list("sub").unwrap();
@@ -325,14 +323,14 @@ mod tests {
     #[test]
     fn test_write_to_new_file_in_root_is_allowed() {
         // Non-existent file directly under root must still be writable.
-        let sb = test_sandbox();
+        let (sb, _dir) = test_sandbox();
         sb.write("brand_new_file.txt", "ok").unwrap();
         assert_eq!(sb.read("brand_new_file.txt").unwrap(), "ok");
     }
 
     #[test]
     fn test_write_bytes_and_read_bytes() {
-        let sb = test_sandbox();
+        let (sb, _dir) = test_sandbox();
         let data: Vec<u8> = vec![0, 1, 2, 255, 128, 64];
         sb.write_bytes("binary.bin", &data).unwrap();
         let back = sb.read_bytes("binary.bin").unwrap();
@@ -341,7 +339,7 @@ mod tests {
 
     #[test]
     fn test_write_bytes_large_file_no_size_limit() {
-        let sb = test_sandbox();
+        let (sb, _dir) = test_sandbox();
         // 写入超过 MAX_FILE_SIZE 的二进制数据应成功
         let data = vec![0xABu8; 600_000];
         sb.write_bytes("large.bin", &data).unwrap();
@@ -351,13 +349,13 @@ mod tests {
 
     #[test]
     fn test_read_bytes_nonexistent() {
-        let sb = test_sandbox();
+        let (sb, _dir) = test_sandbox();
         assert!(sb.read_bytes("no_such_file.bin").is_err());
     }
 
     #[test]
     fn test_delete_file() {
-        let sb = test_sandbox();
+        let (sb, _dir) = test_sandbox();
         sb.write("to_delete.txt", "bye").unwrap();
         assert!(sb.exists("to_delete.txt"));
         sb.delete("to_delete.txt").unwrap();
@@ -366,19 +364,19 @@ mod tests {
 
     #[test]
     fn test_delete_nonexistent_is_error() {
-        let sb = test_sandbox();
+        let (sb, _dir) = test_sandbox();
         assert!(sb.delete("ghost.txt").is_err());
     }
 
     #[test]
     fn test_delete_path_traversal_blocked() {
-        let sb = test_sandbox();
+        let (sb, _dir) = test_sandbox();
         assert!(sb.delete("../important.txt").is_err());
     }
 
     #[test]
     fn test_exists_true_and_false() {
-        let sb = test_sandbox();
+        let (sb, _dir) = test_sandbox();
         assert!(!sb.exists("maybe.txt"));
         sb.write("maybe.txt", "here").unwrap();
         assert!(sb.exists("maybe.txt"));
@@ -386,40 +384,34 @@ mod tests {
 
     #[test]
     fn test_exists_path_traversal_returns_false() {
-        let sb = test_sandbox();
+        let (sb, _dir) = test_sandbox();
         // 路径遍历不应 panic，应返回 false
         assert!(!sb.exists("../../etc/passwd"));
     }
 
     #[test]
     fn test_with_max_size_limits_write_bytes() {
-        let n = NEXT_TEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("desktop_ai_sandbox_cap_{}", n));
-        let _ = fs::remove_dir_all(&dir);
-        let sb = Sandbox::new(dir.clone()).with_max_size(1_024);
+        let dir = tempfile::TempDir::new().unwrap();
+        let sb = Sandbox::new(dir.path().to_path_buf()).with_max_size(1_024);
         assert!(sb.write_bytes("small.bin", &vec![0u8; 1_024]).is_ok());
         assert!(sb.write_bytes("big.bin", &vec![0u8; 1_025]).is_err());
         // 文本 write 同样受上限约束（上限覆盖内置 500KB 默认）
         assert!(sb.write("t.txt", &"x".repeat(1_025)).is_err());
         // 上限放开后大文件可写
-        let sb2 = Sandbox::new(std::env::temp_dir().join(format!("desktop_ai_sandbox_cap2_{}", n)))
-            .with_max_size(1_000_000);
+        let dir2 = tempfile::TempDir::new().unwrap();
+        let sb2 = Sandbox::new(dir2.path().to_path_buf()).with_max_size(1_000_000);
         assert!(sb2.write_bytes("big.bin", &vec![0xABu8; 600_000]).is_ok());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_with_max_size_limits_read_bytes() {
-        let n = NEXT_TEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("desktop_ai_sandbox_cap_r_{}", n));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = tempfile::TempDir::new().unwrap();
         // 先写入 200 字节（无限制 sandbox）
-        Sandbox::new(dir.clone())
+        Sandbox::new(dir.path().to_path_buf())
             .write_bytes("f.bin", &[0u8; 200])
             .unwrap();
         // 再用 100 字节上限的 sandbox 读取 → 应失败
-        let sb = Sandbox::new(dir.clone()).with_max_size(100);
+        let sb = Sandbox::new(dir.path().to_path_buf()).with_max_size(100);
         assert!(sb.read_bytes("f.bin").is_err(), "读取超上限应失败");
-        let _ = fs::remove_dir_all(&dir);
     }
 }

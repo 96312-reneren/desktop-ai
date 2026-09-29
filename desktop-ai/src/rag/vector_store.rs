@@ -424,16 +424,9 @@ pub(crate) fn search_by_vector(
 mod tests {
     use super::*;
 
-    fn temp_store() -> (VectorStore, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "desktop_ai_kb_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let store = VectorStore::new(&dir);
+    fn temp_store() -> (VectorStore, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = VectorStore::new(dir.path());
         (store, dir)
     }
 
@@ -447,16 +440,16 @@ mod tests {
 
     #[test]
     fn empty_store_has_no_documents() {
-        let (store, dir) = temp_store();
+        let (store, _dir) = temp_store();
         assert!(store.documents().is_empty());
-        let _ = std::fs::remove_dir_all(dir);
+        drop(store); // 先关闭 SQLite 句柄，TempDir 才能删除目录（Windows）
     }
 
     #[test]
     fn add_and_delete_document_without_engine_is_error() {
-        let (store, dir) = temp_store();
+        let (store, _dir) = temp_store();
         assert!(store.add_document("t", "body", 500, 50).is_err());
-        let _ = std::fs::remove_dir_all(dir);
+        drop(store);
     }
 
     #[test]
@@ -501,15 +494,7 @@ mod tests {
 
     #[test]
     fn legacy_json_migration() {
-        let dir = std::env::temp_dir().join(format!(
-            "desktop_ai_kb_mig_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
         let json = r#"{
             "documents": [{
                 "id": "doc_old_1",
@@ -521,20 +506,21 @@ mod tests {
                 }]
             }]
         }"#;
-        std::fs::write(dir.join("vector_store.json"), json).unwrap();
-        let store = VectorStore::new(&dir);
-        let docs = store.documents();
-        assert_eq!(docs.len(), 1);
-        assert_eq!(docs[0].id, "doc_old_1");
-        assert_eq!(docs[0].chunks.len(), 1);
-        assert_eq!(docs[0].chunks[0].text, "旧文本");
-        assert_eq!(docs[0].chunks[0].embedding, vec![1.0, 0.0, 0.0]);
-        let _ = std::fs::remove_dir_all(dir);
+        std::fs::write(dir.path().join("vector_store.json"), json).unwrap();
+        {
+            let store = VectorStore::new(dir.path());
+            let docs = store.documents();
+            assert_eq!(docs.len(), 1);
+            assert_eq!(docs[0].id, "doc_old_1");
+            assert_eq!(docs[0].chunks.len(), 1);
+            assert_eq!(docs[0].chunks[0].text, "旧文本");
+            assert_eq!(docs[0].chunks[0].embedding, vec![1.0, 0.0, 0.0]);
+        }
     }
 
     #[test]
     fn fts5_module_available_in_bundled_sqlite() {
-        let (store, dir) = temp_store();
+        let (store, _dir) = temp_store();
         let result = store.db.with_conn(|c| {
             c.execute_batch("CREATE VIRTUAL TABLE IF NOT EXISTS _fts_probe USING fts5(x)")
         });
@@ -543,23 +529,16 @@ mod tests {
             "bundled SQLite must support FTS5: {:?}",
             result
         );
-        let _ = std::fs::remove_dir_all(dir);
+        drop(store);
     }
 
     #[test]
     fn fts_backfill_indexes_existing_chunks() {
-        let dir = std::env::temp_dir().join(format!(
-            "desktop_ai_kb_fts_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = tempfile::TempDir::new().unwrap();
         // Insert a chunk directly (bypassing add_document) to simulate data
         // that predates the FTS table, then reopen to trigger the backfill.
         {
-            let store = VectorStore::new(&dir);
+            let store = VectorStore::new(dir.path());
             let _ = store.db.with_conn(|c| {
                 c.execute(
                     "INSERT INTO documents (id, title, created_at) VALUES ('d1', '测试文档', '2026-01-01T00:00:00Z')",
@@ -571,42 +550,35 @@ mod tests {
                 )
             });
         }
-        let store = VectorStore::new(&dir);
+        let store = VectorStore::new(dir.path());
         let hits = store.search_text("苹果", 5).expect("search_text");
         assert_eq!(hits.len(), 1, "backfilled chunk must be searchable");
         assert_eq!(hits[0].source, "测试文档");
-        let _ = std::fs::remove_dir_all(dir);
+        drop(store);
     }
 
     #[test]
     fn search_text_quote_and_empty_safe() {
-        let (store, dir) = temp_store();
+        let (store, _dir) = temp_store();
         // 引号被中和,不会语法错误
         let hits = store.search_text("a\"b", 5).expect("no crash");
         assert!(hits.is_empty());
         // 空查询返回空结果
         let hits = store.search_text("   ", 5).expect("no crash");
         assert!(hits.is_empty());
-        let _ = std::fs::remove_dir_all(dir);
+        drop(store);
     }
 
     #[test]
     fn persistence_across_reopen() {
-        let dir = std::env::temp_dir().join(format!(
-            "desktop_ai_kb_persist_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = tempfile::TempDir::new().unwrap();
         {
-            let store = VectorStore::new(&dir);
+            let store = VectorStore::new(dir.path());
             let _ = &store;
         }
-        let store2 = VectorStore::new(&dir);
+        let store2 = VectorStore::new(dir.path());
         assert!(store2.documents().is_empty());
-        let _ = std::fs::remove_dir_all(dir);
+        drop(store2);
     }
 
     #[test]

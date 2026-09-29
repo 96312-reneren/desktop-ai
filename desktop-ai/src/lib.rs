@@ -48,3 +48,28 @@ pub use ui::startup::run;
 /// Android 原生入口所在模块（`android_main` / JNI 符号需对外可达以便导出）。
 #[cfg(target_os = "android")]
 pub use platform::android;
+
+/// 测试专用工具：把数据根目录指向 `target/test-data/unit`，确保任何单元测试
+/// 都不会读写真实用户数据（%APPDATA% / ~/.local/share）。目录放在构建输出
+/// 内，每次测试运行前整体重建，`cargo clean` 一并清除，不会在系统临时目录
+/// 或用户目录留下任何残留。
+#[cfg(test)]
+pub(crate) mod test_util {
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
+
+    pub(crate) fn temp_data_dir() -> &'static Path {
+        static DIR: OnceLock<PathBuf> = OnceLock::new();
+        DIR.get_or_init(|| {
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("test-data")
+                .join("unit");
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).expect("create unit test data dir");
+            std::env::set_var("DESKTOP_AI_DATA_DIR", &root);
+            root
+        })
+        .as_path()
+    }
+}

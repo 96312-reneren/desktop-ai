@@ -7,8 +7,16 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
+/// 是否为可能被 Win32 规范化成 `..` 的路径组件：仅由点/空格组成且含 `..`。
+/// 这类名字（如 `".. "`、`"..."`）会被 Windows 去掉尾随点/空格后当作上级
+/// 目录处理；普通文件名中的点（如 `qwen2.5..gguf`）不受影响。
+fn is_dot_traversal_component(s: &str) -> bool {
+    s.contains("..") && s.chars().all(|ch| ch == '.' || ch == ' ')
+}
+
 /// 验证下载目标路径不超出模型目录范围，防止路径遍历攻击。
-/// 检查文件名不包含 `..`、`/` 或 `\`，且解析后的绝对路径以 `models_dir` 为前缀。
+/// 拦截 `..` 组件（含会被 Win32 规范化成 `..` 的点/空格变体），并确认解析
+/// 后的绝对路径仍以 `models_dir` 为前缀。
 pub(crate) fn validate_download_path(dest: &Path) -> Result<(), String> {
     // 检查路径中不包含 .. 组件（防止路径遍历攻击）。
     // Path::components() 将 .. 解析为 ParentDir，将正常名称解析为 Normal。
@@ -20,7 +28,7 @@ pub(crate) fn validate_download_path(dest: &Path) -> Result<(), String> {
             }
             std::path::Component::Normal(c) => {
                 if let Some(s) = c.to_str() {
-                    if s.contains("..") {
+                    if is_dot_traversal_component(s) {
                         return Err(format!("路径组件包含非法字符: {}", s));
                     }
                 }
@@ -55,27 +63,6 @@ pub(crate) fn validate_download_path(dest: &Path) -> Result<(), String> {
     }
 
     Ok(())
-}
-
-/// 从 URL 中提取文件名，并验证其不包含路径遍历字符。
-fn safe_filename_from_url(url: &str) -> Result<String, String> {
-    let filename = url
-        .rsplit('/')
-        .next()
-        .unwrap_or("unknown")
-        .split('?')
-        .next()
-        .unwrap_or("unknown");
-
-    if filename.is_empty()
-        || filename.contains("..")
-        || filename.contains('/')
-        || filename.contains('\\')
-    {
-        return Err(format!("URL 中的文件名不合法: {}", filename));
-    }
-
-    Ok(filename.to_string())
 }
 
 #[derive(Debug)]
@@ -134,11 +121,11 @@ fn download_model_parts(
         .collect();
     let total = parts.len();
 
-    // 分卷文件名安全验证：防止含 .. 或路径分隔符的恶意文件名
+    // 分卷文件名安全验证：防止含路径分隔符/点遍历变体的恶意文件名
     // 将 part 文件写出模型目录（路径遍历攻击）。
     for (part, path) in parts.iter().zip(&part_paths) {
         if part.filename.is_empty()
-            || part.filename.contains("..")
+            || is_dot_traversal_component(&part.filename)
             || part.filename.contains('/')
             || part.filename.contains('\\')
         {
@@ -228,18 +215,14 @@ fn download_single_file(
 ) -> Result<(), String> {
     let _ = tx.send(DownloadMsg::Status("正在连接...".into()));
 
-    // 路径安全验证：确保目标在模型目录内，URL 文件名不含路径遍历字符
+    // 路径安全验证：确保目标在模型目录内
     if let Err(e) = validate_download_path(dest) {
         let _ = tx.send(DownloadMsg::Error(format!("路径安全验证失败: {}", e)));
         return Err(e);
     }
-    if let Err(e) = safe_filename_from_url(url) {
-        let _ = tx.send(DownloadMsg::Error(format!("URL 安全验证失败: {}", e)));
-        return Err(e);
-    }
 
     // Check existing file for resume
-    let existing_size = if dest.exists() {
+    let mut existing_size = if dest.exists() {
         fs::metadata(dest).map(|m| m.len()).unwrap_or(0)
     } else {
         if let Some(parent) = dest.parent() {
@@ -249,11 +232,11 @@ fn download_single_file(
     };
 
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        // 只限制连接阶段。reqwest 的 `timeout` 是“到响应体读完”的总时限
+        // （TotalTimeoutBody），会把耗时数分钟的大模型下载直接掐断。
+        .connect_timeout(std::time::Duration::from_secs(15))
         // No auto-redirect: hops are re-validated against SSRF rules.
         .redirect(reqwest::redirect::Policy::none())
-        .danger_accept_invalid_certs(false)
-        .danger_accept_invalid_hostnames(false)
         .build();
 
     let client = match client {
@@ -266,9 +249,12 @@ fn download_single_file(
 
     // Follow redirects manually (up to 5 hops), re-validating each target
     // with the crawler's SSRF checks (private/loopback addresses rejected).
+    // 若本地残留文件比远端总长还大（续传数据损坏），删除后在本循环内重新
+    // 发起完整请求——仍走同一套重定向 / SSRF 校验，不能绕过。
     let mut current_url = url.to_string();
     let mut hops: u32 = 0;
-    let response = loop {
+    let mut restarted = false;
+    let (response, mut file, total_size, mut downloaded) = loop {
         if hops >= 5 {
             let _ = tx.send(DownloadMsg::Error("重定向次数过多".into()));
             return Err("重定向次数过多".into());
@@ -301,99 +287,76 @@ fn download_single_file(
             hops += 1;
             continue;
         }
-        break resp;
-    };
-    let status = response.status();
-    let (total_size, mut downloaded, mut file) = if status == 206 {
-        let total = response
-            .headers()
-            .get("content-range")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.split('/').next_back()?.parse().ok())
-            .unwrap_or(0);
 
-        // If the server's total is smaller than what we already have, the
-        // local file is corrupt — restart from scratch.
-        if total > 0 && existing_size > total {
-            let _ = tx.send(DownloadMsg::Status(format!(
-                "本地文件不完整 ({:.0} MB > {:.0} MB)，重新下载...",
-                existing_size as f64 / 1_048_576.0,
-                total as f64 / 1_048_576.0
-            )));
-            let _ = fs::remove_file(dest);
-            let req = client.get(url);
-            match req.send() {
-                Ok(r) if r.status() == 200 => {
-                    let total = r
-                        .headers()
-                        .get("content-length")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-                    let f = File::create(dest);
-                    match f {
-                        Ok(f) => (total, 0u64, f),
-                        Err(e) => {
-                            let _ = tx.send(DownloadMsg::Error(format!("无法创建文件: {}", e)));
-                            return Err(e.to_string());
-                        }
-                    }
+        let status = resp.status();
+        if status == 206 {
+            let total = resp
+                .headers()
+                .get("content-range")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.split('/').next_back()?.parse().ok())
+                .unwrap_or(0);
+
+            // 本地文件比远端总长还大 → 续传数据损坏，删除后重来
+            if total > 0 && existing_size > total {
+                if restarted {
+                    let _ = tx.send(DownloadMsg::Error("本地文件异常，请重试".into()));
+                    return Err("local file larger than remote total".into());
                 }
-                Ok(r) => {
-                    let _ = tx.send(DownloadMsg::Error(format!("HTTP {}", r.status())));
-                    return Err(format!("HTTP {}", r.status()));
-                }
-                Err(e) => {
-                    let _ = tx.send(DownloadMsg::Error(format!("连接失败: {}", e)));
-                    return Err(e.to_string());
-                }
+                restarted = true;
+                let _ = tx.send(DownloadMsg::Status(format!(
+                    "本地文件不完整 ({:.0} MB > {:.0} MB)，重新下载...",
+                    existing_size as f64 / 1_048_576.0,
+                    total as f64 / 1_048_576.0
+                )));
+                let _ = fs::remove_file(dest);
+                existing_size = 0;
+                continue;
             }
-        } else {
+
             let _ = tx.send(DownloadMsg::Status(format!(
                 "续传中 ({:.0}/{:.0} MB)...",
                 existing_size as f64 / 1_048_576.0,
                 total as f64 / 1_048_576.0
             )));
 
-            let f = OpenOptions::new().append(true).open(dest);
-            match f {
-                Ok(f) => (total, existing_size, f),
+            match OpenOptions::new().append(true).open(dest) {
+                Ok(f) => break (resp, f, total, existing_size),
                 Err(e) => {
                     let _ = tx.send(DownloadMsg::Error(format!("无法写入文件: {}", e)));
                     return Err(e.to_string());
                 }
             }
-        }
-    } else if status == 200 {
-        let total = response
-            .headers()
-            .get("content-length")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+        } else if status == 200 {
+            let total = resp
+                .headers()
+                .get("content-length")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
 
-        let f = File::create(dest);
-        match f {
-            Ok(f) => (total, 0u64, f),
-            Err(e) => {
-                let _ = tx.send(DownloadMsg::Error(format!("无法创建文件: {}", e)));
-                return Err(e.to_string());
+            match File::create(dest) {
+                Ok(f) => break (resp, f, total, 0u64),
+                Err(e) => {
+                    let _ = tx.send(DownloadMsg::Error(format!("无法创建文件: {}", e)));
+                    return Err(e.to_string());
+                }
             }
-        }
-    } else if status == 416 {
-        // Range not satisfiable — the local file is already complete.
-        // Fall through to the integrity check below.
-        let _ = tx.send(DownloadMsg::Status("文件已完整，正在校验...".into()));
-        match File::open(dest) {
-            Ok(f) => (existing_size, existing_size, f),
-            Err(e) => {
-                let _ = tx.send(DownloadMsg::Error(format!("无法打开文件: {}", e)));
-                return Err(e.to_string());
+        } else if status == 416 {
+            // Range not satisfiable — the local file is already complete.
+            // Fall through to the integrity check below.
+            let _ = tx.send(DownloadMsg::Status("文件已完整，正在校验...".into()));
+            match File::open(dest) {
+                Ok(f) => break (resp, f, existing_size, existing_size),
+                Err(e) => {
+                    let _ = tx.send(DownloadMsg::Error(format!("无法打开文件: {}", e)));
+                    return Err(e.to_string());
+                }
             }
+        } else {
+            let _ = tx.send(DownloadMsg::Error(format!("HTTP {}", status)));
+            return Err(format!("HTTP {}", status));
         }
-    } else {
-        let _ = tx.send(DownloadMsg::Error(format!("HTTP {}", status)));
-        return Err(format!("HTTP {}", status));
     };
 
     let mut reader = response;
@@ -439,14 +402,27 @@ fn download_single_file(
     drop(file);
 
     let actual_size = fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
-    if actual_size < 50_000_000 {
+
+    // 长度校验：服务器给出总长就必须收满。提前结束一般是连接被掐，
+    // 保留已下载内容，下次可 Range 续传（不删除）。
+    if total_size > 0 && downloaded < total_size {
+        let _ = tx.send(DownloadMsg::Error(format!(
+            "下载不完整 ({:.0}/{:.0} MB)，已保留进度，重试可续传。",
+            downloaded as f64 / 1_048_576.0,
+            total_size as f64 / 1_048_576.0
+        )));
+        return Err("incomplete download".into());
+    }
+
+    // 无 Content-Length 且无哈希可校验时，过小的响应大概率是错误页。
+    if total_size == 0 && expected_sha256.is_none() && actual_size < 1_048_576 {
         if let Err(e) = fs::remove_file(dest) {
             log::warn!("failed to remove corrupted download: {}", e);
         }
         let _ = tx.send(DownloadMsg::Error(
-            "下载文件异常小，已删除。请检查网络后重试。".into(),
+            "服务器响应异常（无长度信息且内容过小），已删除。请检查网络后重试。".into(),
         ));
-        return Err("file too small".into());
+        return Err("response too small".into());
     }
 
     // Integrity check: if the model catalog supplies an expected SHA-256,
@@ -498,35 +474,32 @@ mod tests {
     #[test]
     fn test_compute_sha256_known_value() {
         // SHA-256 of empty string: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-        let dir = std::env::temp_dir().join("desktop_ai_sha_test");
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("empty.bin");
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("empty.bin");
         fs::write(&path, b"").unwrap();
         let h = compute_sha256(&path).unwrap();
         assert_eq!(
             h,
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_compute_sha256_abc() {
         // SHA-256("abc")
-        let dir = std::env::temp_dir().join("desktop_ai_sha_test2");
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("abc.bin");
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("abc.bin");
         fs::write(&path, b"abc").unwrap();
         let h = compute_sha256(&path).unwrap();
         assert_eq!(
             h,
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_validate_download_path_safe() {
+        crate::test_util::temp_data_dir();
         // models_dir() 下的正常文件名应通过验证
         let models = crate::config::models_dir();
         let dest = models.join("model.gguf");
@@ -535,6 +508,7 @@ mod tests {
 
     #[test]
     fn test_validate_download_path_traversal_in_filename() {
+        crate::test_util::temp_data_dir();
         // 文件名包含 ".." 应被拒绝
         let models = crate::config::models_dir();
         let dest = models.join("../evil.gguf");
@@ -543,23 +517,25 @@ mod tests {
 
     #[test]
     fn test_validate_download_path_outside_models() {
-        // 绝对路径在模型目录外应被拒绝
-        let dest = std::env::temp_dir().join("outside.gguf");
+        crate::test_util::temp_data_dir();
+        // 模型目录之外（同级兄弟路径，无 .. 组件）应被前缀校验拒绝
+        let models = crate::config::models_dir();
+        let dest = models.parent().unwrap().join("outside.gguf");
         assert!(validate_download_path(&dest).is_err());
     }
 
     #[test]
     fn test_validate_download_path_subdirectory() {
+        crate::test_util::temp_data_dir();
         // 子目录路径（父目录尚未创建）应能通过验证
         let models = crate::config::models_dir();
         let dest = models.join("qwen").join("7b").join("model.gguf");
         assert!(validate_download_path(&dest).is_ok());
-        // 清理测试创建的目录
-        let _ = fs::remove_dir_all(models.join("qwen"));
     }
 
     #[test]
     fn test_validate_download_path_rejects_traversal_in_subdir() {
+        crate::test_util::temp_data_dir();
         // 子目录路径中包含 .. 应被拒绝（starts_with 前缀校验拦截）
         let models = crate::config::models_dir();
         let dest = models.join("..").join("evil.gguf");
@@ -568,6 +544,7 @@ mod tests {
 
     #[test]
     fn test_validate_download_path_rejects_direct_traversal() {
+        crate::test_util::temp_data_dir();
         // 直接 ../ 路径遍历应被拒绝
         let models = crate::config::models_dir();
         let dest = models.join("../evil.gguf");
@@ -575,36 +552,30 @@ mod tests {
     }
 
     #[test]
-    fn test_safe_filename_from_url_normal() {
-        let name = safe_filename_from_url("https://example.com/models/llama-3.gguf").unwrap();
-        assert_eq!(name, "llama-3.gguf");
+    fn test_validate_download_path_allows_inner_dots() {
+        crate::test_util::temp_data_dir();
+        // 普通文件名中的 ".."（如 qwen2.5..gguf）不构成遍历，不应被误伤
+        let models = crate::config::models_dir();
+        let dest = models.join("qwen2.5..instruct-q4_k_m.gguf");
+        assert!(validate_download_path(&dest).is_ok());
     }
 
     #[test]
-    fn test_safe_filename_from_url_with_query() {
-        let name = safe_filename_from_url("https://example.com/model.gguf?token=abc").unwrap();
-        assert_eq!(name, "model.gguf");
-    }
-
-    #[test]
-    fn test_safe_filename_from_url_traversal_rejected() {
-        // URL 末尾段包含 ".." 应被拒绝
-        assert!(safe_filename_from_url("https://example.com/models/..").is_err());
-    }
-
-    #[test]
-    fn test_safe_filename_from_url_empty_rejected() {
-        assert!(safe_filename_from_url("https://example.com/").is_err());
+    fn test_validate_download_path_rejects_dot_space_component() {
+        crate::test_util::temp_data_dir();
+        // ".. " 这类组件会被 Windows 去掉尾随空格后当成上级目录，必须拒绝
+        let models = crate::config::models_dir();
+        let dest = models.join(".. ").join("evil.gguf");
+        assert!(validate_download_path(&dest).is_err());
     }
 
     #[test]
     fn test_merge_parts_appends_in_order() {
         // 两个分卷按序拼接，且 part 文件被清理
-        let dir = std::env::temp_dir().join("desktop_ai_merge_test");
-        let _ = fs::create_dir_all(&dir);
-        let dest = dir.join("model.gguf");
-        let p1 = dir.join("model.part1");
-        let p2 = dir.join("model.part2");
+        let dir = tempfile::TempDir::new().unwrap();
+        let dest = dir.path().join("model.gguf");
+        let p1 = dir.path().join("model.part1");
+        let p2 = dir.path().join("model.part2");
         fs::write(&p1, b"hello ").unwrap();
         fs::write(&p2, b"world").unwrap();
 
@@ -612,26 +583,24 @@ mod tests {
         let merged = fs::read(&dest).unwrap();
         assert_eq!(merged, b"hello world");
         assert!(!p1.exists() && !p2.exists(), "part 文件应被清理");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_merge_parts_missing_part_fails() {
         // 缺少分卷时合并应失败且不产生半成品
-        let dir = std::env::temp_dir().join("desktop_ai_merge_test2");
-        let _ = fs::create_dir_all(&dir);
-        let dest = dir.join("model.gguf");
-        let p1 = dir.join("model.part1");
-        let p2 = dir.join("model.part2");
+        let dir = tempfile::TempDir::new().unwrap();
+        let dest = dir.path().join("model.gguf");
+        let p1 = dir.path().join("model.part1");
+        let p2 = dir.path().join("model.part2");
         fs::write(&p1, b"hello ").unwrap();
         // p2 故意不创建
         assert!(merge_parts(&dest, &[p1.clone(), p2.clone()]).is_err());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_part_filename_traversal_rejected() {
-        // 分卷文件名含 .. 时 download_model_parts 应拒绝并报错
+        crate::test_util::temp_data_dir();
+        // 分卷文件名含路径分隔符时 download_model_parts 应拒绝并报错
         let models = crate::config::models_dir();
         let dir = models.join("part_traversal_test");
         let _ = fs::create_dir_all(&dir);
