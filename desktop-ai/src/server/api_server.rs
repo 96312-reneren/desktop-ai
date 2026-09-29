@@ -80,6 +80,16 @@ impl ApiServer {
             while !stop.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        // On Windows the accepted socket can inherit the
+                        // listener's nonblocking mode; a nonblocking read would
+                        // fail with WouldBlock and be misreported as a bad
+                        // request (every client that did not deliver its
+                        // request in the same instant got a 400). Force
+                        // blocking so set_read_timeout / the slow-loris
+                        // deadline below actually apply.
+                        if let Err(e) = stream.set_nonblocking(false) {
+                            log::warn!("API set_nonblocking(false) failed: {}", e);
+                        }
                         // Atomic fetch_update avoids TOCTOU: two threads that
                         // both see `cur=15` would otherwise both pass the
                         // `cur >= MAX` check and double-increment.
