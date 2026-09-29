@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -368,14 +369,25 @@ fn fetch_url(url: &str, cfg: &CrawlConfig) -> Result<(String, String), String> {
             .unwrap_or("")
             .to_string();
 
-        let raw = response.text().map_err(|e| format!("读取失败: {}", e))?;
-
-        if raw.len() > cfg.max_size_per_page {
+        // 网络安全加固：先按字节上限流式读取，再解码。
+        // 旧实现 `response.text()` 会把任意大的响应体一次性读进内存
+        // （恶意服务器可无视 Content-Length 持续输出），3MB 限制实际
+        // 落在整段读取之后，存在明显的内存 DoS 窗口。
+        let mut raw_bytes = Vec::with_capacity(64 * 1024);
+        response
+            .take(cfg.max_size_per_page as u64 + 1)
+            .read_to_end(&mut raw_bytes)
+            .map_err(|e| format!("读取失败: {}", e))?;
+        if raw_bytes.len() > cfg.max_size_per_page {
             return Err(format!(
                 "页面过大(>{:.0}MB)",
                 cfg.max_size_per_page as f64 / 1e6
             ));
         }
+
+        // 本构建未启用 reqwest 的 `charset` 特性，原 `text()` 即为 UTF-8
+        // 有损解码；此处保持一致的行为。
+        let raw = String::from_utf8_lossy(&raw_bytes).into_owned();
 
         return Ok((content_type, raw));
     }
@@ -436,7 +448,10 @@ fn extract_links(html: &str, base_url: &str) -> Vec<String> {
             }
         }
 
-        search_from = link_start + end + 1;
+        // 攻击面修复：href 值未闭合且落在文档末尾时，end 取到 rest2.len()，
+        // link_start + end + 1 会等于 len+1，下一轮 `lower[search_from..]`
+        // 直接越界 panic（恶意网页可稳定触发）。钳制到串长即可。
+        search_from = (link_start + end + 1).min(html.len());
     }
 
     links
@@ -606,6 +621,160 @@ pub(crate) fn crawl_multiple(urls: &[String]) -> Vec<Result<CrawledPage, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 攻击语料：恶意/畸形 HTML 链接解析不得 panic。
+    /// （修复前：文档末尾不闭合的 href 会让 search_from 越界 1 字节，稳定 panic）
+    #[test]
+    fn redteam_extract_links_hostile_html_no_panic() {
+        let cases = [
+            "<a href=\"x",                 // 结尾未闭合双引号
+            "<a href='x",                  // 结尾未闭合单引号
+            "<a href=foo",                 // 无引号且无终止符
+            "<a href=",                    // 空值
+            "<a href",                     // 没有等号
+            "href",                        // 只有关键字
+            "<a href='x'><a href=\"y",     // 前一个正常、后一个未闭合
+            "\u{4e2d}\u{6587}<a href=\"x", // 多字节 + 未闭合
+        ];
+        for h in cases {
+            let links = extract_links(h, "http://example.com/");
+            eprintln!("CORPUS extract_links {:?} -> {} links", h, links.len());
+        }
+    }
+
+    /// 攻击语料：resolve_url 对任意输入不得 panic。
+    #[test]
+    fn redteam_resolve_url_hostile_no_panic() {
+        let links = [
+            "",
+            "/",
+            "//",
+            "//evil",
+            "http://x",
+            "../../../",
+            "\u{4e2d}\u{6587}",
+            "?q=#f",
+            "\\\\server\\share",
+            ":",
+            "::",
+        ];
+        let bases = [
+            "",
+            "http://",
+            "http://a",
+            "http://a/b",
+            "http://[::1]/x",
+            "https://a?q=1",
+        ];
+        for l in links {
+            for b in bases {
+                let _ = resolve_url(l, b);
+            }
+        }
+    }
+
+    /// 攻击语料：恶意本地文件经 KB/爬虫共用入口 crawl_url 不得 panic。
+    #[test]
+    fn redteam_hostile_files_via_crawl_url_no_panic() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut files: Vec<(&str, Vec<u8>)> = vec![
+            ("empty.txt", vec![]),
+            ("one.txt", b"x".to_vec()),
+            ("nul.txt", vec![0u8; 1024]),
+            ("garbage.bin", (0..=255u8).cycle().take(4097).collect()),
+            ("over5mb.txt", vec![b'A'; 5_000_001]),
+            ("hugeline.txt", vec![b'B'; 4_900_000]),
+            ("fffd.txt", "\u{FFFD}".repeat(2000).into_bytes()),
+            ("utf16.txt", {
+                let mut v = vec![0xFF, 0xFE];
+                for u in "hello 中文".encode_utf16() {
+                    v.extend_from_slice(&u.to_le_bytes());
+                }
+                v
+            }),
+            ("gbk.txt", vec![0xB0, 0xA1, 0xC4, 0xE3, 0xBA, 0xC3, 0x0A]),
+            ("deep.html", "<div>".repeat(100_000).into_bytes()),
+            ("unclosed.html", b"<a href=\"x".to_vec()),
+            ("entities.html", "&amp;".repeat(100_000).into_bytes()),
+            (
+                "script.html",
+                format!("<script>{}</script>boss", "<".repeat(50_000)).into_bytes(),
+            ),
+            ("nul.html", vec![0u8; 2048]),
+        ];
+        for (name, data) in files.drain(..) {
+            std::fs::write(dir.path().join(name), &data).unwrap();
+        }
+
+        let mut panicked: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            let src = path.to_string_lossy().to_string();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            match std::panic::catch_unwind(|| crawl_url(&src)) {
+                Ok(Ok(page)) => eprintln!("CORPUS {} OK text_len={}", name, page.text.len()),
+                Ok(Err(e)) => eprintln!("CORPUS {} Err({})", name, e),
+                Err(_) => panicked.push(name),
+            }
+        }
+        assert!(panicked.is_empty(), "恶意语料触发 panic: {:?}", panicked);
+    }
+
+    /// 攻击语料：PDF 炸弹（垃圾头、空文件、百万层嵌套数组）。
+    /// 栈溢出无法被 catch_unwind 捕获，需单独运行本测试观察进程是否被打崩。
+    #[test]
+    fn redteam_pdf_bombs_no_process_kill() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("garbage.pdf"), b"%PDF-1.4\ngarbage").unwrap();
+        std::fs::write(dir.path().join("empty.pdf"), b"").unwrap();
+        std::fs::write(dir.path().join("nested.pdf"), build_nested_pdf(1_000_000)).unwrap();
+        std::fs::write(
+            dir.path().join("truncated.pdf"),
+            &build_nested_pdf(10)[..120],
+        )
+        .unwrap();
+
+        for name in ["garbage.pdf", "empty.pdf", "truncated.pdf", "nested.pdf"] {
+            let p = dir.path().join(name);
+            let res = crawl_url(&p.to_string_lossy());
+            eprintln!(
+                "PDF {} -> {:?}",
+                name,
+                res.map(|pg| pg.text.len())
+                    .map_err(|e| e.chars().take(60).collect::<String>())
+            );
+        }
+    }
+
+    /// 构造带合法 xref 的最小 PDF，对象 4 为 depth 层嵌套数组。
+    fn build_nested_pdf(depth: usize) -> String {
+        let nested = format!("{}{}{}", "[".repeat(depth), "0", "]".repeat(depth));
+        let mut pdf = String::from("%PDF-1.4\n");
+        let objs = [
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_string(),
+            "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".to_string(),
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>\nendobj\n"
+                .to_string(),
+            format!("4 0 obj\n{}\nendobj\n", nested),
+        ];
+        let mut offsets = Vec::new();
+        for o in &objs {
+            offsets.push(pdf.len());
+            pdf.push_str(o);
+        }
+        let xref_pos = pdf.len();
+        pdf.push_str(&format!("xref\n0 {}\n", objs.len() + 1));
+        pdf.push_str("0000000000 65535 f \n");
+        for off in &offsets {
+            pdf.push_str(&format!("{:010} 00000 n \n", off));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+            objs.len() + 1,
+            xref_pos
+        ));
+        pdf
+    }
 
     /// 红队回归：所有回环/内网等价写法都必须被拦截（纯字符串判定，不发起连接）。
     /// 其中 `[0:0:0:0:0:0:0:1]` 完整写法曾实测绕过防护并成功连上本机服务。
