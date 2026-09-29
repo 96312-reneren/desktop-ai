@@ -516,6 +516,11 @@ mod tests {
             assert_eq!(docs[0].chunks[0].text, "旧文本");
             assert_eq!(docs[0].chunks[0].embedding, vec![1.0, 0.0, 0.0]);
         }
+        // 幂等：迁移由 user_version 门控，再次打开不得重复导入
+        {
+            let store2 = VectorStore::new(dir.path());
+            assert_eq!(store2.documents().len(), 1, "迁移重复执行产生了重复文档");
+        }
     }
 
     #[test]

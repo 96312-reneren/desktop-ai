@@ -1323,9 +1323,19 @@ impl DesktopAI {
 
     pub(crate) fn delete_model_file(&mut self, model_id: &str) {
         if let Some(info) = find_model(&self.config.model_catalog, model_id) {
-            let path = config::models_dir().join(&info.filename);
+            let dir = config::models_dir();
+            let path = dir.join(&info.filename);
             if let Err(e) = std::fs::remove_file(&path) {
                 log::warn!("failed to delete model file {:?}: {}", path, e);
+            }
+            // 顺带清理未完成下载的暂存文件（<filename>.download / .meta）
+            for suffix in [".download", ".download.meta"] {
+                let tmp = dir.join(format!("{}{}", info.filename, suffix));
+                if tmp.exists() {
+                    if let Err(e) = std::fs::remove_file(&tmp) {
+                        log::warn!("failed to delete download staging {:?}: {}", tmp, e);
+                    }
+                }
             }
         }
     }

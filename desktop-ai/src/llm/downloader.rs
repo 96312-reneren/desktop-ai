@@ -202,6 +202,49 @@ fn merge_parts(dest: &Path, part_paths: &[PathBuf]) -> Result<(), String> {
     Ok(())
 }
 
+/// 下载暂存路径：`<dest>.download`。只有完整通过校验的文件才会改名到最终
+/// 文件名，因此 UI 的"已下载"判断（按最终文件名是否存在）不会被半成品
+/// 误判；分卷文件同样先落到各自的 `.download`，完成后原子改名。
+fn staging_path(dest: &Path) -> PathBuf {
+    let mut s = dest.as_os_str().to_os_string();
+    s.push(".download");
+    PathBuf::from(s)
+}
+
+/// 续传校验器旁路文件：保存最后一次响应的 ETag / Last-Modified，下次续传
+/// 时用于 `If-Range`，防止远端文件已更新时把新文件尾部拼到旧前缀上。
+fn staging_meta_path(dest: &Path) -> PathBuf {
+    let mut s = dest.as_os_str().to_os_string();
+    s.push(".download.meta");
+    PathBuf::from(s)
+}
+
+fn read_validator(meta: &Path) -> Option<String> {
+    std::fs::read_to_string(meta)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn write_validator(meta: &Path, etag: Option<&str>, last_modified: Option<&str>) {
+    if let Some(v) = etag.or(last_modified) {
+        if let Err(e) = std::fs::write(meta, v) {
+            log::warn!("failed to write download validator {:?}: {}", meta, e);
+        }
+    }
+}
+
+/// 校验通过后的收尾：把 `<dest>.download` 改名到最终文件名（Windows 上
+/// 目标已存在时先删再改名），并清理校验器旁路文件。
+fn finalize_download(dest: &Path, work: &Path) -> Result<(), String> {
+    if work != dest && fs::rename(work, dest).is_err() {
+        let _ = fs::remove_file(dest);
+        fs::rename(work, dest).map_err(|e| format!("重命名失败: {}", e))?;
+    }
+    let _ = fs::remove_file(staging_meta_path(dest));
+    Ok(())
+}
+
 /// 单文件下载核心：断点续传、取消、SHA-256 校验。
 /// `part_index = Some((i, n))` 表示该文件是 n 个分卷中的第 i 个（0 起），
 /// 进度百分比折算到整体范围，便于 UI 展示总进度。
@@ -221,15 +264,23 @@ fn download_single_file(
         return Err(e);
     }
 
-    // Check existing file for resume
-    let mut existing_size = if dest.exists() {
-        fs::metadata(dest).map(|m| m.len()).unwrap_or(0)
+    // 暂存策略：新下载先写 `<dest>.download`，校验通过后再改名到最终
+    // 文件名；旧版本遗留的最终文件则原地续传，保持兼容。
+    let work_path = if dest.exists() {
+        dest.to_path_buf()
     } else {
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).ok();
         }
+        staging_path(dest)
+    };
+    let meta_path = staging_meta_path(dest);
+    let mut existing_size = if work_path.exists() {
+        fs::metadata(&work_path).map(|m| m.len()).unwrap_or(0)
+    } else {
         0
     };
+    let validator = read_validator(&meta_path);
 
     let client = reqwest::blocking::Client::builder()
         // 只限制连接阶段。reqwest 的 `timeout` 是“到响应体读完”的总时限
@@ -266,6 +317,11 @@ fn download_single_file(
         let mut req = client.get(&current_url);
         if existing_size > 0 {
             req = req.header("Range", format!("bytes={}-", existing_size));
+            // 远端文件若已更新（ETag/Last-Modified 不匹配），If-Range 会让
+            // 服务器返回 200 全量响应，避免新旧内容拼接成损坏文件。
+            if let Some(v) = validator.as_deref() {
+                req = req.header("If-Range", v);
+            }
         }
         let resp = match req.send() {
             Ok(r) => r,
@@ -289,6 +345,14 @@ fn download_single_file(
         }
 
         let status = resp.status();
+        // 记录校验器供下次续传使用（ETag 优先，其次 Last-Modified）
+        write_validator(
+            &meta_path,
+            resp.headers().get("etag").and_then(|v| v.to_str().ok()),
+            resp.headers()
+                .get("last-modified")
+                .and_then(|v| v.to_str().ok()),
+        );
         if status == 206 {
             let total = resp
                 .headers()
@@ -309,7 +373,7 @@ fn download_single_file(
                     existing_size as f64 / 1_048_576.0,
                     total as f64 / 1_048_576.0
                 )));
-                let _ = fs::remove_file(dest);
+                let _ = fs::remove_file(&work_path);
                 existing_size = 0;
                 continue;
             }
@@ -320,7 +384,7 @@ fn download_single_file(
                 total as f64 / 1_048_576.0
             )));
 
-            match OpenOptions::new().append(true).open(dest) {
+            match OpenOptions::new().append(true).open(&work_path) {
                 Ok(f) => break (resp, f, total, existing_size),
                 Err(e) => {
                     let _ = tx.send(DownloadMsg::Error(format!("无法写入文件: {}", e)));
@@ -335,7 +399,7 @@ fn download_single_file(
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
 
-            match File::create(dest) {
+            match File::create(&work_path) {
                 Ok(f) => break (resp, f, total, 0u64),
                 Err(e) => {
                     let _ = tx.send(DownloadMsg::Error(format!("无法创建文件: {}", e)));
@@ -346,7 +410,7 @@ fn download_single_file(
             // Range not satisfiable — the local file is already complete.
             // Fall through to the integrity check below.
             let _ = tx.send(DownloadMsg::Status("文件已完整，正在校验...".into()));
-            match File::open(dest) {
+            match File::open(&work_path) {
                 Ok(f) => break (resp, f, existing_size, existing_size),
                 Err(e) => {
                     let _ = tx.send(DownloadMsg::Error(format!("无法打开文件: {}", e)));
@@ -401,7 +465,7 @@ fn download_single_file(
 
     drop(file);
 
-    let actual_size = fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+    let actual_size = fs::metadata(&work_path).map(|m| m.len()).unwrap_or(0);
 
     // 长度校验：服务器给出总长就必须收满。提前结束一般是连接被掐，
     // 保留已下载内容，下次可 Range 续传（不删除）。
@@ -416,7 +480,7 @@ fn download_single_file(
 
     // 无 Content-Length 且无哈希可校验时，过小的响应大概率是错误页。
     if total_size == 0 && expected_sha256.is_none() && actual_size < 1_048_576 {
-        if let Err(e) = fs::remove_file(dest) {
+        if let Err(e) = fs::remove_file(&work_path) {
             log::warn!("failed to remove corrupted download: {}", e);
         }
         let _ = tx.send(DownloadMsg::Error(
@@ -429,10 +493,10 @@ fn download_single_file(
     // verify it before signalling success. Mismatch deletes the corrupt file.
     if let Some(expected) = expected_sha256 {
         let _ = tx.send(DownloadMsg::Status("校验完整性 (SHA-256)...".into()));
-        match compute_sha256(dest) {
+        match compute_sha256(&work_path) {
             Ok(actual) => {
                 if !actual.eq_ignore_ascii_case(expected.trim()) {
-                    let _ = fs::remove_file(dest);
+                    let _ = fs::remove_file(&work_path);
                     let _ = tx.send(DownloadMsg::Error(format!(
                         "SHA-256 校验失败\n期望: {}\n实际: {}",
                         expected, actual
@@ -447,6 +511,7 @@ fn download_single_file(
         }
     }
 
+    finalize_download(dest, &work_path)?;
     Ok(())
 }
 
@@ -649,5 +714,55 @@ mod tests {
             listener.accept().is_err(),
             "red-team 回归：下载器放行了到本机服务的连接"
         );
+    }
+
+    /// 暂存/收尾路径：`.download` 改名到最终文件名，并清理校验器旁路文件。
+    #[test]
+    fn test_staging_and_finalize() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dest = dir.path().join("model.gguf");
+        let work = staging_path(&dest);
+        assert_eq!(
+            work.file_name().unwrap(),
+            "model.gguf.download",
+            "暂存文件必须是旁路名，不能占用最终文件名（避免半成品被当成已安装）"
+        );
+        assert_eq!(
+            staging_meta_path(&dest).file_name().unwrap(),
+            "model.gguf.download.meta"
+        );
+
+        fs::write(&work, b"payload").unwrap();
+        write_validator(&staging_meta_path(&dest), Some("\"abc\""), None);
+        assert_eq!(
+            read_validator(&staging_meta_path(&dest)).as_deref(),
+            Some("\"abc\"")
+        );
+
+        finalize_download(&dest, &work).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"payload");
+        assert!(!work.exists(), "暂存文件应已改名");
+        assert!(!staging_meta_path(&dest).exists(), "校验器旁路文件应被清理");
+    }
+
+    /// 校验器：ETag 优先，Last-Modified 兜底，空白视为无。
+    #[test]
+    fn test_validator_etag_preferred_and_blank_is_none() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let dest = dir.path().join("a.b.gguf");
+        let meta = staging_meta_path(&dest);
+        write_validator(
+            &meta,
+            Some("W/\"tag\""),
+            Some("Wed, 21 Oct 2026 07:28:00 GMT"),
+        );
+        assert_eq!(read_validator(&meta).as_deref(), Some("W/\"tag\""));
+        write_validator(&meta, None, Some("Wed, 21 Oct 2026 07:28:00 GMT"));
+        assert_eq!(
+            read_validator(&meta).as_deref(),
+            Some("Wed, 21 Oct 2026 07:28:00 GMT")
+        );
+        fs::write(&meta, "   ").unwrap();
+        assert!(read_validator(&meta).is_none());
     }
 }

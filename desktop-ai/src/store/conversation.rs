@@ -102,7 +102,16 @@ fn conversation_title(messages: &[Message]) -> String {
 #[allow(clippy::new_without_default)]
 impl Conversation {
     pub fn new() -> Self {
-        let id = Utc::now().format("%Y%m%d_%H%M%S_%f").to_string();
+        // 微秒时间戳 + 进程内序列号：紧密循环或并发创建时也不会撞 id。
+        // （仅用 %f 微秒时，同一微秒内创建的两个会话会共享 id，其消息按
+        // seq 互相插入同一会话，属于数据污染。）
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = format!(
+            "{}_{}",
+            Utc::now().format("%Y%m%d_%H%M%S_%f"),
+            seq % 1_000_000
+        );
         Self {
             id,
             messages: vec![],
@@ -372,6 +381,20 @@ fn migrate_from_json(c: &mut Connection) -> Result<(), String> {
             params![legacy.id, title, created_at, updated_at],
         )
         .map_err(|e| e.to_string())?;
+
+        // 幂等保护：该对话若已有消息（上次迁移中断后又重跑），跳过重复导入。
+        // 否则 messages 表没有 (conv_id, seq) 唯一约束，重复导入会产生重复消息。
+        let existing: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE conv_id = ?1",
+                params![legacy.id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if existing > 0 {
+            continue;
+        }
+
         let mut stmt = tx
             .prepare("INSERT INTO messages (conv_id, role, content, seq) VALUES (?1, ?2, ?3, ?4)")
             .map_err(|e| e.to_string())?;
@@ -458,5 +481,138 @@ mod tests {
             "messages": []
         }"#;
         assert!(Conversation::import_json(json).is_err());
+    }
+
+    #[test]
+    fn test_ids_unique_in_tight_loop() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..10_000 {
+            assert!(seen.insert(Conversation::new().id), "紧凑循环产生重复 id");
+        }
+    }
+
+    #[test]
+    fn test_ids_unique_across_threads() {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    (0..1000)
+                        .map(|_| Conversation::new().id)
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for h in handles {
+            for id in h.join().unwrap() {
+                assert!(seen.insert(id), "并发创建产生重复 id");
+            }
+        }
+    }
+
+    #[test]
+    fn test_incremental_persistence_no_duplicates() {
+        crate::test_util::temp_data_dir();
+        let mut conv = Conversation::new();
+        conv.add_message("user", "a");
+        conv.add_message("assistant", "b");
+        conv.save(); // 重复保存不应重复落盘
+        let r = Conversation::load(&conv.id).expect("load");
+        assert_eq!(r.messages.len(), 2);
+        conv.add_message("user", "c");
+        let r = Conversation::load(&conv.id).expect("load");
+        assert_eq!(r.messages.len(), 3);
+        assert_eq!(r.messages[2].content, "c");
+        Conversation::delete(&conv.id);
+    }
+
+    #[test]
+    fn test_interleaved_conversations_keep_order() {
+        crate::test_util::temp_data_dir();
+        let mut c1 = Conversation::new();
+        let mut c2 = Conversation::new();
+        c1.add_message("user", "1-a");
+        c2.add_message("user", "2-a");
+        c1.add_message("user", "1-b");
+        c2.add_message("user", "2-b");
+        let r1 = Conversation::load(&c1.id).unwrap();
+        let r2 = Conversation::load(&c2.id).unwrap();
+        assert_eq!(
+            r1.messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1-a", "1-b"]
+        );
+        assert_eq!(
+            r2.messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2-a", "2-b"]
+        );
+        Conversation::delete(&c1.id);
+        Conversation::delete(&c2.id);
+    }
+
+    #[test]
+    fn test_long_conversation_persists_and_truncates() {
+        crate::test_util::temp_data_dir();
+        let mut conv = Conversation::new();
+        for i in 0..300 {
+            conv.add_message("user", &format!("m{}", i));
+        }
+        let r = Conversation::load(&conv.id).unwrap();
+        assert_eq!(r.messages.len(), 300);
+        let ctx = r.context_messages(Some("sys"), 50);
+        assert_eq!(ctx.len(), 51);
+        assert_eq!(ctx[1].content, "m250");
+        assert_eq!(ctx.last().unwrap().content, "m299");
+        Conversation::delete(&conv.id);
+    }
+
+    #[test]
+    fn test_json_migration_is_idempotent() {
+        crate::test_util::temp_data_dir();
+        let dir = conversations_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = r#"{"id":"legacy_mig_1","title":"旧","created_at":"2025-01-01T00:00:00Z","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]}"#;
+        let legacy_path = dir.join("legacy_mig_1.json");
+        std::fs::write(&legacy_path, legacy).unwrap();
+        let db_path = dir.join("mig_idempotency_test.db");
+        let _ = std::fs::remove_file(&db_path);
+        {
+            let mut c = Connection::open(&db_path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE IF NOT EXISTS conversations (
+                    id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                 CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conv_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL, content TEXT NOT NULL, seq INTEGER NOT NULL);",
+            )
+            .unwrap();
+            migrate_from_json(&mut c).unwrap();
+            migrate_from_json(&mut c).unwrap(); // 第二遍不得重复导入
+            let msgs: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE conv_id = 'legacy_mig_1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(msgs, 2, "迁移重复执行产生了重复消息");
+            let docs: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM conversations WHERE id = 'legacy_mig_1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(docs, 1);
+        }
+        let _ = std::fs::remove_file(&legacy_path);
+        let _ = std::fs::remove_file(&db_path);
     }
 }
