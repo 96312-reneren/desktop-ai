@@ -623,4 +623,31 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&dir);
     }
+
+    /// 红队实弹：下载器对回环 URL 必须在发起任何连接之前拦截。
+    #[test]
+    fn redteam_downloader_blocks_loopback_without_connection() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let dir = crate::test_util::temp_data_dir();
+        let dest = dir.join("models").join("evil.gguf");
+        let (tx, _rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let res = download_single_file(
+            &format!("http://127.0.0.1:{}/evil.gguf", port),
+            &dest,
+            &cancel,
+            &tx,
+            None,
+            None,
+        );
+        assert!(res.is_err(), "回环下载地址必须被拒绝");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            listener.accept().is_err(),
+            "red-team 回归：下载器放行了到本机服务的连接"
+        );
+    }
 }
