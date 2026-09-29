@@ -78,14 +78,17 @@ pub(crate) fn extract_pdf_safe(path: &std::path::Path) -> Result<String, String>
 /// True if the URL host points at a private / loopback / link-local address
 /// that must NOT be fetched, to prevent SSRF via user-supplied URLs (the
 /// crawler follows links from arbitrary pages). Literal-IP and obvious
-/// hostname checks only (no DNS resolution, so DNS-rebinding is out of
-/// scope); sufficient to block `http://127.0.0.1`, `http://localhost`,
-/// `http://192.168.x.x`, `http://169.254.169.254`, etc.
+/// hostname checks only (DNS-rebinding is handled by `pin_host`); covers
+/// `http://127.0.0.1`, `http://localhost`, `http://192.168.x.x`,
+/// `http://169.254.169.254`, and every equivalent spelling of a loopback
+/// IPv6 literal (`http://[0:0:0:0:0:0:0:1]`, `http://[::0001]`, …).
 pub(crate) fn is_ssrf_url(url: &str) -> bool {
     let host = match extract_host(url) {
         Some(h) => h,
         None => return false,
     };
+    // FQDN 尾点与裸名等价（localhost. / 127.0.0.1.），先归一化
+    let host = host.trim_end_matches('.');
     if host.eq_ignore_ascii_case("localhost") {
         return true;
     }
@@ -93,22 +96,39 @@ pub(crate) fn is_ssrf_url(url: &str) -> bool {
     if let Some(ip) = parse_ipv4(host) {
         return is_private_ipv4(ip);
     }
-    let lower = host.to_lowercase();
-    if lower == "::1"
-        || lower.starts_with("fc")
-        || lower.starts_with("fd")
-        || lower.starts_with("fe80")
-        || lower.starts_with("::ffff:")
-    {
-        return true;
+    // IPv6 字面量交给标准库解析，覆盖压缩/完整/映射/兼容等全部等价写法。
+    // （旧实现只匹配 "::1"/"::ffff:" 前缀，`http://[0:0:0:0:0:0:0:1]` 可绕过）
+    if let Ok(v6) = host.parse::<std::net::Ipv6Addr>() {
+        return is_private_ipv6(v6);
     }
     false
+}
+
+/// Private / loopback / link-local / ULA IPv6. IPv4-mapped and legacy
+/// IPv4-compatible forms are unwrapped and checked against the IPv4 rules
+/// (otherwise `http://[::ffff:10.0.0.1]/` would slip through).
+fn is_private_ipv6(v6: std::net::Ipv6Addr) -> bool {
+    if v6.is_loopback() || v6.is_unspecified() {
+        return true;
+    }
+    if let Some(v4) = v6.to_ipv4() {
+        return is_private_ipv4(v4.octets());
+    }
+    let s = v6.segments();
+    // fc00::/7 唯一本地地址; fe80::/10 链路本地
+    (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80
 }
 
 fn extract_host(url: &str) -> Option<&str> {
     let rest = url
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))?;
+    // 用户信息段（user:pass@host）按 URL 规范取最后一个 '@' 之后的部分；
+    // 否则 "http://x@[::1]/" 的主机会被误解析成 "x@["。
+    let rest = match rest.rsplit_once('@') {
+        Some((_, after)) => after,
+        None => rest,
+    };
     let host_end = if rest.starts_with('[') {
         // bracketed IPv6 literal, e.g. [::1]:8080
         rest.find(']').map(|i| i + 1).unwrap_or(rest.len())
@@ -118,52 +138,58 @@ fn extract_host(url: &str) -> Option<&str> {
     Some(&rest[..host_end])
 }
 
+/// 按 inet_aton 语义解析 IPv4：1~4 段，每段接受十进制 / 十六进制(0x) /
+/// 八进制(0 前缀)。覆盖 `2130706433`、`127.1`、`0x7f000001` 等全部等价写法。
 fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
-    // Single decimal integer: http://2130706433/ → 127.0.0.1
-    if let Ok(n) = s.parse::<u64>() {
-        if n <= u32::MAX as u64 {
-            let b = (n >> 24) as u8;
-            let c = ((n >> 16) & 0xff) as u8;
-            let d = ((n >> 8) & 0xff) as u8;
-            let e = (n & 0xff) as u8;
-            return Some([b, c, d, e]);
-        }
-    }
-    // Hex: 0x7f000001
-    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        if let Ok(n) = u64::from_str_radix(hex, 16) {
-            if n <= u32::MAX as u64 {
-                let b = (n >> 24) as u8;
-                let c = ((n >> 16) & 0xff) as u8;
-                let d = ((n >> 8) & 0xff) as u8;
-                let e = (n & 0xff) as u8;
-                return Some([b, c, d, e]);
-            }
-        }
-    }
-    // Dotted notation: each octet may be decimal, hex, or octal
     let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() != 4 {
-        return None;
+    match parts.len() {
+        1 => {
+            let n = parse_u32_radix(parts[0])?;
+            Some(n.to_be_bytes())
+        }
+        2 => {
+            let a = parse_u32_radix(parts[0])?;
+            let b = parse_u32_radix(parts[1])?;
+            if a > 0xff || b > 0xff_ffff {
+                return None;
+            }
+            Some(((a << 24) | b).to_be_bytes())
+        }
+        3 => {
+            let a = parse_u32_radix(parts[0])?;
+            let b = parse_u32_radix(parts[1])?;
+            let c = parse_u32_radix(parts[2])?;
+            if a > 0xff || b > 0xff || c > 0xffff {
+                return None;
+            }
+            Some(((a << 24) | (b << 16) | c).to_be_bytes())
+        }
+        4 => {
+            let mut out = [0u8; 4];
+            for (i, p) in parts.iter().enumerate() {
+                let v = parse_u32_radix(p)?;
+                if v > 0xff {
+                    return None;
+                }
+                out[i] = v as u8;
+            }
+            Some(out)
+        }
+        _ => None,
     }
-    let mut out = [0u8; 4];
-    for (i, p) in parts.iter().enumerate() {
-        out[i] = parse_octet(p)?;
-    }
-    Some(out)
 }
 
-/// Parse one IPv4 octet, accepting decimal, hex (0x prefix), and
+/// Parse one integer component, accepting decimal, hex (0x prefix), and
 /// octal (0 prefix — e.g. 0177 = 127).
-fn parse_octet(s: &str) -> Option<u8> {
+fn parse_u32_radix(s: &str) -> Option<u32> {
     if s.is_empty() {
         return None;
     }
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        return u8::from_str_radix(hex, 16).ok();
+        return u32::from_str_radix(hex, 16).ok();
     }
     if s.len() > 1 && s.starts_with('0') {
-        return u8::from_str_radix(s, 8).ok();
+        return u32::from_str_radix(s, 8).ok();
     }
     s.parse().ok()
 }
@@ -227,8 +253,8 @@ fn pin_host(
 ) -> Result<reqwest::blocking::ClientBuilder, String> {
     let host = extract_host(url).ok_or("无法解析 URL 主机名")?;
     let host = host.trim_start_matches('[').trim_end_matches(']');
-    if parse_ipv4(host).is_some() || host.contains(':') {
-        // Literal IP: literal checks in is_ssrf_url already applied.
+    if parse_ipv4(host).is_some() || host.parse::<std::net::Ipv6Addr>().is_ok() {
+        // 字面 IP：is_ssrf_url 已完成校验
         return Ok(builder);
     }
     use std::net::ToSocketAddrs;
@@ -242,9 +268,7 @@ fn pin_host(
     for a in &addrs {
         let private = match a.ip() {
             std::net::IpAddr::V4(v4) => is_private_ipv4(v4.octets()),
-            std::net::IpAddr::V6(v6) => {
-                v6.is_loopback() || v6.is_unspecified() || v6.segments().starts_with(&[0xfe80])
-            }
+            std::net::IpAddr::V6(v6) => is_private_ipv6(v6),
         };
         if private {
             return Err(format!("DNS 解析到内网地址，已拦截: {}", a.ip()));
@@ -583,6 +607,109 @@ pub(crate) fn crawl_multiple(urls: &[String]) -> Vec<Result<CrawledPage, String>
 mod tests {
     use super::*;
 
+    /// 红队回归：所有回环/内网等价写法都必须被拦截（纯字符串判定，不发起连接）。
+    /// 其中 `[0:0:0:0:0:0:0:1]` 完整写法曾实测绕过防护并成功连上本机服务。
+    #[test]
+    fn redteam_loopback_forms_all_blocked() {
+        let blocked = [
+            "http://127.0.0.1/",
+            "http://127.0.0.1:8080/admin",
+            "http://127.1/",
+            "http://127.0.1/",
+            "http://0177.0.0.1/",
+            "http://0x7f.0.0.1/",
+            "http://0x7f000001/",
+            "http://2130706433/",
+            "http://0/",
+            "http://1/",
+            "http://0.0.0.0/",
+            "http://127.0.0.1./",
+            "http://localhost/",
+            "http://localhost./",
+            "http://LOCALHOST/",
+            "http://user:pass@localhost/",
+            "http://user@127.0.0.1/",
+            "http://[::1]/",
+            "http://[::0001]/",
+            "http://[0::1]/",
+            "http://[0:0:0:0:0:0:0:1]/",
+            "http://[0:0:0:0:0:0:0:1]:8080/admin",
+            "http://[::]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://[0:0:0:0:0:ffff:127.0.0.1]/",
+            "http://x@[::1]/",
+            "http://user:pass@[0:0:0:0:0:0:0:1]:9000/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://169.254.0.1/",
+            "http://10.0.0.1/",
+            "http://10.255.255.255/",
+            "http://172.16.0.1/",
+            "http://172.31.255.254/",
+            "http://192.168.0.1/",
+            "http://192.168.255.255/",
+            "http://[fe80::1]/",
+            "http://[fc00::1]/",
+            "http://[fd12:3456:789a::1]/",
+        ];
+        for u in blocked {
+            assert!(is_ssrf_url(u), "red-team: {} 未被拦截", u);
+        }
+    }
+
+    /// 修复前缀误杀回归：以 fc/fd/fe80 开头的正常公网域名必须放行。
+    #[test]
+    fn redteam_public_hosts_not_false_positive() {
+        assert!(!is_ssrf_url("http://fc2.com/"));
+        assert!(!is_ssrf_url("https://fda.gov/"));
+        assert!(!is_ssrf_url("http://fe80host.example/"));
+        // userinfo 里的 127.0.0.1 不是主机名
+        assert!(!is_ssrf_url("http://127.0.0.1@evil.example/"));
+        assert!(!is_ssrf_url("http://[2606:4700::1111]/")); // 公网 IPv6
+        assert!(!is_ssrf_url("http://[::ffff:8.8.8.8]/")); // 映射公网
+    }
+
+    /// 红队实弹 1：完整写法 IPv6 回环必须被拦截，且不产生任何连接。
+    #[test]
+    fn redteam_ipv6_loopback_never_connected() {
+        let listener = match std::net::TcpListener::bind("[::1]:0") {
+            Ok(l) => l,
+            Err(_) => {
+                eprintln!("SKIP: 本机不支持 IPv6 回环");
+                return;
+            }
+        };
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://[0:0:0:0:0:0:0:1]:{}/secret", port);
+        let res = crawl_url(&url);
+        assert!(res.is_err(), "IPv6 回环必须被拒绝");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            listener.accept().is_err(),
+            "red-team 回归：防护放行了到本机 IPv6 服务的连接"
+        );
+    }
+
+    /// 红队实弹 2：经典 IPv4 回环（含 userinfo 变体）同样必须零连接。
+    #[test]
+    fn redteam_loopback_never_connected() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        for url in [
+            format!("http://127.0.0.1:{}/secret", port),
+            format!("http://user@127.0.0.1:{}/secret", port),
+        ] {
+            let res = crawl_url(&url);
+            assert!(res.is_err(), "{} 必须被拒绝", url);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            listener.accept().is_err(),
+            "red-team 回归：防护放行了到本机服务的连接"
+        );
+    }
+
     #[test]
     fn test_ssrf_blocks_loopback_and_private() {
         assert!(is_ssrf_url("http://127.0.0.1/"));
@@ -595,8 +722,8 @@ mod tests {
         assert!(is_ssrf_url("http://172.31.255.255/"));
         assert!(is_ssrf_url("http://169.254.169.254/latest/meta-data"));
         assert!(is_ssrf_url("http://[::1]/"));
-        assert!(is_ssrf_url("http://fc00::1/"));
-        assert!(is_ssrf_url("http://fe80::1/"));
+        assert!(is_ssrf_url("http://[fc00::1]/"));
+        assert!(is_ssrf_url("http://[fe80::1]/"));
     }
 
     #[test]
@@ -633,7 +760,10 @@ mod tests {
     fn test_parse_ipv4_edges() {
         assert_eq!(parse_ipv4("1.2.3.4"), Some([1, 2, 3, 4]));
         assert_eq!(parse_ipv4("256.0.0.0"), None);
-        assert_eq!(parse_ipv4("1.2.3"), None);
+        // inet_aton 短写法：a.b → a.0.0.b，a.b.c → a.b.0.c
+        assert_eq!(parse_ipv4("127.1"), Some([127, 0, 0, 1]));
+        assert_eq!(parse_ipv4("127.0.1"), Some([127, 0, 0, 1]));
+        assert_eq!(parse_ipv4("1.2.3"), Some([1, 2, 0, 3]));
         assert_eq!(parse_ipv4("a.b.c.d"), None);
         // Alternate representations
         assert_eq!(parse_ipv4("2130706433"), Some([127, 0, 0, 1])); // decimal
