@@ -24,6 +24,16 @@
 - **跨平台**：正式支持 Linux（x86_64，glibc ≥ 2.35），GitHub Actions 自动编译双平台产物并发布 Release
 - **依赖安全升级**：pdf-extract 0.12（lopdf 0.42，修复 RUSTSEC-2026-0187）、anyhow、event-listener、memmap2 等
 
+### v6.1.6 之后的加固轮次（2026-09，未发版）
+- **SSRF 修复**：完整写法 IPv6 回环（`http://[0:0:0:0:0:0:0:1]`）曾实测绕过防护直连本机服务；userinfo 主机解析、inet_aton 短写法（`127.1`）一并修复，同时移除 `fc/fd/fe80` 前缀误杀
+- **爬虫加固**：修复恶意网页可稳定触发的链接解析越界 panic；响应体改为按 3 MB 上限流式读取，消除内存 DoS 窗口
+- **API 修复**：Windows 下 accept 继承非阻塞属性导致"连上后稍晚发送"的客户端被 400 掐断、16 并发上限失效；CORS 回显增加 `Vary: Origin`
+- **下载增强**：先落到 `<文件名>.download`，SHA-256 通过后原子改名（半成品不再显示为"已安装"）；新增 ETag/Last-Modified + `If-Range` 续传校验
+- **会话修复**：id 加入进程内序列号（修复同微秒并发 id 碰撞导致消息串扰）；JSON 迁移幂等化
+- **测试隔离**：`tempfile` dev-dependency + `DESKTOP_AI_DATA_DIR` 覆盖，测试不再读写真实用户目录
+- **红队回归测试**：SSRF 语料与零连接实弹、畸形 HTML、PDF 炸弹（百万层嵌套）、恶意文件语料、WAL 崩溃回放、下载暂存、token 强度等；测试数 142 → 164
+- **无界面 API**：新增 `examples/api_serve.rs`，可脱离 GUI 启动 OpenAI 兼容服务
+
 完整功能见下方[功能清单](#核心功能)。
 
 ---
@@ -37,22 +47,23 @@
 - **新版 llama.cpp 兼容**：运行时自动检测库的 API 时代（现代 `llama_sampler_*` / 旧版采样）
 
 ### RAG 三位一体
-- **本地知识库 KB**：基于同一模型的 embedding 上下文做语义检索，SQLite 存储（WAL 事务，增量写入，自动迁移旧 JSON）
+- **本地知识库 KB**：基于同一模型的 embedding 上下文做语义检索，SQLite 存储（WAL 事务，增量写入，自动迁移旧 JSON 且幂等）
 - **网络搜索**：DuckDuckGo HTML 抓取
-- **网页爬虫**：深度 1-3，SSRF 防护拦截私网 / 回环地址（含 IP 替代编码、逐跳重定向校验）
+- **网页爬虫**：深度 1-3，SSRF 防护拦截私网 / 回环地址（含完整写法 IPv6、userinfo、IP 替代编码、逐跳重定向校验；响应体 3 MB 上限流式读取）
 - **统一 RAG 提示词**：`build_rag_prompt()` 将 KB 与搜索上下文注入系统提示词，并对全部 ChatML 特殊标记做注入消毒
 
 ### API 服务
 - **OpenAI 兼容**：`/v1/chat/completions`、`/v1/models`、`/health`、`/ready`
 - **Bearer Token 认证**：`/v1/*` 需携带 `Authorization: Bearer <token>`（设置中查看）
-- **CORS 白名单**：仅允许 localhost / 127.0.0.1，响应回显白名单 Origin
+- **CORS 白名单**：仅允许 localhost / 127.0.0.1，响应回显白名单 Origin（带 `Vary: Origin`）
 - **DoS 防护**：最大 16 并发、30 秒读超时 + 60 秒请求总超时、1 MB 请求体上限
+- **无界面模式**：`cargo run --release --example api_serve -- <模型.gguf> [端口] [token]` 可脱离 GUI 启动服务
 
 ### 对话管理
 - 多轮对话持久化（SQLite，增量落盘）
 - 实时搜索过滤（Ctrl+F）
 - **JSON 导入 / 导出**（备份与迁移）
-- id 消毒（仅允许 `[a-zA-Z0-9_]`）
+- 会话 id 采用「时间戳 + 进程内序列号」生成，紧凑循环 / 并发创建不碰撞；导入时校验仅允许 `[a-zA-Z0-9_]`
 
 ### UI / UX
 - 完整 Markdown 渲染（含表格 / 链接 / 内联代码高亮）
@@ -64,13 +75,15 @@
 
 ### 安全加固
 - **新版 llama.cpp FFI 全适配**：结构布局、后端初始化、vocab API、现代采样器
-- **SSRF 拦截**（种子 / 子链接 / 重定向 / IP 编码）+ **ChatML 注入消毒**（13 标记全覆盖）
-- **API 认证** + 慢速滴流防护 + CORS 白名单
+- **SSRF 拦截**（种子 / 子链接 / 重定向 / IP 编码 / 完整写法 IPv6 / userinfo）+ **ChatML 注入消毒**（13 标记全覆盖）
+- **API 认证** + 慢速滴流防护 + CORS 白名单 + 回显 `Vary: Origin`
+- **下载完整性**：`.download` 暂存 + 原子改名 + SHA-256 + ETag/If-Range 续传校验
 - **依赖漏洞修复**：pdf-extract 0.12 / lopdf 0.42（RUSTSEC-2026-0187）、anyhow、event-listener、memmap2
+- **本地数据权限**：config 文件 Unix 0600、日志目录 Unix 0700
 - Release profile：`opt-level=3` + `lto=true` + `strip="symbols"`
 
 ### 工程质量
-- **142 个测试**全部通过（134 unit + 8 integration），覆盖 11 个模块
+- **164 个测试**全部通过（156 unit + 8 integration），含红队回归语料与 WAL 崩溃回放
 - **0 个 Clippy 错误、0 个 Clippy 警告**（pristine baseline）
 - 全部 unsafe 函数含 `# Safety` 文档说明
 - 结构化日志：`tracing-subscriber` + `tracing-log` 桥接 `log::*!` 宏，落盘到数据目录 `logs/`
@@ -100,49 +113,55 @@
 ### 4. 启用 API 服务器（可选）
 - 设置面板中开启"API 服务"，默认端口 11434
 - 任何 OpenAI 客户端可指向 `http://127.0.0.1:11434/v1`，需携带 API token
+- **无界面模式**（自动化 / 中转场景，不需要打开 GUI）：
+  ```powershell
+  cargo run --release --example api_serve -- <模型.gguf> [端口=11434] [token=da-local]
+  ```
+  服务只监听 `127.0.0.1`，退出按 Ctrl+C
 
 ---
 
 ## 项目结构
 
 ```
-桌面AI/
-├── desktop-ai/                    # Rust 源码
-│   ├── src/
-│   │   ├── main.rs                # 入口 + 字体加载 + 日志初始化
-│   │   ├── config.rs              # 配置序列化 + 边界校验 + 原子写入
-│   │   ├── db.rs                  # SQLite 连接封装（Mutex + WAL + busy_timeout）
-│   │   ├── conversation.rs        # 对话 CRUD（SQLite 增量落盘）+ 导入导出
-│   │   ├── ffi.rs                 # llama.cpp C FFI 绑定（unsafe，双 API 时代兼容）
-│   │   ├── inference.rs           # 推理 + ChatML 消毒 + RAG 提示词
-│   │   ├── embedding.rs           # 文本向量化
-│   │   ├── vector_store.rs        # SQLite 向量存储 + 余弦检索 + JSON 迁移
-│   │   ├── chunker.rs             # 句子感知分块器
-│   │   ├── cleaner.rs             # HTML → 纯文本清洗
-│   │   ├── crawler.rs             # 网页爬虫 + SSRF 防护
-│   │   ├── search.rs              # DuckDuckGo 搜索
-│   │   ├── api_server.rs          # OpenAI 兼容 HTTP API（token 认证 + DoS 防护）
-│   │   ├── sandbox.rs             # 沙盒文件系统
-│   │   ├── markdown.rs            # Markdown → egui 渲染
-│   │   ├── downloader.rs          # 模型下载 + 断点续传 + SHA-256 校验
-│   │   ├── model_catalog.rs       # 6 款 Qwen 模型元数据
-│   │   ├── lib.rs                 # 库根（集成测试 + re-export）
-│   │   └── app/                   # 主应用（6 个子模块）
-│   │       ├── mod.rs             # 结构体 + 业务逻辑 + update()
-│   │       ├── sidebar.rs         # 侧边栏 + 对话列表 + 导入导出
-│   │       ├── chat.rs            # 聊天区 + 消息气泡 + 输入栏防御
-│   │       ├── settings.rs        # 设置：主题/字号/GPU/API/数据
-│   │       ├── model_select.rs    # 模型选择窗口
-│   │       └── kb_panel.rs        # 知识库 + 搜索面板
-│   ├── tests/
-│   │   └── integration.rs         # 集成测试（GBK/concurrent/API）
-│   ├── build.rs                   # 按平台复制 llama 库到输出目录
-│   ├── Cargo.toml                 # 项目配置 (v6.1.0)
-│   ├── Cargo.lock                 # 依赖版本锁定
-│   ├── llama.dll                  # llama.cpp 预编译 (Windows)
-│   ├── libllama.so / libggml*.so  # llama.cpp 预编译 (Linux)
-│   └── README.md                  # 本文件
-└── (远端) release/ + .github/workflows/   # 发布产物与 CI 配置由 GitHub 远端维护（Actions 自动生成），本地源码树不含
+桌面AI/                            # 仓库根目录
+├── .github/workflows/             # CI（test / clippy / fmt / audit）+ 自动发布
+└── desktop-ai/                    # Rust 项目
+    ├── src/
+    │   ├── main.rs                # 入口 + 字体加载 + 日志初始化
+    │   ├── lib.rs                 # crate facade（对外导出二进制/测试所需条目）
+    │   ├── llm/                   # 推理领域
+    │   │   ├── ffi.rs             # llama.cpp FFI（unsafe，运行时检测新旧 API）
+    │   │   ├── inference.rs       # 推理 + ChatML 消毒 + RAG 提示词
+    │   │   ├── embedding.rs       # 文本向量化
+    │   │   ├── downloader.rs      # 下载（.download 暂存 + 续传 + SHA-256 + If-Range）
+    │   │   └── model_catalog.rs   # 6 款 Qwen 模型元数据
+    │   ├── rag/                   # 检索增强领域
+    │   │   ├── crawler.rs         # 爬虫 + SSRF 防护 + 本地文件索引
+    │   │   ├── cleaner.rs         # HTML / 文本清洗
+    │   │   ├── chunker.rs         # 句子感知分块
+    │   │   ├── vector_store.rs    # SQLite 向量库 + FTS + JSON 迁移
+    │   │   └── search.rs          # DuckDuckGo 搜索
+    │   ├── store/                 # 存储领域
+    │   │   ├── config.rs          # 配置 + 原子写 + 数据目录 + token 生成
+    │   │   ├── conversation.rs    # 对话 CRUD（增量落盘 + 导入导出）
+    │   │   └── db.rs              # SQLite 封装（WAL + busy_timeout）
+    │   ├── server/                # 服务领域
+    │   │   ├── api_server.rs      # OpenAI 兼容 API（认证 + DoS 防护）
+    │   │   └── sandbox.rs         # 沙盒文件系统
+    │   ├── ui/                    # 界面领域
+    │   │   ├── markdown.rs        # Markdown → egui 渲染
+    │   │   ├── startup.rs         # 启动引导
+    │   │   └── app/               # 主应用（mod + sidebar / chat / settings / model_select / kb_panel）
+    │   └── platform/              # 平台层（Android 入口 + 桌面快捷方式）
+    ├── examples/api_serve.rs      # 无界面 API 启动器
+    ├── tests/integration.rs       # 集成测试（隔离数据目录）
+    ├── build.rs                   # 按平台复制 llama 库到输出目录
+    ├── Cargo.toml / Cargo.lock    # v6.1.6 / 全量锁版本
+    ├── llama.dll                  # llama.cpp 预编译 (Windows)
+    ├── libllama.so / libggml*.so  # llama.cpp 预编译 (Linux)
+    ├── LICENSE                    # MIT
+    └── README.md                  # 本文件
 ```
 
 ---
@@ -162,7 +181,7 @@ cargo build
 # Release 版（带 LTO + strip）
 cargo build --release
 
-# 运行所有 128 个测试
+# 运行全部 164 个测试
 cargo test
 
 # Clippy 静态扫描
@@ -180,7 +199,7 @@ sudo apt install build-essential cmake pkg-config patchelf libssl-dev \
 - 推送 `main` 分支：GitHub Actions 自动构建 Windows / Linux 产物（Actions artifact）
 - 推送 `vX.Y.Z` tag：自动构建并创建 GitHub Release，附带双平台安装包与发布说明
 - 无需本地编译，发布流程：`git tag vX.Y.Z && git push origin vX.Y.Z`
-- 注：`.github/workflows/` 配置文件与 `release/` 产物位于 GitHub 远端仓库，本地源码树不包含
+- 注：CI 配置位于仓库根目录 `.github/workflows/`（`ci.yml` 测试 / `release.yml` 发布）
 
 ### 关键依赖
 | crate | 用途 |
@@ -199,6 +218,15 @@ sudo apt install build-essential cmake pkg-config patchelf libssl-dev \
 ---
 
 ## 开发历史
+
+### v6.1.6+ (2026-09) — 安全审计与红队加固轮次（未发版）
+- SSRF：修复完整写法 IPv6 回环绕过（`[0:0:0:0:0:0:0:1]` 实测可连本机）、userinfo 解析、inet_aton 短写法；移除 `fc/fd/fe80` 前缀误杀
+- 爬虫：修复恶意网页可触发的链接解析越界 panic；响应体按 3 MB 上限流式读取
+- API：修复 accept 继承非阻塞导致延迟发送客户端被 400 掐断、并发上限失效；CORS 回显加 `Vary: Origin`
+- 下载：`.download` 暂存 + 原子改名 + ETag/If-Range 续传校验（半成品不再显示为已安装）
+- 会话：id 加进程内序列号防碰撞；JSON 迁移幂等化
+- 测试：新增红队回归 / WAL 崩溃回放 / 下载暂存 / token 强度等（142 → 164）；测试数据隔离到 `target/test-data`
+- 新增无界面 API 启动器 `examples/api_serve.rs`
 
 ### v6.1 (2026-08-02) — 自动编译与安全审计版
 - SQLite 存储迁移（知识库 + 对话）+ 增量落盘
