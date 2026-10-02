@@ -106,9 +106,9 @@ impl DesktopAI {
             // M3 outlined text field: rounded container that highlights on focus.
             let focused = ui.memory(|mem| mem.has_focus(egui::Id::new("chat_input")));
             let stroke = if focused {
-                Stroke::new(1.5, m.primary)
+                Stroke::new(1.5_f32, m.primary)
             } else {
-                Stroke::new(1.0, m.outline_variant)
+                Stroke::new(1.0_f32, m.outline_variant)
             };
             let btn_w = 76.0;
             egui::Frame::new()

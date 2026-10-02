@@ -106,13 +106,13 @@ pub(crate) fn apply(ctx: &egui::Context, dark: bool) {
 
     v.panel_fill = m.surface;
     v.window_fill = m.surface_container;
-    v.window_stroke = Stroke::new(1.0, m.outline_variant);
+    v.window_stroke = Stroke::new(1.0_f32, m.outline_variant);
     v.window_corner_radius = CornerRadius::same(16);
     v.menu_corner_radius = CornerRadius::same(12);
     v.extreme_bg_color = m.surface_container_lowest;
     v.faint_bg_color = m.surface_container_low;
     v.selection.bg_fill = m.secondary_container;
-    v.selection.stroke = Stroke::new(1.0, m.on_secondary_container);
+    v.selection.stroke = Stroke::new(1.0_f32, m.on_secondary_container);
     v.hyperlink_color = m.primary;
     v.error_fg_color = m.error;
     v.warn_fg_color = m.tertiary_container;
@@ -123,15 +123,15 @@ pub(crate) fn apply(ctx: &egui::Context, dark: bool) {
 
         w.noninteractive.bg_fill = m.surface;
         w.noninteractive.weak_bg_fill = m.surface;
-        w.noninteractive.bg_stroke = Stroke::new(1.0, m.outline_variant);
-        w.noninteractive.fg_stroke = Stroke::new(1.0, m.on_surface);
+        w.noninteractive.bg_stroke = Stroke::new(1.0_f32, m.outline_variant);
+        w.noninteractive.fg_stroke = Stroke::new(1.0_f32, m.on_surface);
         w.noninteractive.corner_radius = CornerRadius::same(12);
         w.noninteractive.expansion = 0.0;
 
         w.inactive.bg_fill = m.surface_container_highest;
         w.inactive.weak_bg_fill = m.surface_container_highest;
         w.inactive.bg_stroke = Stroke::NONE;
-        w.inactive.fg_stroke = Stroke::new(1.0, m.on_surface);
+        w.inactive.fg_stroke = Stroke::new(1.0_f32, m.on_surface);
         w.inactive.corner_radius = CornerRadius::same(20);
         w.inactive.expansion = 0.0;
 
@@ -140,7 +140,7 @@ pub(crate) fn apply(ctx: &egui::Context, dark: bool) {
             .lerp_to_gamma(m.on_surface, 0.10);
         w.hovered.weak_bg_fill = w.hovered.bg_fill;
         w.hovered.bg_stroke = Stroke::NONE;
-        w.hovered.fg_stroke = Stroke::new(1.0, m.on_surface);
+        w.hovered.fg_stroke = Stroke::new(1.0_f32, m.on_surface);
         w.hovered.corner_radius = CornerRadius::same(20);
         w.hovered.expansion = 0.0;
 
@@ -149,14 +149,14 @@ pub(crate) fn apply(ctx: &egui::Context, dark: bool) {
             .lerp_to_gamma(m.on_surface, 0.16);
         w.active.weak_bg_fill = w.active.bg_fill;
         w.active.bg_stroke = Stroke::NONE;
-        w.active.fg_stroke = Stroke::new(1.0, m.on_surface);
+        w.active.fg_stroke = Stroke::new(1.0_f32, m.on_surface);
         w.active.corner_radius = CornerRadius::same(20);
         w.active.expansion = 0.0;
 
         w.open.bg_fill = m.surface_container_highest;
         w.open.weak_bg_fill = m.surface_container_highest;
-        w.open.bg_stroke = Stroke::new(1.0, m.outline_variant);
-        w.open.fg_stroke = Stroke::new(1.0, m.on_surface);
+        w.open.bg_stroke = Stroke::new(1.0_f32, m.outline_variant);
+        w.open.fg_stroke = Stroke::new(1.0_f32, m.on_surface);
         w.open.corner_radius = CornerRadius::same(12);
         w.open.expansion = 0.0;
     }
