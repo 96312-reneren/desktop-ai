@@ -35,73 +35,97 @@ impl DesktopAI {
         ui.separator();
         ui.add_space(4.0);
 
-        for model in &self.config.model_catalog.clone() {
-            let downloaded = config::models_dir().join(&model.filename).exists();
-            let is_downloading = self.downloads.contains_key(&model.id);
-            let is_selected = self.config.selected_model_id.as_deref() == Some(&model.id);
-            let is_loaded = self.loaded_model_name.as_deref() == Some(&model.name);
-            ui.group(|ui| {
-                ui.horizontal(|ui| {
-                    let name = if is_loaded {
-                        format!("{}  ✓ 使用中", model.name)
-                    } else if is_selected {
-                        format!("{}  (已选择)", model.name)
-                    } else {
-                        model.name.clone()
-                    };
-                    ui.label(RichText::new(&name).size(14.0).strong());
-                    for tag in &model.tags {
-                        ui.label(
-                            RichText::new(tag)
-                                .size(10.0)
-                                .background_color(Color32::from_rgb(31, 106, 165))
-                                .color(Color32::WHITE),
-                        );
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if is_downloading {
-                            if let Some(ds) = self.downloads.get(&model.id) {
-                                ui.label(&ds.status);
-                                ui.add(egui::ProgressBar::new(ds.progress).desired_width(100.0));
-                                if ui.button("取消").clicked() {
-                                    self.cancel_download(&model.id);
-                                }
+        // Scrollable model list: the window size is fixed, so long catalogs
+        // scroll instead of pushing the close button off-screen.
+        let list_h = (ui.available_height() - 44.0).max(120.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false; 2])
+            .max_height(list_h)
+            .show(ui, |ui| {
+                for model in &self.config.model_catalog.clone() {
+                    let downloaded = config::models_dir().join(&model.filename).exists();
+                    let is_downloading = self.downloads.contains_key(&model.id);
+                    let is_selected = self.config.selected_model_id.as_deref() == Some(&model.id);
+                    let is_loaded = self.loaded_model_name.as_deref() == Some(&model.name);
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            let name = if is_loaded {
+                                format!("{}  ✓ 使用中", model.name)
+                            } else if is_selected {
+                                format!("{}  (已选择)", model.name)
+                            } else {
+                                model.name.clone()
+                            };
+                            ui.label(RichText::new(&name).size(14.0).strong());
+                            for tag in &model.tags {
+                                ui.label(
+                                    RichText::new(tag)
+                                        .size(10.0)
+                                        .background_color(Color32::from_rgb(31, 106, 165))
+                                        .color(Color32::WHITE),
+                                );
                             }
-                        } else if downloaded {
-                            ui.label(
-                                RichText::new("✓ 已下载").color(Color32::from_rgb(76, 175, 80)),
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if is_downloading {
+                                        if let Some(ds) = self.downloads.get(&model.id) {
+                                            ui.label(&ds.status);
+                                            ui.add(
+                                                egui::ProgressBar::new(ds.progress)
+                                                    .desired_width(100.0),
+                                            );
+                                            if ui.button("取消").clicked() {
+                                                self.cancel_download(&model.id);
+                                            }
+                                        }
+                                    } else if downloaded {
+                                        ui.label(
+                                            RichText::new("✓ 已下载")
+                                                .color(Color32::from_rgb(76, 175, 80)),
+                                        );
+                                        let btn_text =
+                                            if is_loaded { "重新加载" } else { "使用" };
+                                        if ui.button(btn_text).clicked() {
+                                            self.config.selected_model_id = Some(model.id.clone());
+                                            config::save_config(&self.config);
+                                            self.load_selected_model();
+                                            self.show_model_select = false;
+                                        }
+                                    } else if ui.button("下载").clicked() {
+                                        self.start_download(&model.id);
+                                    }
+                                },
                             );
-                            let btn_text = if is_loaded { "重新加载" } else { "使用" };
-                            if ui.button(btn_text).clicked() {
-                                self.config.selected_model_id = Some(model.id.clone());
-                                config::save_config(&self.config);
-                                self.load_selected_model();
-                                self.show_model_select = false;
-                            }
-                        } else if ui.button("下载").clicked() {
-                            self.start_download(&model.id);
+                        });
+                        ui.label(RichText::new(&model.desc).size(11.0).color(Color32::GRAY));
+                        ui.label(
+                            RichText::new(format!("约 {:.2} GB", model.size_gb))
+                                .size(11.0)
+                                .color(Color32::from_rgb(76, 175, 80)),
+                        );
+
+                        let ram_gb = get_total_ram_gb();
+                        let rec_ram = model.size_gb * 3.0 + 1.0;
+                        if ram_gb > 0.0 && ram_gb < rec_ram {
+                            ui.label(
+                                RichText::new(format!(
+                                    "⚠ 推荐 {:.0} GB 内存，你的设备可能不足",
+                                    rec_ram
+                                ))
+                                .size(10.0)
+                                .color(Color32::from_rgb(255, 165, 0)),
+                            );
                         }
                     });
-                });
-                ui.label(RichText::new(&model.desc).size(11.0).color(Color32::GRAY));
-                ui.label(
-                    RichText::new(format!("约 {:.2} GB", model.size_gb))
-                        .size(11.0)
-                        .color(Color32::from_rgb(76, 175, 80)),
-                );
-
-                let ram_gb = get_total_ram_gb();
-                let rec_ram = model.size_gb * 3.0 + 1.0;
-                if ram_gb > 0.0 && ram_gb < rec_ram {
-                    ui.label(
-                        RichText::new(format!("⚠ 推荐 {:.0} GB 内存，你的设备可能不足", rec_ram))
-                            .size(10.0)
-                            .color(Color32::from_rgb(255, 165, 0)),
-                    );
                 }
             });
-        }
-        if ui.button("关闭").clicked() {
+
+        ui.add_space(6.0);
+        if ui
+            .add_sized([ui.available_width(), 32.0], egui::Button::new("关闭"))
+            .clicked()
+        {
             self.show_model_select = false;
         }
     }

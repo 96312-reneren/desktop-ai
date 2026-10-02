@@ -1596,50 +1596,72 @@ impl eframe::App for DesktopAI {
 
         // ─── Model select window ───────────────────
         if self.show_model_select {
+            // Fixed size relative to the main window (clamped): the model
+            // list scrolls inside, so the window never grows off-screen.
+            let w = (ctx.screen_rect().width() * 0.55).clamp(460.0, 720.0);
+            let h = (ctx.screen_rect().height() * 0.75).clamp(420.0, 760.0);
+            let mut open = self.show_model_select;
             egui::Window::new("选择模型")
+                .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
+                .fixed_size([w, h])
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     self.render_model_select(ui);
                 });
+            self.show_model_select &= open;
         }
 
         // ─── Search panel ──────────────────────────
         if self.show_search_panel {
+            let w = (ctx.screen_rect().width() * 0.32).clamp(320.0, 460.0);
+            let h = (ctx.screen_rect().height() * 0.72).clamp(380.0, 720.0);
+            let mut open = self.show_search_panel;
             egui::Window::new("搜索")
+                .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
-                .anchor(egui::Align2::RIGHT_TOP, [0.0, 30.0])
-                .default_width(350.0)
-                .max_width(450.0)
+                .fixed_size([w, h])
+                .anchor(egui::Align2::RIGHT_TOP, [-12.0, 36.0])
                 .show(ctx, |ui| {
                     self.render_search_panel(ui);
                 });
+            self.show_search_panel &= open;
         }
 
         // ─── Knowledge Base panel ────────────────────
         if self.show_kb_panel {
+            let w = (ctx.screen_rect().width() * 0.34).clamp(340.0, 500.0);
+            let h = (ctx.screen_rect().height() * 0.78).clamp(420.0, 780.0);
+            let mut open = self.show_kb_panel;
             egui::Window::new("知识库")
+                .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
-                .anchor(egui::Align2::RIGHT_TOP, [0.0, 30.0])
-                .default_width(420.0)
-                .max_width(500.0)
+                .fixed_size([w, h])
+                .anchor(egui::Align2::RIGHT_TOP, [-12.0, 36.0])
                 .show(ctx, |ui| {
                     self.render_kb_panel(ui);
                 });
+            self.show_kb_panel &= open;
         }
 
         // ─── Settings ─────────────────────────────
         if self.show_settings {
+            let w = (ctx.screen_rect().width() * 0.45).clamp(420.0, 640.0);
+            let h = (ctx.screen_rect().height() * 0.75).clamp(420.0, 780.0);
+            let mut open = self.show_settings;
             egui::Window::new("设置")
+                .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
+                .fixed_size([w, h])
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     self.render_settings(ctx, ui);
                 });
+            self.show_settings &= open;
         }
 
         // ─── Confirm dialog ───────────────────────
