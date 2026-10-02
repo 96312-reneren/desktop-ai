@@ -90,21 +90,27 @@ impl ApiServer {
                         if let Err(e) = stream.set_nonblocking(false) {
                             log::warn!("API set_nonblocking(false) failed: {}", e);
                         }
-                        // Atomic fetch_update avoids TOCTOU: two threads that
-                        // both see `cur=15` would otherwise both pass the
-                        // `cur >= MAX` check and double-increment.
-                        let result = active_conns.fetch_update(
-                            Ordering::Relaxed,
-                            Ordering::Relaxed,
-                            |cur| {
-                                if cur >= MAX_CONCURRENT_CONNS {
-                                    None
-                                } else {
-                                    Some(cur + 1)
-                                }
-                            },
-                        );
-                        if result.is_err() {
+                        // CAS loop avoids TOCTOU: two threads that both see
+                        // `cur=15` would otherwise both pass the `cur >= MAX`
+                        // check and double-increment. (compare_exchange is
+                        // used instead of fetch_update/try_update so the code
+                        // builds on both older and newer toolchains.)
+                        let mut cur = active_conns.load(Ordering::Relaxed);
+                        let admitted = loop {
+                            if cur >= MAX_CONCURRENT_CONNS {
+                                break false;
+                            }
+                            match active_conns.compare_exchange_weak(
+                                cur,
+                                cur + 1,
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                            ) {
+                                Ok(_) => break true,
+                                Err(actual) => cur = actual,
+                            }
+                        };
+                        if !admitted {
                             let mut s = stream;
                             let _ = s.write_all(
                                 b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
