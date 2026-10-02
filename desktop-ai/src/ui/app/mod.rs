@@ -3,6 +3,7 @@ mod kb_panel;
 mod model_select;
 mod settings;
 mod sidebar;
+pub(crate) mod theme;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,13 +24,7 @@ use eframe::egui;
 use egui::{Color32, RichText};
 
 pub(crate) fn apply_theme(ctx: &egui::Context, theme: &str) {
-    let mut visuals = if theme == "dark" {
-        egui::Visuals::dark()
-    } else {
-        egui::Visuals::light()
-    };
-    visuals.override_text_color = None;
-    ctx.set_visuals(visuals);
+    theme::apply(ctx, theme == "dark");
 }
 
 // ─── Download state ────────────────────────────────────
@@ -1491,9 +1486,7 @@ impl eframe::App for DesktopAI {
         // Apply saved theme only once on startup
         if !self.theme_applied {
             self.theme_applied = true;
-            if self.config.theme == "light" {
-                ctx.set_visuals(egui::Visuals::light());
-            }
+            apply_theme(ctx, &self.config.theme);
         }
 
         // ─── Top bar ───────────────────────────────
