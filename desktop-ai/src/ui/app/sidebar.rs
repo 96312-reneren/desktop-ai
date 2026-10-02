@@ -1,36 +1,43 @@
-// DesktopAI sub-module: sidebar
-use super::DesktopAI;
-use egui::{vec2, Color32, RichText, ScrollArea, TextEdit};
+// DesktopAI sub-module: sidebar (Material Design 3 styling)
+use super::{theme, DesktopAI};
+use egui::{vec2, RichText, ScrollArea, TextEdit};
 
 impl DesktopAI {
     pub(crate) fn render_sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.heading("桌面AI");
+        let m = theme::palette(self.config.theme != "light");
+
+        ui.label(RichText::new("桌面AI").size(20.0).color(m.primary));
         ui.label(
             RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                 .size(10.0)
-                .color(Color32::GRAY),
+                .color(m.on_surface_variant),
         );
         ui.add_space(8.0);
 
-        if ui.button("+ 新对话").clicked() {
+        // M3 filled tonal "new chat" button.
+        if ui
+            .add_sized(
+                vec2(ui.available_width(), 36.0),
+                theme::tonal_button(RichText::new("+  新对话").size(14.0), m),
+            )
+            .clicked()
+        {
             self.new_conversation();
         }
+
+        ui.add_space(6.0);
 
         // ── Current model indicator ──
         match &self.loaded_model_name {
             Some(name) => {
                 ui.label(
-                    RichText::new(format!("🟢 {}", name))
+                    RichText::new(format!("● {}", name))
                         .size(11.0)
-                        .color(Color32::from_rgb(76, 175, 80)),
+                        .color(m.success),
                 );
             }
             None => {
-                ui.label(
-                    RichText::new("🔴 未加载模型")
-                        .size(11.0)
-                        .color(Color32::from_rgb(230, 90, 80)),
-                );
+                ui.label(RichText::new("● 未加载模型").size(11.0).color(m.error));
             }
         }
         if ui.small_button("选择 / 重新加载模型").clicked() {
@@ -39,9 +46,13 @@ impl DesktopAI {
 
         ui.add_space(4.0);
         ui.separator();
-        ui.label(RichText::new("对话历史").size(11.0).color(Color32::GRAY));
+        ui.label(
+            RichText::new("对话历史")
+                .size(11.0)
+                .color(m.on_surface_variant),
+        );
         ui.add_sized(
-            vec2(ui.available_width(), 20.0),
+            vec2(ui.available_width(), 24.0),
             TextEdit::singleline(&mut self.conv_filter).hint_text("搜索对话... Ctrl+F"),
         );
         ui.add_space(2.0);
@@ -60,10 +71,13 @@ impl DesktopAI {
                     continue;
                 }
                 ui.horizontal(|ui| {
-                    let title = if conv.title.len() > 18 {
-                        format!("{}...", &conv.title[..18])
+                    // Char-boundary safe truncation (was a byte slice: a
+                    // Chinese title could panic).
+                    let title: String = conv.title.chars().take(18).collect();
+                    let title = if conv.title.chars().count() > 18 {
+                        format!("{}...", title)
                     } else {
-                        conv.title.clone()
+                        title
                     };
                     let active = conv.id == self.current_conv.id;
                     if ui.selectable_label(active, &title).clicked() {
@@ -78,7 +92,7 @@ impl DesktopAI {
                 ui.label(
                     RichText::new(format!("{} 条消息", conv.message_count))
                         .size(10.0)
-                        .color(Color32::GRAY),
+                        .color(m.on_surface_variant),
                 );
             }
         });
@@ -93,7 +107,7 @@ impl DesktopAI {
         }
         ui.add_space(4.0);
         ui.separator();
-        ui.label(RichText::new("对话").size(11.0).color(Color32::GRAY));
+        ui.label(RichText::new("对话").size(11.0).color(m.on_surface_variant));
         if ui.button("导出当前对话").clicked() {
             self.export_current_conversation();
         }

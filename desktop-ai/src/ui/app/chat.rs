@@ -1,11 +1,12 @@
-// DesktopAI sub-module: chat area + input bar
-use super::DesktopAI;
+// DesktopAI sub-module: chat area + input bar (Material Design 3 styling)
+use super::{theme, DesktopAI};
 use crate::config;
 use crate::markdown;
-use egui::{vec2, Color32, Label, RichText, ScrollArea, TextEdit};
+use egui::{vec2, Color32, CornerRadius, Label, Margin, RichText, ScrollArea, Stroke, TextEdit};
 
 impl DesktopAI {
     pub(crate) fn render_chat_area(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let m = theme::palette(self.config.theme != "light");
         ScrollArea::vertical()
             .stick_to_bottom(true)
             .auto_shrink([false; 2])
@@ -16,61 +17,39 @@ impl DesktopAI {
                     let is_user = msg.role == "user";
                     if is_user {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                            egui::Frame::default()
-                                .fill(Color32::from_rgb(13, 110, 253))
-                                .corner_radius(12)
-                                .inner_margin(egui::Margin::symmetric(10, 6))
-                                .show(ui, |ui| {
-                                    ui.add(
-                                        Label::new(
-                                            RichText::new(&msg.content)
-                                                .size(font_size)
-                                                .color(Color32::WHITE),
-                                        )
-                                        .selectable(true),
-                                    );
-                                });
+                            theme::user_bubble(m).show(ui, |ui| {
+                                ui.add(
+                                    Label::new(
+                                        RichText::new(&msg.content)
+                                            .size(font_size)
+                                            .color(m.on_primary),
+                                    )
+                                    .selectable(true),
+                                );
+                            });
                         });
                     } else {
-                        let bg = if self.config.theme == "dark" {
-                            Color32::from_rgb(45, 45, 45)
-                        } else {
-                            Color32::from_rgb(232, 232, 232)
-                        };
-                        egui::Frame::default()
-                            .fill(bg)
-                            .corner_radius(12)
-                            .inner_margin(egui::Margin::symmetric(10, 6))
-                            .show(ui, |ui| {
-                                markdown::render_markdown(ui, &msg.content, font_size);
-                            });
+                        theme::bot_bubble(m).show(ui, |ui| {
+                            markdown::render_markdown(ui, &msg.content, font_size);
+                        });
                     }
                     ui.add_space(4.0);
                 }
 
                 if let Some(ref gen) = self.gen {
                     if gen.conv_id == self.current_conv.id && !gen.pending_text.is_empty() {
-                        let bg = if self.config.theme == "dark" {
-                            Color32::from_rgb(45, 45, 45)
-                        } else {
-                            Color32::from_rgb(232, 232, 232)
-                        };
-                        egui::Frame::default()
-                            .fill(bg)
-                            .corner_radius(12)
-                            .inner_margin(egui::Margin::symmetric(10, 6))
-                            .show(ui, |ui| {
-                                ui.add(
-                                    Label::new(RichText::new(&gen.pending_text).size(font_size))
-                                        .selectable(true),
-                                );
-                                let blink = ctx.input(|i| i.time) as u64 % 1000 < 500;
-                                ui.label(RichText::new(" ▌").color(if blink {
-                                    Color32::WHITE
-                                } else {
-                                    Color32::TRANSPARENT
-                                }));
-                            });
+                        theme::bot_bubble(m).show(ui, |ui| {
+                            ui.add(
+                                Label::new(RichText::new(&gen.pending_text).size(font_size))
+                                    .selectable(true),
+                            );
+                            let blink = ctx.input(|i| i.time) as u64 % 1000 < 500;
+                            ui.label(RichText::new(" ▌").color(if blink {
+                                m.on_surface
+                            } else {
+                                Color32::TRANSPARENT
+                            }));
+                        });
                     }
                 }
 
@@ -81,7 +60,7 @@ impl DesktopAI {
                             ui.label(
                                 RichText::new("⏳ 另一个对话正在生成回复...")
                                     .size(13.0)
-                                    .color(Color32::GRAY),
+                                    .color(m.on_surface_variant),
                             );
                         });
                     }
@@ -90,13 +69,18 @@ impl DesktopAI {
                 if self.current_conv.messages.is_empty() && !self.is_generating() {
                     ui.vertical_centered(|ui| {
                         ui.add_space(80.0);
-                        ui.label(RichText::new("欢迎使用 桌面AI").size(18.0).strong());
-                        ui.add_space(8.0);
-                        ui.label("选择模型后即可开始本地 AI 对话");
+                        ui.label(RichText::new("✦ 桌面AI").size(26.0).color(m.primary));
+                        ui.add_space(10.0);
                         ui.label(
-                            RichText::new("支持同时下载多个模型")
+                            RichText::new("本地大模型推理 · 数据不出本机")
+                                .size(14.0)
+                                .color(m.on_surface_variant),
+                        );
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("选择模型后即可开始对话")
                                 .size(12.0)
-                                .color(Color32::GRAY),
+                                .color(m.outline),
                         );
                     });
                 }
@@ -104,6 +88,7 @@ impl DesktopAI {
     }
 
     pub(crate) fn render_input_bar(&mut self, ui: &mut egui::Ui) {
+        let m = theme::palette(self.config.theme != "light");
         let can_send = !self.is_generating() && self.inference.is_some();
         let is_gen = self.is_generating();
         let input_empty = self.input_text.trim().is_empty();
@@ -117,20 +102,42 @@ impl DesktopAI {
                 "请先加载模型"
             };
             let before = self.input_text.chars().count();
-            ui.add_sized(
-                vec2(ui.available_width() - 80.0, 50.0),
-                TextEdit::multiline(&mut self.input_text)
-                    .hint_text(hint)
-                    .char_limit(config::MAX_INPUT_GRAPHEMES)
-                    .desired_rows(2),
-            );
+
+            // M3 outlined text field: rounded container that highlights on focus.
+            let focused = ui.memory(|mem| mem.has_focus(egui::Id::new("chat_input")));
+            let stroke = if focused {
+                Stroke::new(1.5, m.primary)
+            } else {
+                Stroke::new(1.0, m.outline_variant)
+            };
+            let btn_w = 76.0;
+            egui::Frame::new()
+                .fill(m.surface_container_lowest)
+                .stroke(stroke)
+                .corner_radius(CornerRadius::same(24))
+                .inner_margin(Margin {
+                    left: 16,
+                    right: 8,
+                    top: 4,
+                    bottom: 4,
+                })
+                .show(ui, |ui| {
+                    ui.add_sized(
+                        vec2(ui.available_width() - btn_w - 12.0, 44.0),
+                        TextEdit::multiline(&mut self.input_text)
+                            .id(egui::Id::new("chat_input"))
+                            .hint_text(hint)
+                            .char_limit(config::MAX_INPUT_GRAPHEMES)
+                            .desired_rows(1)
+                            .frame(false),
+                    );
+                });
 
             if is_gen {
                 if ui
                     .add_sized(
-                        vec2(70.0, 50.0),
-                        egui::Button::new(RichText::new("停止").size(14.0).color(Color32::WHITE))
-                            .fill(Color32::from_rgb(192, 57, 43)),
+                        vec2(btn_w, 44.0),
+                        theme::error_button(RichText::new("■ 停止").size(14.0), m),
                     )
                     .clicked()
                 {
@@ -138,8 +145,8 @@ impl DesktopAI {
                 }
             } else if can_send && !input_empty {
                 let btn = ui.add_sized(
-                    vec2(70.0, 50.0),
-                    egui::Button::new(RichText::new("发送").size(14.0)),
+                    vec2(btn_w, 44.0),
+                    theme::primary_button(RichText::new("➤ 发送").size(14.0), m),
                 );
                 let ctrl_enter = ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl);
                 if btn.clicked() || ctrl_enter {
@@ -150,10 +157,11 @@ impl DesktopAI {
                     }
                 }
             } else {
-                // Visually disabled send button
                 let _ = ui.add_enabled(
                     false,
-                    egui::Button::new(RichText::new("发送").size(14.0)).min_size(vec2(70.0, 50.0)),
+                    egui::Button::new(RichText::new("➤ 发送").size(14.0))
+                        .min_size(vec2(btn_w, 44.0))
+                        .corner_radius(CornerRadius::same(22)),
                 );
             }
 
@@ -173,7 +181,7 @@ impl DesktopAI {
             ui.label(
                 RichText::new(format!("已自动截断至 {} 字符", config::MAX_INPUT_GRAPHEMES,))
                     .size(10.0)
-                    .color(Color32::from_rgb(76, 175, 80)),
+                    .color(m.success),
             );
         }
     }
