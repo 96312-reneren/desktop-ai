@@ -281,7 +281,11 @@ fn pin_host(
     Ok(builder)
 }
 
-fn fetch_url(url: &str, cfg: &CrawlConfig) -> Result<(String, String), String> {
+fn fetch_url(
+    url: &str,
+    cfg: &CrawlConfig,
+    robots: Option<&super::robots::RobotsCache>,
+) -> Result<(String, String), String> {
     if is_stopped(cfg) {
         return Err("已取消".into());
     }
@@ -306,7 +310,7 @@ fn fetch_url(url: &str, cfg: &CrawlConfig) -> Result<(String, String), String> {
         // (single resolution, validated, then pinned — rebinding-proof).
         let builder = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(cfg.timeout_secs))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopAI/5.7")
+            .user_agent(super::robots::USER_AGENT)
             // P0-5: disable auto-redirect so we can re-validate each hop.
             .redirect(reqwest::redirect::Policy::none())
             // Explicit TLS verification (default, but stated for consistency
@@ -316,6 +320,13 @@ fn fetch_url(url: &str, cfg: &CrawlConfig) -> Result<(String, String), String> {
         let client = pin_host(builder, &current_url)?
             .build()
             .map_err(|e| format!("连接失败: {}", e))?;
+
+        // robots.txt: honor the origin's rules for every hop (the redirect
+        // target may live on a different host). The client is already
+        // DNS-pinned, so the robots fetch itself is SSRF-safe.
+        if let Some(rc) = robots {
+            rc.check(&client, &current_url)?;
+        }
 
         // Exponential backoff on 429 / 503.
         let mut attempt = 0u32;
@@ -494,10 +505,15 @@ pub(crate) fn resolve_url(link: &str, base: &str) -> String {
 
 pub(crate) fn crawl_url(src: &str) -> Result<CrawledPage, String> {
     let cfg = CrawlConfig::default();
-    crawl_single(src, &cfg).map(|(page, _)| page)
+    let robots = super::robots::RobotsCache::new();
+    crawl_single(src, &cfg, Some(&robots)).map(|(page, _)| page)
 }
 
-fn crawl_single(src: &str, cfg: &CrawlConfig) -> Result<(CrawledPage, String), String> {
+fn crawl_single(
+    src: &str,
+    cfg: &CrawlConfig,
+    robots: Option<&super::robots::RobotsCache>,
+) -> Result<(CrawledPage, String), String> {
     if is_stopped(cfg) {
         return Err("已取消".into());
     }
@@ -511,7 +527,7 @@ fn crawl_single(src: &str, cfg: &CrawlConfig) -> Result<(CrawledPage, String), S
     let (format, raw) = if is_file(src) {
         read_local_file(src)?
     } else if is_url(src) {
-        let (ct, raw) = fetch_url(src, cfg)?;
+        let (ct, raw) = fetch_url(src, cfg, robots)?;
         let format = if is_html_content(&ct) {
             "html".to_string()
         } else {
@@ -570,6 +586,8 @@ pub(crate) fn crawl_with_depth(
     let mut results = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
     let mut to_visit: Vec<(String, u32)> = vec![(start_url.to_string(), 0)];
+    // One robots.txt cache per crawl session (per-origin memoization).
+    let robots = super::robots::RobotsCache::new();
 
     while let Some((url, depth)) = to_visit.pop() {
         if is_stopped(&config) {
@@ -585,7 +603,7 @@ pub(crate) fn crawl_with_depth(
 
         let is_html = is_url(&url);
 
-        match crawl_single(&url, &config) {
+        match crawl_single(&url, &config, Some(&robots)) {
             Ok((page, raw)) => {
                 let new_depth = depth + 1;
                 // Extract and queue links from HTML pages. Reuse the `raw`
