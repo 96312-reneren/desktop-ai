@@ -2,8 +2,8 @@ use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
-use crate::config::conversations_dir;
-use crate::db::Db;
+use crate::store::config::conversations_dir;
+use crate::store::db::Db;
 
 fn sanitize_id(id: &str) -> bool {
     id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -41,10 +41,10 @@ pub struct Conversation {
 }
 
 /// Process-wide SQLite conversation store. One connection, guarded by a
-/// mutex, shared by all conversation operations (see [`crate::db`]).
+/// mutex, shared by all conversation operations (see [`crate::store::db`]).
 static CONV_DB: once_cell::sync::Lazy<Option<Db>> = once_cell::sync::Lazy::new(|| {
     let path = conversations_dir().join("conversations.db");
-    let db = match crate::db::open(&path) {
+    let db = match crate::store::db::open(&path) {
         Ok(db) => db,
         Err(e) => {
             log::error!("failed to open conversations.db: {}", e);

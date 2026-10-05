@@ -5,8 +5,8 @@
 //! `main.rs` 只是平台入口壳。
 
 use super::app;
-use crate::config;
-use crate::ffi;
+use crate::llm::ffi;
+use crate::store::config;
 
 fn font_candidates() -> &'static [&'static str] {
     #[cfg(target_os = "windows")]

@@ -109,7 +109,7 @@ impl Default for Config {
             last_conversation_id: None,
             selected_model_id: None,
             system_prompt: "You are a helpful assistant.".into(),
-            model_catalog: crate::model_catalog::default_catalog(),
+            model_catalog: crate::llm::model_catalog::default_catalog(),
             api_enabled: false,
             api_port: 11434,
             search_enabled: false,
@@ -311,14 +311,14 @@ pub fn load_config() -> Config {
             Ok(data) => match serde_json::from_str::<Config>(&data) {
                 Ok(mut config) => {
                     if config.model_catalog.is_empty() {
-                        config.model_catalog = crate::model_catalog::default_catalog();
+                        config.model_catalog = crate::llm::model_catalog::default_catalog();
                     } else {
                         // Backfill `parts` for known catalog ids from older
                         // config files (e.g. the 7B split-file entry) so
                         // existing users automatically get the fixed URLs.
                         // Only ids matched against the default catalog are
                         // touched; user-customised entries keep their data.
-                        let defaults = crate::model_catalog::default_catalog();
+                        let defaults = crate::llm::model_catalog::default_catalog();
                         for info in config.model_catalog.iter_mut() {
                             if info.parts.is_empty() {
                                 if let Some(def) = defaults.iter().find(|d| d.id == info.id) {

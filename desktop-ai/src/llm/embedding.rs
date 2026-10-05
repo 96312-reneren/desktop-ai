@@ -1,4 +1,4 @@
-use crate::ffi;
+use crate::llm::ffi;
 
 pub(crate) struct EmbeddingEngine {
     model: *mut ffi::LlamaModel,

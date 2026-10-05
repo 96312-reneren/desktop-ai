@@ -355,7 +355,7 @@ pub(crate) unsafe fn init() -> Result<(), String> {
             #[cfg(not(target_os = "android"))]
             {
                 use std::io::Write;
-                let baseline = crate::config::data_root().join("llama_library.sha256");
+                let baseline = crate::store::config::data_root().join("llama_library.sha256");
                 if let Ok(hash) = sha256_of_file(&lib_path) {
                     match std::fs::read_to_string(&baseline) {
                         Ok(stored) if stored.trim() == hash => {

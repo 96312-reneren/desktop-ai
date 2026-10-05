@@ -1,10 +1,11 @@
 # Rust build output
 /target
 
-# Build artifacts (except runtime dependency llama.dll)
+# Build artifacts (runtime libraries live in ../vendor/, see vendor/README.md)
 *.lib
 *.exe
 *.pdb
+*.ilk
 
 # Logs and editor files
 *.log

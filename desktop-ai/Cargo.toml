@@ -8,12 +8,10 @@ description = "桌面AI - 本地大模型聊天应用 (RAG知识库)"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-# eframe/egui power the desktop UI. On Android the app uses a WebView UI +
-# JNI service entry instead (see android_service.rs), but eframe stays in the
-# dependency graph so the UI modules compile on the Android target too.
-eframe = { version = "0.31", features = ["android-native-activity"] }
+# egui provides the text-layout types used by ui::markdown on every platform.
+# The desktop shell (eframe/winit) lives below in the non-Android block:
+# Android uses a WebView UI + JNI service entry instead (platform/android.rs).
 egui = "0.31"
-egui_extras = "0.31"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
@@ -35,10 +33,13 @@ tracing-appender = "0.2.5"
 # rfd (native file dialogs) has no Android backend; kept off Android builds.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = "0.15"
+# eframe/winit are the desktop shell; Android uses a WebView UI + JNI and
+# does not need the desktop window stack at all.
+eframe = "0.31"
 
 # Android: JNI for the MainActivity bridge; android-activity is required by
 # the winit/eframe chain and forces the .so to export `android_main`, which
-# System.loadLibrary needs to resolve — see the placeholder in android_service.rs.
+# System.loadLibrary needs to resolve — see the placeholder in platform/android.rs.
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
 jni = "0.21"

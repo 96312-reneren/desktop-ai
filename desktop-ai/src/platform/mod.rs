@@ -2,4 +2,5 @@
 
 #[cfg(target_os = "android")]
 pub mod android;
+pub(crate) mod hardware;
 pub(crate) mod shortcut;

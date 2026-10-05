@@ -11,15 +11,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
-use crate::api_server::ApiServer;
-use crate::config::{self, Config};
-use crate::conversation::Conversation;
-use crate::crawler::extract_pdf_safe;
-use crate::downloader::{self, DownloadMsg};
-use crate::inference::{self, LlamaInference, StreamToken};
-use crate::model_catalog::find_model;
-use crate::sandbox::Sandbox;
-use crate::vector_store::VectorStore;
+use crate::llm::downloader::{self, DownloadMsg};
+use crate::llm::inference::{self, LlamaInference, StreamToken};
+use crate::llm::model_catalog::find_model;
+use crate::platform::hardware::{detect_gpus, detect_hardware, GpuInfo};
+use crate::rag::crawler::extract_pdf_safe;
+use crate::rag::vector_store::VectorStore;
+use crate::server::api_server::ApiServer;
+use crate::server::sandbox::Sandbox;
+use crate::store::config::{self, Config};
+use crate::store::conversation::Conversation;
 use eframe::egui;
 use egui::{Color32, RichText};
 
@@ -91,7 +92,7 @@ enum KbIndexJob {
 enum ModelLoadResult {
     Loaded {
         inference: LlamaInference,
-        embedding: Option<crate::embedding::EmbeddingEngine>,
+        embedding: Option<crate::llm::embedding::EmbeddingEngine>,
         model_name: String,
         gpu_tag: String,
     },
@@ -123,7 +124,7 @@ pub(crate) enum StartupNotice {
 /// to display (or None when everything is fine).
 fn startup_notice(config: &Config) -> Option<StartupNotice> {
     // 1. Runtime dependency (llama library) — fatal.
-    let lib_name = crate::ffi::llama_library_name();
+    let lib_name = crate::llm::ffi::llama_library_name();
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
@@ -141,21 +142,24 @@ fn startup_notice(config: &Config) -> Option<StartupNotice> {
     }
 
     // 2. Crash recovery (after deps so a broken install doesn't also nag).
-    if crate::config::should_show_crash_notice() {
+    if crate::store::config::should_show_crash_notice() {
         return Some(StartupNotice::CrashRecovery);
     }
 
     // 3. Selected model file missing.
     if let Some(id) = &config.selected_model_id {
-        if let Some(info) = crate::model_catalog::find_model(&config.model_catalog, id) {
-            if !crate::config::models_dir().join(&info.filename).exists() {
+        if let Some(info) = crate::llm::model_catalog::find_model(&config.model_catalog, id) {
+            if !crate::store::config::models_dir()
+                .join(&info.filename)
+                .exists()
+            {
                 return Some(StartupNotice::ModelMissing(info.name.clone()));
             }
         }
     }
 
     // 4. GPU configured but the library has no BLAS backend.
-    if config.gpu_layers > 0 && !crate::ffi::gpu_backend_available() {
+    if config.gpu_layers > 0 && !crate::llm::ffi::gpu_backend_available() {
         return Some(StartupNotice::GpuUnavailable);
     }
 
@@ -206,16 +210,17 @@ pub(crate) struct DesktopAI {
     pub(crate) kb_job: Option<KbJobState>,
     // Keyword search (FTS5)
     pub(crate) kb_search_query: String,
-    pub(crate) kb_search_results: Vec<crate::vector_store::SearchHit>,
+    pub(crate) kb_search_results: Vec<crate::rag::vector_store::SearchHit>,
     pub(crate) kb_search_done: bool,
 
     // Search
     pub(crate) show_search_panel: bool,
     pub(crate) search_query: String,
-    pub(crate) search_results: Vec<crate::search::SearchResult>,
+    pub(crate) search_results: Vec<crate::rag::search::SearchResult>,
     pub(crate) search_loading: bool,
     pub(crate) search_error: Option<String>,
-    pub(crate) search_rx: Option<mpsc::Receiver<Result<Vec<crate::search::SearchResult>, String>>>,
+    pub(crate) search_rx:
+        Option<mpsc::Receiver<Result<Vec<crate::rag::search::SearchResult>, String>>>,
     pub(crate) conv_filter: String,
 
     // UI
@@ -226,7 +231,7 @@ pub(crate) struct DesktopAI {
     pub(crate) theme_applied: bool,
     pub(crate) confirm_action: Option<ConfirmAction>,
     /// Conversation list cache (sidebar). Refreshed only when dirty.
-    pub(crate) conv_cache: Vec<crate::conversation::ConversationMeta>,
+    pub(crate) conv_cache: Vec<crate::store::conversation::ConversationMeta>,
     pub(crate) conv_cache_dirty: bool,
     /// Display name of the currently loaded model (None = not loaded).
     pub(crate) loaded_model_name: Option<String>,
@@ -326,14 +331,14 @@ fn run_kb_job(
             });
             let results = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 if depth > 1 {
-                    let config = crate::crawler::CrawlConfig {
+                    let config = crate::rag::crawler::CrawlConfig {
                         max_depth: depth,
                         max_pages: 15,
                         ..Default::default()
                     };
-                    crate::crawler::crawl_with_depth(&url, config)
+                    crate::rag::crawler::crawl_with_depth(&url, config)
                 } else {
-                    vec![crate::crawler::crawl_url(&url)]
+                    vec![crate::rag::crawler::crawl_url(&url)]
                 }
             }))
             .unwrap_or_else(|_| {
@@ -401,7 +406,7 @@ fn index_content(
 ) -> Result<(usize, usize), String> {
     let char_count = content.chars().count();
     if char_count > config::KB_SINGLE_DOC_CHARS {
-        let chunks = crate::chunker::chunk_text(content, chunk_size, overlap);
+        let chunks = crate::rag::chunker::chunk_text(content, chunk_size, overlap);
         let total = chunks.len();
         let mut added = 0usize;
         for (i, chunk) in chunks.iter().enumerate() {
@@ -459,100 +464,6 @@ fn finish_kb_job(
     }
 }
 
-fn detect_hardware() -> (usize, Option<String>) {
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(2);
-
-    let ram_gb = get_total_ram_gb();
-    let warning = if ram_gb > 0.0 && ram_gb < 4.0 {
-        Some(format!(
-            "⚠ 检测到内存仅 {:.1} GB，建议只使用 0.5B 或 1.7B 模型。大模型会严重卡顿或无法加载。",
-            ram_gb
-        ))
-    } else if ram_gb > 0.0 && ram_gb < 8.0 {
-        Some(format!(
-            "ℹ 检测到内存 {:.1} GB，可使用 3B 以下的模型。7B+ 模型需要 8GB 以上内存。",
-            ram_gb
-        ))
-    } else {
-        None
-    };
-    (cores, warning)
-}
-
-#[cfg(windows)]
-fn get_total_ram_gb() -> f64 {
-    use std::mem;
-    unsafe {
-        let mut mem_status: windows_sys::Win32::System::SystemInformation::MEMORYSTATUSEX =
-            mem::zeroed();
-        mem_status.dwLength =
-            mem::size_of::<windows_sys::Win32::System::SystemInformation::MEMORYSTATUSEX>() as u32;
-        if windows_sys::Win32::System::SystemInformation::GlobalMemoryStatusEx(&mut mem_status) != 0
-        {
-            mem_status.ullTotalPhys as f64 / (1024.0 * 1024.0 * 1024.0)
-        } else {
-            0.0
-        }
-    }
-}
-
-#[cfg(not(windows))]
-fn get_total_ram_gb() -> f64 {
-    0.0
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct GpuInfo {
-    pub name: String,
-    pub vram_gb: f64,
-}
-
-#[cfg(windows)]
-fn detect_gpus() -> Vec<GpuInfo> {
-    let output = std::process::Command::new("wmic")
-        .args([
-            "path",
-            "Win32_VideoController",
-            "get",
-            "Name,AdapterRAM",
-            "/format:csv",
-        ])
-        .output();
-    match output {
-        Ok(out) => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            let mut gpus = Vec::new();
-            for line in text.lines().skip(2) {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                let parts: Vec<&str> = line.split(',').collect();
-                if parts.len() >= 3 {
-                    let name = parts[1].trim().to_string();
-                    let ram_bytes: u64 = parts[2].trim().parse().unwrap_or(0);
-                    let vram = ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-                    if vram > 0.0 && !name.is_empty() && !name.contains("Microsoft Basic") {
-                        gpus.push(GpuInfo {
-                            name,
-                            vram_gb: vram,
-                        });
-                    }
-                }
-            }
-            gpus
-        }
-        Err(_) => Vec::new(),
-    }
-}
-
-#[cfg(not(windows))]
-fn detect_gpus() -> Vec<GpuInfo> {
-    Vec::new()
-}
-
 #[allow(clippy::new_without_default)]
 impl DesktopAI {
     pub(crate) fn new() -> Self {
@@ -570,7 +481,8 @@ impl DesktopAI {
         let startup_notice = startup_notice(&config);
         // First-run desktop shortcut prompt (only when one doesn't exist yet
         // and the user hasn't answered before).
-        let show_shortcut_prompt = !config.shortcut_prompted && !crate::shortcut::shortcut_exists();
+        let show_shortcut_prompt =
+            !config.shortcut_prompted && !crate::platform::shortcut::shortcut_exists();
 
         let mut app = Self {
             config,
@@ -678,7 +590,9 @@ impl DesktopAI {
                         String::new()
                     };
                     let embedding = if kb_enabled {
-                        match crate::embedding::EmbeddingEngine::load(&path_str, 2048, n_threads) {
+                        match crate::llm::embedding::EmbeddingEngine::load(
+                            &path_str, 2048, n_threads,
+                        ) {
                             Ok(e) => Some(e),
                             Err(e) => {
                                 log::warn!("embedding engine failed: {}", e);
@@ -1103,7 +1017,7 @@ impl DesktopAI {
         let handle = thread::spawn(move || {
             let kb_context = if let Some(ref qv) = query_vec {
                 if !kb_data.is_empty() {
-                    let results = crate::vector_store::search_by_vector(&kb_data, qv, 3);
+                    let results = crate::rag::vector_store::search_by_vector(&kb_data, qv, 3);
                     if !results.is_empty() {
                         let mut ctx = String::new();
                         for (i, hit) in results.iter().enumerate() {
@@ -1127,7 +1041,7 @@ impl DesktopAI {
             };
 
             let search_context = if do_search {
-                if let Ok(results) = crate::search::search_duckduckgo(&user_query) {
+                if let Ok(results) = crate::rag::search::search_duckduckgo(&user_query) {
                     if !results.is_empty() {
                         let mut ctx = String::new();
                         for (i, r) in results.iter().take(5).enumerate() {
@@ -1269,7 +1183,7 @@ impl DesktopAI {
         #[cfg(target_os = "android")]
         let path = {
             // Android: no native save dialog — write to the app data dir.
-            crate::config::data_root().join(&default_name)
+            crate::store::config::data_root().join(&default_name)
         };
         match self.current_conv.export_json() {
             Ok(json) => {
@@ -1384,7 +1298,7 @@ impl DesktopAI {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_default();
-        let lib_path = exe_dir.join(crate::ffi::llama_library_name());
+        let lib_path = exe_dir.join(crate::llm::ffi::llama_library_name());
 
         #[cfg(windows)]
         {
@@ -1433,7 +1347,7 @@ impl DesktopAI {
         let (tx, rx) = mpsc::channel();
         self.search_rx = Some(rx);
         thread::spawn(move || {
-            let _ = tx.send(crate::search::search_duckduckgo(&query));
+            let _ = tx.send(crate::rag::search::search_duckduckgo(&query));
         });
     }
 
@@ -1665,64 +1579,7 @@ impl eframe::App for DesktopAI {
         }
 
         // ─── Confirm dialog ───────────────────────
-        if let Some(ref action) = self.confirm_action.clone() {
-            let (title, msg, is_danger) = match action {
-                ConfirmAction::DeleteAllModels => ("删除所有模型", "确定要删除所有已下载的模型文件吗？此操作不可恢复。", false),
-                ConfirmAction::DeleteAllConversations => ("删除所有对话", "确定要删除所有对话记录吗？此操作不可恢复。", false),
-                ConfirmAction::ResetApp => ("⚠ 重置应用", "确定要删除所有数据（模型、对话、配置）？\n应用将恢复到初始状态，所有数据将永久丢失。", true),
-                ConfirmAction::UninstallApp => ("⚠ 卸载应用", "确定要完全卸载桌面AI吗？\n\n将删除：\n• 所有已下载模型\n• 所有对话记录\n• 应用配置文件\n• 程序文件（exe + dll）\n\n此操作不可恢复！", true),
-            };
-            egui::Window::new(title)
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    if is_danger {
-                        ui.label(RichText::new(msg).color(Color32::from_rgb(255, 80, 80)));
-                    } else {
-                        ui.label(msg);
-                    }
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if is_danger {
-                            let (btn_text, action_copy) = match action {
-                                ConfirmAction::ResetApp => ("确定重置", ConfirmAction::ResetApp),
-                                ConfirmAction::UninstallApp => {
-                                    ("确定卸载", ConfirmAction::UninstallApp)
-                                }
-                                _ => ("确定删除", ConfirmAction::ResetApp),
-                            };
-                            let confirm_btn =
-                                egui::Button::new(RichText::new(btn_text).color(Color32::WHITE))
-                                    .fill(Color32::from_rgb(192, 57, 43));
-                            if ui.add(confirm_btn).clicked() {
-                                match action_copy {
-                                    ConfirmAction::ResetApp => self.reset_app(),
-                                    ConfirmAction::UninstallApp => self.uninstall_app(),
-                                    _ => {}
-                                }
-                                self.confirm_action = None;
-                                self.show_settings = false;
-                            }
-                        } else {
-                            if ui.button("确定").clicked() {
-                                match action {
-                                    ConfirmAction::DeleteAllModels => self.delete_all_models(),
-                                    ConfirmAction::DeleteAllConversations => {
-                                        self.delete_all_conversations()
-                                    }
-                                    _ => {}
-                                }
-                                self.confirm_action = None;
-                                self.show_settings = false;
-                            }
-                        }
-                        if ui.button("取消").clicked() {
-                            self.confirm_action = None;
-                        }
-                    });
-                });
-        }
+        self.render_confirm_dialog(ctx);
 
         // ─── Startup notice (single, highest-priority popup) ──
         if let Some(ref notice) = self.startup_notice.clone() {
@@ -1809,7 +1666,7 @@ impl eframe::App for DesktopAI {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("创建").clicked() {
-                            match crate::shortcut::create_desktop_shortcut() {
+                            match crate::platform::shortcut::create_desktop_shortcut() {
                                 Ok(true) => {
                                     self.status_message = "桌面快捷方式已创建".into();
                                 }

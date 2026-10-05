@@ -42,7 +42,7 @@ pub(crate) fn validate_download_path(dest: &Path) -> Result<(), String> {
     }
 
     // 解析绝对路径并确认在模型目录内
-    let models_dir = crate::config::models_dir();
+    let models_dir = crate::store::config::models_dir();
     let resolved_models = std::fs::canonicalize(&models_dir).unwrap_or_else(|_| models_dir.clone());
 
     // 如果目标已存在，用 canonicalize 解析；否则先创建父目录再解析
@@ -83,7 +83,7 @@ pub(crate) fn download_model(
     cancel: Arc<AtomicBool>,
     tx: mpsc::Sender<DownloadMsg>,
     expected_sha256: Option<&str>,
-    parts: &[crate::config::ModelPart],
+    parts: &[crate::store::config::ModelPart],
 ) {
     if parts.is_empty() {
         // 单文件模型：原路径不变
@@ -101,7 +101,7 @@ pub(crate) fn download_model(
 /// 分卷模型下载：逐卷下载（每卷独立续传 + SHA-256 校验），全部就绪后
 /// 按序拼接为完整 GGUF 文件并清理分卷。取消后已下载分卷保留，下次续传。
 fn download_model_parts(
-    parts: &[crate::config::ModelPart],
+    parts: &[crate::store::config::ModelPart],
     dest: &Path,
     cancel: &Arc<AtomicBool>,
     tx: &mpsc::Sender<DownloadMsg>,
@@ -310,7 +310,7 @@ fn download_single_file(
             let _ = tx.send(DownloadMsg::Error("重定向次数过多".into()));
             return Err("重定向次数过多".into());
         }
-        if crate::crawler::is_ssrf_url(&current_url) {
+        if crate::rag::crawler::is_ssrf_url(&current_url) {
             let _ = tx.send(DownloadMsg::Error("禁止访问内网地址".into()));
             return Err("禁止访问内网地址".into());
         }
@@ -339,7 +339,7 @@ fn download_single_file(
                     let _ = tx.send(DownloadMsg::Error("重定向缺少 Location".into()));
                     "重定向缺少 Location".to_string()
                 })?;
-            current_url = crate::crawler::resolve_url(location.trim(), &current_url);
+            current_url = crate::rag::crawler::resolve_url(location.trim(), &current_url);
             hops += 1;
             continue;
         }
@@ -566,7 +566,7 @@ mod tests {
     fn test_validate_download_path_safe() {
         crate::test_util::temp_data_dir();
         // models_dir() 下的正常文件名应通过验证
-        let models = crate::config::models_dir();
+        let models = crate::store::config::models_dir();
         let dest = models.join("model.gguf");
         assert!(validate_download_path(&dest).is_ok());
     }
@@ -575,7 +575,7 @@ mod tests {
     fn test_validate_download_path_traversal_in_filename() {
         crate::test_util::temp_data_dir();
         // 文件名包含 ".." 应被拒绝
-        let models = crate::config::models_dir();
+        let models = crate::store::config::models_dir();
         let dest = models.join("../evil.gguf");
         assert!(validate_download_path(&dest).is_err());
     }
@@ -584,7 +584,7 @@ mod tests {
     fn test_validate_download_path_outside_models() {
         crate::test_util::temp_data_dir();
         // 模型目录之外（同级兄弟路径，无 .. 组件）应被前缀校验拒绝
-        let models = crate::config::models_dir();
+        let models = crate::store::config::models_dir();
         let dest = models.parent().unwrap().join("outside.gguf");
         assert!(validate_download_path(&dest).is_err());
     }
@@ -593,7 +593,7 @@ mod tests {
     fn test_validate_download_path_subdirectory() {
         crate::test_util::temp_data_dir();
         // 子目录路径（父目录尚未创建）应能通过验证
-        let models = crate::config::models_dir();
+        let models = crate::store::config::models_dir();
         let dest = models.join("qwen").join("7b").join("model.gguf");
         assert!(validate_download_path(&dest).is_ok());
     }
@@ -602,7 +602,7 @@ mod tests {
     fn test_validate_download_path_rejects_traversal_in_subdir() {
         crate::test_util::temp_data_dir();
         // 子目录路径中包含 .. 应被拒绝（starts_with 前缀校验拦截）
-        let models = crate::config::models_dir();
+        let models = crate::store::config::models_dir();
         let dest = models.join("..").join("evil.gguf");
         assert!(validate_download_path(&dest).is_err());
     }
@@ -611,7 +611,7 @@ mod tests {
     fn test_validate_download_path_rejects_direct_traversal() {
         crate::test_util::temp_data_dir();
         // 直接 ../ 路径遍历应被拒绝
-        let models = crate::config::models_dir();
+        let models = crate::store::config::models_dir();
         let dest = models.join("../evil.gguf");
         assert!(validate_download_path(&dest).is_err());
     }
@@ -620,7 +620,7 @@ mod tests {
     fn test_validate_download_path_allows_inner_dots() {
         crate::test_util::temp_data_dir();
         // 普通文件名中的 ".."（如 qwen2.5..gguf）不构成遍历，不应被误伤
-        let models = crate::config::models_dir();
+        let models = crate::store::config::models_dir();
         let dest = models.join("qwen2.5..instruct-q4_k_m.gguf");
         assert!(validate_download_path(&dest).is_ok());
     }
@@ -629,7 +629,7 @@ mod tests {
     fn test_validate_download_path_rejects_dot_space_component() {
         crate::test_util::temp_data_dir();
         // ".. " 这类组件会被 Windows 去掉尾随空格后当成上级目录，必须拒绝
-        let models = crate::config::models_dir();
+        let models = crate::store::config::models_dir();
         let dest = models.join(".. ").join("evil.gguf");
         assert!(validate_download_path(&dest).is_err());
     }
@@ -666,12 +666,12 @@ mod tests {
     fn test_part_filename_traversal_rejected() {
         crate::test_util::temp_data_dir();
         // 分卷文件名含路径分隔符时 download_model_parts 应拒绝并报错
-        let models = crate::config::models_dir();
+        let models = crate::store::config::models_dir();
         let dir = models.join("part_traversal_test");
         let _ = fs::create_dir_all(&dir);
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        let evil = crate::config::ModelPart {
+        let evil = crate::store::config::ModelPart {
             url: "https://example.com/x.gguf".into(),
             filename: "../evil.gguf".into(),
             sha256: None,

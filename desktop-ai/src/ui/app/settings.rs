@@ -1,7 +1,7 @@
 // DesktopAI sub-module: settings window
 use super::{apply_theme, ConfirmAction, DesktopAI};
-use crate::config;
-use crate::model_catalog::find_model;
+use crate::llm::model_catalog::find_model;
+use crate::store::config;
 use egui::{vec2, Color32, RichText, ScrollArea, TextEdit};
 
 /// 对敏感信息（如 API token）进行脱敏处理。
@@ -87,7 +87,7 @@ impl DesktopAI {
                 }
                 // GPU backend availability check: the llama library must be
                 // built with CUDA/Vulkan/Metal, otherwise gpu_layers is a no-op.
-                if !crate::ffi::gpu_backend_available() {
+                if !crate::llm::ffi::gpu_backend_available() {
                     ui.label(
                         RichText::new("⚠ 当前 llama 库为 CPU 版本，GPU 加速不会生效")
                             .size(10.0)
@@ -294,6 +294,84 @@ impl DesktopAI {
                 self.show_settings = false;
             }
         }); // ScrollArea
+    }
+
+    /// Confirmation dialog for destructive actions (moved here from mod.rs:
+    /// it is settings-domain UI and was cluttering the app frame file).
+    pub(crate) fn render_confirm_dialog(&mut self, ctx: &egui::Context) {
+        let Some(action) = self.confirm_action.clone() else {
+            return;
+        };
+        let (title, msg, is_danger) = match action {
+            ConfirmAction::DeleteAllModels => (
+                "删除所有模型",
+                "确定要删除所有已下载的模型文件吗？此操作不可恢复。",
+                false,
+            ),
+            ConfirmAction::DeleteAllConversations => (
+                "删除所有对话",
+                "确定要删除所有对话记录吗？此操作不可恢复。",
+                false,
+            ),
+            ConfirmAction::ResetApp => (
+                "⚠ 重置应用",
+                "确定要删除所有数据（模型、对话、配置）？\n应用将恢复到初始状态，所有数据将永久丢失。",
+                true,
+            ),
+            ConfirmAction::UninstallApp => (
+                "⚠ 卸载应用",
+                "确定要完全卸载桌面AI吗？\n\n将删除：\n• 所有已下载模型\n• 所有对话记录\n• 应用配置文件\n• 程序文件（exe + dll）\n\n此操作不可恢复！",
+                true,
+            ),
+        };
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                if is_danger {
+                    ui.label(RichText::new(msg).color(Color32::from_rgb(255, 80, 80)));
+                } else {
+                    ui.label(msg);
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if is_danger {
+                        let (btn_text, action_copy) = match action {
+                            ConfirmAction::ResetApp => ("确定重置", ConfirmAction::ResetApp),
+                            ConfirmAction::UninstallApp => {
+                                ("确定卸载", ConfirmAction::UninstallApp)
+                            }
+                            _ => ("确定删除", ConfirmAction::ResetApp),
+                        };
+                        let confirm_btn =
+                            egui::Button::new(RichText::new(btn_text).color(Color32::WHITE))
+                                .fill(Color32::from_rgb(192, 57, 43));
+                        if ui.add(confirm_btn).clicked() {
+                            match action_copy {
+                                ConfirmAction::ResetApp => self.reset_app(),
+                                ConfirmAction::UninstallApp => self.uninstall_app(),
+                                _ => {}
+                            }
+                            self.confirm_action = None;
+                            self.show_settings = false;
+                        }
+                    } else if ui.button("确定").clicked() {
+                        match action {
+                            ConfirmAction::DeleteAllModels => self.delete_all_models(),
+                            ConfirmAction::DeleteAllConversations => {
+                                self.delete_all_conversations()
+                            }
+                            _ => {}
+                        }
+                        self.confirm_action = None;
+                        self.show_settings = false;
+                    }
+                    if ui.button("取消").clicked() {
+                        self.confirm_action = None;
+                    }
+                });
+            });
     }
 }
 

@@ -6,7 +6,7 @@ use std::sync::{
 };
 use std::thread;
 
-use crate::inference::{LlamaInference, StreamToken};
+use crate::llm::inference::{LlamaInference, StreamToken};
 
 /// 常量时间字符串比较，防止时序攻击
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -329,7 +329,7 @@ fn handle_chat_completion(
         // P0-3: sanitise ChatML control tokens in user-supplied content to
         // prevent prompt injection (a malicious client could inject
         // <|im_start|>assistant ... <|im_end|> to hijack the response).
-        let safe = crate::inference::sanitize_chatml(content.trim());
+        let safe = crate::llm::inference::sanitize_chatml(content.trim());
         prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", role, safe));
     }
     prompt.push_str("<|im_start|>assistant\n");
@@ -354,7 +354,7 @@ fn non_stream_response(
     let inf = Arc::clone(inf);
     let stop = stop_flag.clone();
     thread::spawn(move || {
-        crate::inference::run_inference(inf, prompt, stop, tx, 2048);
+        crate::llm::inference::run_inference(inf, prompt, stop, tx, 2048);
     });
 
     let mut output = String::new();
@@ -416,7 +416,7 @@ fn stream_sse_response(
     let inf = Arc::clone(inf);
     let stop = stop_flag.clone();
     thread::spawn(move || {
-        crate::inference::run_inference(inf, prompt, stop, tx, 2048);
+        crate::llm::inference::run_inference(inf, prompt, stop, tx, 2048);
     });
 
     let mut buf = String::new();

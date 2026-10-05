@@ -1,6 +1,7 @@
 // DesktopAI sub-module: model select window
-use super::{get_total_ram_gb, DesktopAI};
-use crate::config;
+use super::DesktopAI;
+use crate::platform::hardware::get_total_ram_gb;
+use crate::store::config;
 use egui::{Color32, RichText};
 
 impl DesktopAI {

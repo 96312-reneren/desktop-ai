@@ -545,9 +545,9 @@ fn crawl_single(
     };
 
     let (title, text) = if format == "html" {
-        crate::cleaner::clean_text(&raw, "html")
+        crate::rag::cleaner::clean_text(&raw, "html")
     } else {
-        crate::cleaner::clean_text(&raw, "text")
+        crate::rag::cleaner::clean_text(&raw, "text")
     };
 
     if text.len() < 50 {

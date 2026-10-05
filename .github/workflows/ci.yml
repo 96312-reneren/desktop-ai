@@ -18,8 +18,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --check
-      - run: cargo test --workspace
-      - run: cargo clippy -- -D warnings
+      - run: cargo test
+      - run: cargo clippy --all-targets -- -D warnings
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       # RUSTSEC-2026-0194/0195 (quick-xml): no fixable upgrade — quick-xml 0.30
@@ -27,3 +27,22 @@ jobs:
       # and 0.39 by zbus_xml (system D-Bus XML parsing, local attack surface
       # only). Tracked upstream; revisit when new versions release.
       - run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+
+  # The desktop app ships for Linux too; catch platform breakage on every push
+  # (previously only the release workflow built for Linux, i.e. on tags).
+  linux-check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop-ai
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake pkg-config \
+            libssl-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libgtk-3-dev \
+            libgl1-mesa-dev
+      - run: cargo check --all-targets

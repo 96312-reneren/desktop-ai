@@ -25,15 +25,6 @@ mod server;
 mod store;
 mod ui;
 
-// ── crate 内部扁平别名：让各领域模块继续使用 `crate::config`、
-//    `crate::ffi` 等路径，避免跨领域循环书写长路径 ──
-pub(crate) use llm::{downloader, embedding, ffi, inference, model_catalog};
-pub(crate) use platform::shortcut;
-pub(crate) use rag::{chunker, cleaner, crawler, search, vector_store};
-pub(crate) use server::{api_server, sandbox};
-pub(crate) use store::{config, conversation, db};
-pub(crate) use ui::markdown;
-
 // ── 对外稳定 API：只暴露二进制入口与集成测试所需条目 ──
 pub use llm::ffi::llama_library_name;
 pub use llm::inference::LlamaInference;
@@ -43,6 +34,7 @@ pub use rag::cleaner::clean_text;
 pub use server::api_server::ApiServer;
 pub use store::config::{load_config, models_dir, save_config, Config, ModelInfo, ModelPart};
 pub use store::conversation::{Conversation, Message};
+#[cfg(not(target_os = "android"))]
 pub use ui::startup::run;
 
 /// Android 原生入口所在模块（`android_main` / JNI 符号需对外可达以便导出）。

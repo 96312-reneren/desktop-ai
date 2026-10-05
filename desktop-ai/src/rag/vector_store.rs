@@ -2,8 +2,8 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
-use crate::db::Db;
-use crate::embedding::EmbeddingEngine;
+use crate::llm::embedding::EmbeddingEngine;
+use crate::store::db::Db;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StoredChunk {
@@ -29,7 +29,7 @@ pub(crate) struct StoredDocument {
 /// SQLite-backed vector store.
 ///
 /// Concurrency: embedding inference happens *before* taking the DB lock;
-/// inside the lock only short SQL transactions run (see [`crate::db`]).
+/// inside the lock only short SQL transactions run (see [`crate::store::db`]).
 ///
 /// The embedding engine is guarded by a `Mutex`: `EmbeddingEngine` is
 /// `Send` but not `Sync` (it owns raw FFI pointers), and indexing runs on a
@@ -79,9 +79,9 @@ fn blob_to_embed(bytes: &[u8]) -> Vec<f32> {
 
 impl VectorStore {
     pub(crate) fn new(store_dir: &std::path::Path) -> Self {
-        let db = crate::db::open(&store_dir.join("kb.db")).unwrap_or_else(|e| {
+        let db = crate::store::db::open(&store_dir.join("kb.db")).unwrap_or_else(|e| {
             log::error!("failed to open kb.db: {} — using in-memory fallback", e);
-            crate::db::open(
+            crate::store::db::open(
                 &std::env::temp_dir()
                     .join(format!("desktop_ai_kb_fallback_{}.db", std::process::id())),
             )
@@ -136,7 +136,7 @@ impl VectorStore {
         overlap: usize,
     ) -> Result<(), String> {
         let engine = self.engine.as_ref().ok_or("embedding engine not loaded")?;
-        let chunks = crate::chunker::chunk_text(text, chunk_size, overlap);
+        let chunks = crate::rag::chunker::chunk_text(text, chunk_size, overlap);
         if chunks.is_empty() {
             return Err("no content to index".into());
         }

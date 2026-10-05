@@ -1,7 +1,7 @@
 // DesktopAI sub-module: chat area + input bar (Material Design 3 styling)
 use super::{theme, DesktopAI};
-use crate::config;
-use crate::markdown;
+use crate::store::config;
+use crate::ui::markdown;
 use egui::{vec2, Color32, CornerRadius, Label, Margin, RichText, ScrollArea, Stroke, TextEdit};
 
 impl DesktopAI {

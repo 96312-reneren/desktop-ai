@@ -1,4 +1,4 @@
-use crate::config::ModelInfo;
+use crate::store::config::ModelInfo;
 
 pub(crate) fn default_catalog() -> Vec<ModelInfo> {
     vec![
@@ -47,12 +47,12 @@ pub(crate) fn default_catalog() -> Vec<ModelInfo> {
             filename: "qwen2.5-7b-instruct-q4_k_m.gguf".into(),
             expected_sha256: None,
             parts: vec![
-                crate::config::ModelPart {
+                crate::store::config::ModelPart {
                     url: "https://hf-mirror.com/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf".into(),
                     filename: "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf".into(),
                     sha256: Some("dfce12e3862a5283ccfb88221b48480e58745165de856439950d0f22590580db".into()),
                 },
-                crate::config::ModelPart {
+                crate::store::config::ModelPart {
                     url: "https://hf-mirror.com/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf".into(),
                     filename: "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf".into(),
                     sha256: Some("539cf93f78e887edea1c04e2d7d8cdaca9d01dae9c9025bcb8accbe29df3d72a".into()),
