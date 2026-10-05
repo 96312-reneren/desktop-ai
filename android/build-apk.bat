@@ -22,8 +22,10 @@ set "PLATFORM=%ANDROID_HOME%\platforms\android-34"
 set "PATH=%JAVA_HOME%\bin;%PATH%"
 
 rem ── 构建输入(cargo ndk / llama.cpp 产物位置,环境变量可覆盖)──
-if not defined NDKOUT set "NDKOUT=C:\Users\TheUn\AppData\Local\Temp\opencode\androidout\jni\arm64-v8a"
-if not defined LLAMA_LIB_DIR set "LLAMA_LIB_DIR=C:\Users\TheUn\AppData\Local\Temp\opencode\androidout"
+rem 默认放在用户目录下(持久,不会被系统清理);TEMP 目录曾被清理导致
+rem 输入丢失过一次。来源与重建方法见 android/README.md。
+if not defined NDKOUT set "NDKOUT=%USERPROFILE%\.desktopai-android\prebuilt\jni\arm64-v8a"
+if not defined LLAMA_LIB_DIR set "LLAMA_LIB_DIR=%USERPROFILE%\.desktopai-android\prebuilt"
 
 rem ── 版本号:从 Cargo.toml 读取(避免与 Cargo.toml 漂移)──
 set "VER="
