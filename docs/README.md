@@ -7,6 +7,7 @@
 | `security-review.md` | 安全审查(含修复状态表) | 2026-08 |
 | `maintainability-review.md` | 可维护性与文件架构评审(含仓库重建方案附录) | 2026-08 |
 | `improvement-roadmap.md` | 第二轮改进评估(首轮整改确认 + 新问题) | 2026-10 |
+| `redteam-report-2026-10.md` | 红队对抗测试报告(沙盒逃逸/SSRF 缺口/库加载回归,已修复) | 2026-10 |
 | `project-evaluation-report.md` | 项目评估报告 | 2026-08 |
 
 ## 公开范围说明
@@ -24,3 +25,5 @@
 - 改进路线图(roadmap)的优先级 1-8 项:1(RAG token 预算)、4(死依赖/
   日志桥接)、5(版本单点化)、6(docs 整理)、7(KB 流水线移出 UI)、
   8(RAG 端到端测试)均已落实;2(检索来源呈现)已实现
+- 红队报告(2026-10)找到的 4 处漏洞已全部修复,对应的 16 个对抗用例常驻
+  `desktop-ai/src/redteam.rs` 作为安全回归套件

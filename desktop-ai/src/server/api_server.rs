@@ -228,14 +228,9 @@ fn handle_client(
 
     let response = match (method, path.as_str()) {
         ("GET", "/health") => json_response(200, r#"{"status":"ok"}"#),
-        ("GET", "/ready") => json_response(
-            200,
-            &serde_json::json!({
-                "status": "ready",
-                "model": model_name
-            })
-            .to_string(),
-        ),
+        // Unauthenticated liveness probe: deliberately does NOT reveal the
+        // model name (information disclosure on an endpoint anyone can hit).
+        ("GET", "/ready") => json_response(200, r#"{"status":"ready"}"#),
         ("GET", "/v1/models") => {
             let body = serde_json::json!({
                 "object": "list",

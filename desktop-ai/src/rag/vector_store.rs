@@ -14,10 +14,12 @@ pub(crate) struct StoredChunk {
 #[derive(Debug, Clone)]
 pub(crate) struct SearchHit {
     pub chunk: String,
-    /// Raw retrieval score (cosine / bm25). Not shown to users as a
-    /// percentage — it is a ranking signal, not a probability.
+    /// Retrieval score when the backend produces one (cosine similarity,
+    /// 0..1); `None` for FTS5 keyword hits, which have no similarity
+    /// semantics. Never rendered as a percentage — it is a ranking signal,
+    /// not a probability, and cosine scores can even be negative.
     #[allow(dead_code)]
-    pub score: f32,
+    pub score: Option<f32>,
     pub source: String,
 }
 
@@ -230,10 +232,23 @@ impl VectorStore {
     }
 
     /// Full-text keyword search over indexed chunks (FTS5).
-    /// Query syntax follows FTS5 MATCH; quotes are neutralised so user
-    /// input cannot break out of the query grammar.
+    ///
+    /// 用户输入里的 FTS5 查询语法元字符会被当作语法而非检索词，导致
+    /// 语法错误或语义错位（`a:b` 被解释成列过滤、`AND` 被解释成布尔
+    /// 运算符、`^` 被解释成列锚定）。这里把元字符统一替换为空格：
+    /// 既保证任何输入都不会报错，又保留分词效果（`GPT-4` → `GPT 4`，
+    /// 与内容侧 unicode61 的分词结果一致）。
     pub(crate) fn search_text(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>, String> {
-        let q = query.replace('"', " ");
+        /// FTS5 查询语法中的元字符。
+        const META: &[char] = &['"', '*', '(', ')', '^', ':', '{', '}', '[', ']', '-', '+'];
+
+        let mut sanitized = String::with_capacity(query.len());
+        for ch in query.chars() {
+            sanitized.push(if META.contains(&ch) { ' ' } else { ch });
+        }
+        // 小写化顺带中和裸运算符：FTS5 只把大写的 AND/OR/NOT/NEAR 当运算符，
+        // 小写后按普通词处理。unicode61 分词器本身大小写不敏感，故不影响结果。
+        let q = sanitized.to_lowercase();
         let q = q.trim();
         if q.is_empty() {
             return Ok(Vec::new());
@@ -260,7 +275,8 @@ impl VectorStore {
                 let _ = doc_id;
                 hits.push(SearchHit {
                     chunk: text,
-                    score: 1.0,
+                    // Keyword hits carry no similarity score.
+                    score: None,
                     source: title,
                 });
             }
@@ -441,7 +457,7 @@ pub(crate) fn search_by_vector(
         .into_iter()
         .map(|(chunk, score, source)| SearchHit {
             chunk,
-            score,
+            score: Some(score),
             source,
         })
         .collect()
@@ -499,7 +515,7 @@ mod tests {
         let hits = search_by_vector(&docs, &[1.0, 0.0, 0.0], 1);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].chunk, "苹果");
-        assert!((hits[0].score - 1.0).abs() < 1e-6);
+        assert!(matches!(hits[0].score, Some(s) if (s - 1.0).abs() < 1e-6));
     }
 
     #[test]

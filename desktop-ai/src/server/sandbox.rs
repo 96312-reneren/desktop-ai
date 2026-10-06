@@ -92,15 +92,29 @@ impl Sandbox {
         }
 
         // Non-existent path: `..` is already rejected, so `root.join(cleaned)`
-        // cannot escape upward. Use `Path::starts_with` (component-aware) as
-        // defence in depth and return the logical path. The previous string
-        // prefix check accepted `root/../escape.txt` because it textually
-        // began with `root`.
-        if candidate.starts_with(&self.root) {
-            Ok(candidate)
-        } else {
-            Err(format!("路径越界: {}", relative))
+        // cannot escape upward textually. But a symlink or directory junction
+        // *inside* the sandbox can still redirect the write outside it, because
+        // `File::create` transparently follows links. So the deepest existing
+        // ancestor must be canonicalised and checked as well.
+        //
+        // 2026-10 红队实测：沙盒内的目录联接曾让 write("escape_link/x.txt")
+        // 落到沙盒外，本步骤即当时的缺失环节。
+        if !candidate.starts_with(&self.root) {
+            return Err(format!("路径越界: {}", relative));
         }
+        let mut probe = candidate.clone();
+        while !probe.exists() {
+            match probe.parent() {
+                Some(p) => probe = p.to_path_buf(),
+                None => break,
+            }
+        }
+        let real_ancestor =
+            std::fs::canonicalize(&probe).map_err(|e| format!("解析路径失败: {}", e))?;
+        if !real_ancestor.starts_with(&self.resolved_root) {
+            return Err(format!("路径越界: {}", relative));
+        }
+        Ok(candidate)
     }
 
     /// Reserved for the AI Agent tool-call protocol (P1). When the Agent

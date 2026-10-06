@@ -41,6 +41,11 @@ pub use ui::startup::run;
 #[cfg(target_os = "android")]
 pub use platform::android;
 
+/// 红队对抗性用例集：针对 SSRF 黑名单覆盖度、文件沙盒路径穿越、
+/// 知识库全文检索注入与语法健壮性。仅测试构建编译。
+#[cfg(test)]
+mod redteam;
+
 /// 测试专用工具：把数据根目录指向 `target/test-data/unit`，确保任何单元测试
 /// 都不会读写真实用户数据（%APPDATA% / ~/.local/share）。目录放在构建输出
 /// 内，每次测试运行前整体重建，`cargo clean` 一并清除，不会在系统临时目录

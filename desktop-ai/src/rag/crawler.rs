@@ -108,16 +108,106 @@ pub(crate) fn is_ssrf_url(url: &str) -> bool {
 /// Private / loopback / link-local / ULA IPv6. IPv4-mapped and legacy
 /// IPv4-compatible forms are unwrapped and checked against the IPv4 rules
 /// (otherwise `http://[::ffff:10.0.0.1]/` would slip through).
+fn is_private_ipv4(ip: [u8; 4]) -> bool {
+    if ip[0] == 0 {
+        return true;
+    } // 0.0.0.0/8
+    if ip[0] == 10 {
+        return true;
+    } // 10.0.0.0/8
+    if ip[0] == 127 {
+        return true;
+    } // 127.0.0.0/8 loopback
+    if ip[0] == 100 && (ip[1] & 0xc0) == 64 {
+        return true;
+    } // 100.64.0.0/10 CGNAT（RFC 6598）
+      // 阿里云/腾讯云等元数据服务常驻此段（如 100.100.100.200），
+      // 此前漏检会导致 SSRF 直接读到实例凭据。
+    if ip[0] == 169 && ip[1] == 254 {
+        return true;
+    } // 169.254.0.0/16 link-local
+    if ip[0] == 172 && (ip[1] & 0xf0) == 16 {
+        return true;
+    } // 172.16.0.0/12
+    if ip[0] == 192 && ip[1] == 168 {
+        return true;
+    } // 192.168.0.0/16
+    if ip[0] == 192 && ip[1] == 0 && ip[2] == 0 {
+        return true;
+    } // 192.0.0.0/24 IETF 协议分配
+    if ip[0] == 192 && ip[1] == 0 && ip[2] == 2 {
+        return true;
+    } // 192.0.2.0/24 TEST-NET-1
+    if ip[0] == 198 && (ip[1] & 0xfe) == 18 {
+        return true;
+    } // 198.18.0.0/15 基准测试
+    if ip[0] == 198 && ip[1] == 51 && ip[2] == 100 {
+        return true;
+    } // 198.51.100.0/24 TEST-NET-2
+    if ip[0] == 203 && ip[1] == 0 && ip[2] == 113 {
+        return true;
+    } // 203.0.113.0/24 TEST-NET-3
+    if (224..=239).contains(&ip[0]) {
+        return true;
+    } // 224.0.0.0/4 组播
+    if ip[0] >= 240 {
+        return true;
+    } // 240.0.0.0/4 保留（含 255.255.255.255 广播）
+    false
+}
+
+/// 从 IPv6 中提取内嵌的 IPv4（若有），用于检查隧道/转换地址。
+///
+/// 覆盖三类可把流量送回 IPv4 内网的形态：
+/// - `::a.b.c.d`（IPv4 兼容）与 `::ffff:a.b.c.d`（IPv4 映射）：标准库可解
+/// - `64:ff9b::/96`（NAT64，RFC 6052）：低 32 位就是目标 IPv4
+/// - `2002::/16`（6to4，RFC 3056）：第 2、3 段拼接为目标 IPv4
+fn embedded_ipv4(v6: std::net::Ipv6Addr) -> Option<[u8; 4]> {
+    if let Some(v4) = v6.to_ipv4() {
+        return Some(v4.octets());
+    }
+    let s = v6.segments();
+    // NAT64 64:ff9b::/96
+    if s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0 {
+        let [a, b] = s[6].to_be_bytes();
+        let [c, d] = s[7].to_be_bytes();
+        return Some([a, b, c, d]);
+    }
+    // 6to4 2002::/16
+    if s[0] == 0x2002 {
+        let [a, b] = s[1].to_be_bytes();
+        let [c, d] = s[2].to_be_bytes();
+        return Some([a, b, c, d]);
+    }
+    None
+}
+
 fn is_private_ipv6(v6: std::net::Ipv6Addr) -> bool {
     if v6.is_loopback() || v6.is_unspecified() {
         return true;
     }
-    if let Some(v4) = v6.to_ipv4() {
-        return is_private_ipv4(v4.octets());
+    // IPv4 映射 / IPv4 兼容 / NAT64 / 6to4：解出内嵌 IPv4 后按 IPv4 规则判断
+    if let Some(v4) = embedded_ipv4(v6) {
+        return is_private_ipv4(v4);
     }
     let s = v6.segments();
     // fc00::/7 唯一本地地址; fe80::/10 链路本地
-    (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80
+    if (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80 {
+        return true;
+    }
+    // 2001:0000::/32 Teredo 隧道
+    if s[0] == 0x2001 && s[1] == 0x0000 {
+        return true;
+    }
+    // 2001:0db8::/32 文档地址
+    if s[0] == 0x2001 && s[1] == 0x0db8 {
+        return true;
+    }
+    // ff00::/8 组播
+    if (s[0] & 0xff00) == 0xff00 {
+        return true;
+    }
+    false
 }
 
 fn extract_host(url: &str) -> Option<&str> {
@@ -195,28 +285,7 @@ fn parse_u32_radix(s: &str) -> Option<u32> {
     s.parse().ok()
 }
 
-fn is_private_ipv4(ip: [u8; 4]) -> bool {
-    if ip[0] == 0 {
-        return true;
-    } // 0.0.0.0/8
-    if ip[0] == 10 {
-        return true;
-    } // 10.0.0.0/8
-    if ip[0] == 127 {
-        return true;
-    } // 127.0.0.0/8 loopback
-    if ip[0] == 169 && ip[1] == 254 {
-        return true;
-    } // 169.254.0.0/16 link-local
-    if ip[0] == 172 && (ip[1] & 0xf0) == 16 {
-        return true;
-    } // 172.16.0.0/12
-    if ip[0] == 192 && ip[1] == 168 {
-        return true;
-    } // 192.168.0.0/16
-    false
-}
-
+/// 读取本地文件。
 fn read_local_file(path: &str) -> Result<(String, String), String> {
     let file_path = PathBuf::from(strip_file_prefix(path));
     if !file_path.exists() {
@@ -255,7 +324,17 @@ fn pin_host(
     let host = extract_host(url).ok_or("无法解析 URL 主机名")?;
     let host = host.trim_start_matches('[').trim_end_matches(']');
     if parse_ipv4(host).is_some() || host.parse::<std::net::Ipv6Addr>().is_ok() {
-        // 字面 IP：is_ssrf_url 已完成校验
+        // 字面 IP：此处必须独立复核，不能假设 is_ssrf_url 已经拦过。
+        // 否则第一层只要有任一网段遗漏，第二层会直接放行，两层防护同时失效
+        // （2026-10 红队实测：CGNAT 100.64.0.0/10 段曾由此绕过）。
+        if is_private_ipv4(parse_ipv4(host).unwrap_or([0, 0, 0, 0]))
+            || host
+                .parse::<std::net::Ipv6Addr>()
+                .map(is_private_ipv6)
+                .unwrap_or(false)
+        {
+            return Err(format!("禁止访问内网或保留地址: {}", host));
+        }
         return Ok(builder);
     }
     use std::net::ToSocketAddrs;

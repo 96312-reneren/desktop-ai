@@ -315,13 +315,57 @@ fn resolve_lib_path() -> std::path::PathBuf {
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
         .unwrap_or_default();
-    let candidate = exe_dir.join(lib_name);
-    if candidate.exists() {
-        candidate
-    } else {
-        std::path::PathBuf::from(lib_name)
+
+    // 搜索顺序（2026-10 修复）：
+    //   1. exe 同目录 —— 发布包布局，也是原实现唯一处理的形态
+    //   2. 上两级 —— cargo 把 example / test 二进制放在 target/<profile>/examples
+    //      与 target/<profile>/deps 下，而 build.rs 只把运行时库写到
+    //      target/<profile>/，因此示例与测试此前一律找不到库
+    //   3. 当前工作目录 —— 兼容从 crate 根直接运行的历史用法
+    //   4. 裸文件名 —— 交回系统加载器的默认搜索路径
+    let mut candidates = vec![exe_dir.join(lib_name)];
+    if let Some(up1) = exe_dir.parent() {
+        candidates.push(up1.join(lib_name));
+        if let Some(up2) = up1.parent() {
+            candidates.push(up2.join(lib_name));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join(lib_name));
+    }
+    for c in candidates {
+        if c.exists() {
+            return c;
+        }
+    }
+    std::path::PathBuf::from(lib_name)
+}
+
+/// 把运行时库所在目录加入进程的 DLL 搜索路径。
+///
+/// Windows 解析一个 DLL 的导入表时，搜索的是**可执行文件所在目录**与当前
+/// 工作目录，而不是被加载 DLL 自己的目录。而 cargo 把 example / test 二进制
+/// 放在 `target/<profile>/examples` 与 `target/<profile>/deps` 下，这些二进制
+/// 看不到 `target/<profile>/` 里的 ggml*.dll 与 MinGW 运行时，于是
+/// `LoadLibraryExW` 直接失败（2026-10 红队实测：`api_serve` 示例因此完全不可用）。
+///
+/// 显式把库目录设为搜索目录，一次修复所有二进制布局；顺带把当前工作目录
+/// 移出搜索路径，消除"从工作目录植入同名 DLL"的劫持面。
+#[cfg(windows)]
+fn add_dll_search_dir(lib_path: &std::path::Path) {
+    use std::os::windows::ffi::OsStrExt;
+    let Some(dir) = lib_path.parent().filter(|d| !d.as_os_str().is_empty()) else {
+        return;
+    };
+    let mut wide: Vec<u16> = dir.as_os_str().encode_wide().collect();
+    wide.push(0);
+    unsafe {
+        windows_sys::Win32::System::LibraryLoader::SetDllDirectoryW(wide.as_ptr());
     }
 }
+
+#[cfg(not(windows))]
+fn add_dll_search_dir(_lib_path: &std::path::Path) {}
 
 /// Load the platform llama shared library with integrity verification. Must be called once before any other function.
 ///
@@ -345,6 +389,10 @@ pub(crate) unsafe fn init() -> Result<(), String> {
             let lib_path = std::path::PathBuf::from(llama_library_name());
             #[cfg(not(target_os = "android"))]
             let lib_path = resolve_lib_path();
+            // 必须在 dlopen 之前：让运行时库的依赖（ggml*.dll 等）可被解析，
+            // 否则 examples/ 与 deps/ 下的二进制一律加载失败。
+            #[cfg(not(target_os = "android"))]
+            add_dll_search_dir(&lib_path);
             let lib_path_str = lib_path.to_string_lossy();
             #[cfg(not(target_os = "android"))]
             verify_dll(&lib_path_str)?;
