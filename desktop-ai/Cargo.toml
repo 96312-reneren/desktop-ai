@@ -2,6 +2,9 @@
 name = "desktop-ai"
 version = "6.1.6"
 edition = "2021"
+# MSRV: egui 0.31 requires 1.81; older toolchains get a clear error instead
+# of cryptic type-system failures.
+rust-version = "1.81"
 description = "桌面AI - 本地大模型聊天应用 (RAG知识库)"
 
 [lib]
@@ -20,10 +23,11 @@ chrono = { version = "0.4", features = ["serde"] }
 pulldown-cmark = "0.12"
 libloading = "0.8"
 once_cell = "1"
-anyhow = "1"
 log = "0.4"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-log = "0.2"
+# The "tracing-log" feature installs the log -> tracing bridge (LogTracer)
+# on init; it is listed explicitly so 72 log::*! call sites never go silent
+# if someone flips off default features.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"] }
 pdf-extract = "0.12"
 sha2 = "0.10"
 rusqlite = { version = "0.37", features = ["bundled"] }

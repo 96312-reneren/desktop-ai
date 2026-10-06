@@ -65,8 +65,10 @@ fn load_chinese_fonts() -> Option<Vec<u8>> {
 #[cfg(not(target_os = "android"))]
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Structured logging via tracing-subscriber with env-filter support.
-    // Existing `log::info! / warn! / error!` macros are bridged via
-    // `tracing-log` so no source changes are needed in other modules.
+    // Existing `log::info! / warn! / error!` macros are bridged via the
+    // `tracing-log` feature (enabled explicitly in Cargo.toml) so no source
+    // changes are needed in other modules; it must not be disabled or the
+    // 70+ log call sites go silent.
     // Logs go to stderr AND a daily-rotating file in the data dir so
     // crashes can be diagnosed after the fact.
     use tracing_subscriber::fmt::writer::MakeWriterExt;
@@ -116,7 +118,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1000.0, 680.0])
             .with_min_inner_size([750.0, 500.0])
-            .with_title("桌面AI v6.1.6"),
+            .with_title(format!("桌面AI v{}", env!("CARGO_PKG_VERSION"))),
         ..Default::default()
     };
 

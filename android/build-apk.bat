@@ -62,7 +62,7 @@ if exist "%SRC%\res\xml" (
     set "RESFLAT=!RESFLAT! "%OUT%\res\%%~nf.zip""
   )
 )
-"%BT%\aapt2.exe" link -o "%OUT%\base.apk" --manifest "%SRC%\AndroidManifest.xml" -I "%PLATFORM%\android.jar" --min-sdk-version 24 --target-sdk-version 34 !RESFLAT!
+"%BT%\aapt2.exe" link -o "%OUT%\base.apk" --manifest "%SRC%\AndroidManifest.xml" -I "%PLATFORM%\android.jar" --min-sdk-version 24 --target-sdk-version 34 --version-name "%VER%" !RESFLAT!
 if errorlevel 1 exit /b 1
 
 echo == 5. add dex+libs+assets ==

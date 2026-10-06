@@ -46,3 +46,27 @@ jobs:
             libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libgtk-3-dev \
             libgl1-mesa-dev
       - run: cargo check --all-targets
+
+  # The Android target is the third platform and had zero CI coverage; a
+  # cross cargo check catches "desktop change broke Android" early.
+  android-check:
+    name: Android (cross cargo check)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop-ai
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: android-actions/setup-android@v3
+      - name: Install NDK
+        run: sdkmanager "ndk;25.2.9519653" > /dev/null
+      - name: Pin the cross C toolchain (for ring / bundled sqlite)
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> "$GITHUB_ENV"
+          NDK_BIN="$ANDROID_HOME/ndk/25.2.9519653/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "CC_aarch64-linux-android=$NDK_BIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64-linux-android=$NDK_BIN/llvm-ar" >> "$GITHUB_ENV"
+      - run: cargo check --target aarch64-linux-android
