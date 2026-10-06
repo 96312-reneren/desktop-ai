@@ -9,6 +9,7 @@
 | `improvement-roadmap.md` | 第二轮改进评估(首轮整改确认 + 新问题) | 2026-10 |
 | `redteam-report-2026-10.md` | 红队对抗测试报告(沙盒逃逸/SSRF 缺口/库加载回归,已修复) | 2026-10 |
 | `project-evaluation-report.md` | 项目评估报告 | 2026-08 |
+| `remediation-plan-2026-10.md` | 本地文件读取加固改造计划(分两阶段,含 Windows 实现陷阱) | 2026-10 |
 
 ## 公开范围说明
 
@@ -27,3 +28,5 @@
   8(RAG 端到端测试)均已落实;2(检索来源呈现)已实现
 - 红队报告(2026-10)找到的 4 处漏洞已全部修复,对应的 16 个对抗用例常驻
   `desktop-ai/src/redteam.rs` 作为安全回归套件
+- 红队报告遗留项 1(`read_local_file` 无路径限制)已制定改造计划,见
+  `remediation-plan-2026-10.md`(阶段一待实施)

@@ -29,11 +29,12 @@ jobs:
           $ver = "${{ github.ref_name }}" -replace '^v',''
           New-Item -ItemType Directory -Force -Path staging | Out-Null
           Copy-Item target/release/desktop-ai.exe staging/桌面AI.exe
-          # Vendor runtimes live in vendor/windows; llama.dll hard-depends on
-          # the ggml/libstdc++/libgcc/libwinpthread/libgomp set, so the whole
+          # Vendor runtimes live in <repo>/vendor/windows (outside the crate
+          # dir, hence the absolute path); llama.dll hard-depends on the
+          # ggml/libstdc++/libgcc/libwinpthread/libgomp set, so the whole
           # set must ship (the old workflow copied only llama.dll and produced
           # an unusable package).
-          Copy-Item vendor/windows/*.dll staging/
+          Copy-Item "$env:GITHUB_WORKSPACE/vendor/windows/*.dll" staging/
           Compress-Archive -Path staging/* -DestinationPath 桌面AI-v$ver-windows-x86_64.zip -Force
         env:
           APP_VERSION: ${{ github.ref_name }}
@@ -69,19 +70,22 @@ jobs:
           # Self-contained: resolve ggml deps relative to libllama.so
           patchelf --set-rpath '$ORIGIN' build/bin/libllama.so.0 \
             build/bin/libggml.so.0 build/bin/libggml-cpu.so.0 build/bin/libggml-base.so.0
-          # Vendor into the repo layout so build.rs picks them up.
-          mkdir -p ../vendor/linux
-          cp -f build/bin/libllama.so.0 ../vendor/linux/libllama.so
-          cp -f build/bin/libggml.so.0 ../vendor/linux/libggml.so.0
-          cp -f build/bin/libggml-cpu.so.0 ../vendor/linux/libggml-cpu.so.0
-          cp -f build/bin/libggml-base.so.0 ../vendor/linux/libggml-base.so.0
+          # Vendor into the repo layout so build.rs picks them up. NOTE: cwd
+          # here is /tmp/llama.cpp, so use the absolute workspace path.
+          mkdir -p "$GITHUB_WORKSPACE/vendor/linux"
+          cp -f build/bin/libllama.so.0 "$GITHUB_WORKSPACE/vendor/linux/libllama.so"
+          cp -f build/bin/libggml.so.0 "$GITHUB_WORKSPACE/vendor/linux/libggml.so.0"
+          cp -f build/bin/libggml-cpu.so.0 "$GITHUB_WORKSPACE/vendor/linux/libggml-cpu.so.0"
+          cp -f build/bin/libggml-base.so.0 "$GITHUB_WORKSPACE/vendor/linux/libggml-base.so.0"
       - run: cargo build --release
       - name: Assemble package
         run: |
           mkdir -p staging
           cp -f target/release/desktop-ai staging/
-          cp -f ../vendor/linux/libllama.so ../vendor/linux/libggml.so.0 \
-            ../vendor/linux/libggml-cpu.so.0 ../vendor/linux/libggml-base.so.0 staging/
+          cp -f "$GITHUB_WORKSPACE/vendor/linux/libllama.so" \
+            "$GITHUB_WORKSPACE/vendor/linux/libggml.so.0" \
+            "$GITHUB_WORKSPACE/vendor/linux/libggml-cpu.so.0" \
+            "$GITHUB_WORKSPACE/vendor/linux/libggml-base.so.0" staging/
           tar czf ../desktop-ai-${{ github.ref_name }}-linux-x86_64.tar.gz staging
         working-directory: desktop-ai
       - uses: actions/upload-artifact@v4

@@ -60,13 +60,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
-      - uses: android-actions/setup-android@v3
+      # The ubuntu-latest image ships the Android SDK; install the NDK via
+      # sdkmanager directly (the android-actions/setup-android action was
+      # failing on this runner).
       - name: Install NDK
-        run: sdkmanager "ndk;25.2.9519653" > /dev/null
+        run: |
+          SDK=/usr/local/lib/android/sdk
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" "ndk;25.2.9519653" > /dev/null
       - name: Pin the cross C toolchain (for ring / bundled sqlite)
         run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> "$GITHUB_ENV"
-          NDK_BIN="$ANDROID_HOME/ndk/25.2.9519653/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          NDK_BIN="/usr/local/lib/android/sdk/ndk/25.2.9519653/toolchains/llvm/prebuilt/linux-x86_64/bin"
           echo "CC_aarch64-linux-android=$NDK_BIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
           echo "AR_aarch64-linux-android=$NDK_BIN/llvm-ar" >> "$GITHUB_ENV"
       - run: cargo check --target aarch64-linux-android
