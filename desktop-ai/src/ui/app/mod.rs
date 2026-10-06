@@ -42,6 +42,8 @@ pub(crate) struct DownloadState {
 pub(crate) struct GenState {
     pub(crate) conv_id: String,
     pub(crate) pending_text: String,
+    /// Budget notice shown above the reply (context full / truncated, ...).
+    pub(crate) notice: Option<String>,
     rx: mpsc::Receiver<StreamToken>,
     pub(crate) stop_flag: Arc<AtomicBool>,
 }
@@ -1006,10 +1008,13 @@ impl DesktopAI {
         };
 
         let stop = stop_flag.clone();
+        let rag_top_k = self.config.rag_top_k;
+        let max_out = self.config.max_output_tokens;
 
         self.gen = Some(GenState {
             conv_id,
             pending_text: String::new(),
+            notice: None,
             rx,
             stop_flag,
         });
@@ -1017,7 +1022,8 @@ impl DesktopAI {
         let handle = thread::spawn(move || {
             let kb_context = if let Some(ref qv) = query_vec {
                 if !kb_data.is_empty() {
-                    let results = crate::rag::vector_store::search_by_vector(&kb_data, qv, 3);
+                    let results =
+                        crate::rag::vector_store::search_by_vector(&kb_data, qv, rag_top_k);
                     if !results.is_empty() {
                         let mut ctx = String::new();
                         for (i, hit) in results.iter().enumerate() {
@@ -1065,13 +1071,7 @@ impl DesktopAI {
                 None
             };
 
-            let prompt = inference::build_rag_prompt(
-                &messages,
-                kb_context.as_deref(),
-                search_context.as_deref(),
-            );
-
-            inference::run_inference(inf, prompt, stop, tx, 2048);
+            inference::run_inference(inf, messages, kb_context, search_context, stop, tx, max_out);
         });
         self.gen_handle = Some(handle);
     }
@@ -1114,6 +1114,10 @@ impl DesktopAI {
                     gen.pending_text.push_str(&format!("\n\n*[错误: {}]*", e));
                     done = true;
                     break;
+                }
+                StreamToken::Notice(msg) => {
+                    // Context-budget notice: keep the latest one for display.
+                    gen.notice = Some(msg);
                 }
             }
         }

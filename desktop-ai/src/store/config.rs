@@ -53,6 +53,12 @@ pub struct Config {
     pub gpu_layers: i32,
     #[serde(default)]
     pub api_token: String,
+    /// Max tokens generated per reply (prompt budget = n_ctx - this - margin).
+    #[serde(default = "default_max_output_tokens")]
+    pub max_output_tokens: u32,
+    /// Number of knowledge-base chunks recalled per query.
+    #[serde(default = "default_rag_top_k")]
+    pub rag_top_k: usize,
     /// True once the first-run "create desktop shortcut?" prompt has been
     /// answered, so it never shows again.
     #[serde(default)]
@@ -61,6 +67,14 @@ pub struct Config {
 
 fn default_api_port() -> u16 {
     11434
+}
+
+fn default_max_output_tokens() -> u32 {
+    2048
+}
+
+fn default_rag_top_k() -> usize {
+    3
 }
 
 fn default_api_token() -> String {
@@ -116,6 +130,8 @@ impl Default for Config {
             kb_enabled: false,
             gpu_layers: 0,
             api_token: default_api_token(),
+            max_output_tokens: default_max_output_tokens(),
+            rag_top_k: default_rag_top_k(),
             shortcut_prompted: false,
         }
     }
@@ -358,12 +374,11 @@ pub fn load_config() -> Config {
     if config.font_size > 24 {
         config.font_size = 14;
     }
-    if config.n_ctx < 512 {
-        config.n_ctx = 512;
-    }
-    if config.n_ctx > 32768 {
-        config.n_ctx = 4096;
-    }
+    // Bounds match the settings UI; out-of-range values converge to the
+    // bound instead of silently snapping back to the default.
+    config.n_ctx = config.n_ctx.clamp(512, 8192);
+    config.max_output_tokens = config.max_output_tokens.clamp(64, 4096);
+    config.rag_top_k = config.rag_top_k.clamp(1, 10);
     if config.theme != "dark" && config.theme != "light" {
         config.theme = "dark".into();
     }

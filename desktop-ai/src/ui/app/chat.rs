@@ -37,19 +37,32 @@ impl DesktopAI {
                 }
 
                 if let Some(ref gen) = self.gen {
-                    if gen.conv_id == self.current_conv.id && !gen.pending_text.is_empty() {
-                        theme::bot_bubble(m).show(ui, |ui| {
-                            ui.add(
-                                Label::new(RichText::new(&gen.pending_text).size(font_size))
-                                    .selectable(true),
-                            );
-                            let blink = ctx.input(|i| i.time) as u64 % 1000 < 500;
-                            ui.label(RichText::new(" ▌").color(if blink {
-                                m.on_surface
-                            } else {
-                                Color32::TRANSPARENT
-                            }));
-                        });
+                    if gen.conv_id == self.current_conv.id {
+                        // Context-budget notice (truncation / degraded context).
+                        if let Some(ref notice) = gen.notice {
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    RichText::new(format!("ℹ {notice}"))
+                                        .size(11.5)
+                                        .color(m.on_surface_variant),
+                                );
+                            });
+                            ui.add_space(2.0);
+                        }
+                        if !gen.pending_text.is_empty() {
+                            theme::bot_bubble(m).show(ui, |ui| {
+                                ui.add(
+                                    Label::new(RichText::new(&gen.pending_text).size(font_size))
+                                        .selectable(true),
+                                );
+                                let blink = ctx.input(|i| i.time) as u64 % 1000 < 500;
+                                ui.label(RichText::new(" ▌").color(if blink {
+                                    m.on_surface
+                                } else {
+                                    Color32::TRANSPARENT
+                                }));
+                            });
+                        }
                     }
                 }
 

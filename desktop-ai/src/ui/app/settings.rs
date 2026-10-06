@@ -41,6 +41,17 @@ impl DesktopAI {
 
             ui.label(RichText::new("上下文长度").strong());
             ui.add(egui::Slider::new(&mut self.config.n_ctx, 512..=8192).text("tokens"));
+            ui.add_space(4.0);
+
+            ui.label(RichText::new("单次输出上限").strong());
+            ui.add(
+                egui::Slider::new(&mut self.config.max_output_tokens, 256..=4096).text("tokens"),
+            )
+            .on_hover_text("每次回复最多生成的 token 数；提示词预算 = 上下文长度 − 该值");
+            ui.add_space(4.0);
+
+            ui.label(RichText::new("知识库召回条数").strong());
+            ui.add(egui::Slider::new(&mut self.config.rag_top_k, 1..=10).text("条"));
             ui.add_space(8.0);
 
             ui.label(RichText::new("CPU 线程数").strong());

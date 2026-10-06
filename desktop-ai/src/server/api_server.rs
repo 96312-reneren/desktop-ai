@@ -296,12 +296,13 @@ fn handle_chat_completion(
 
     let stream_mode = req["stream"].as_bool().unwrap_or(false);
 
-    // Build chatml prompt from messages
+    // Build the message list (prompt assembly happens inside run_inference,
+    // where the tokenizer can budget it against the context window).
     if let Some(err) = validate_messages(&messages) {
         return Some(err);
     }
     let allowed_roles: &[&str] = &["system", "user", "assistant"];
-    let mut prompt = String::new();
+    let mut safe_messages: Vec<crate::store::conversation::Message> = Vec::new();
     for msg in &messages {
         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
         if !allowed_roles.contains(&role) {
@@ -326,19 +327,17 @@ fn handle_chat_completion(
                 ),
             ));
         }
-        // P0-3: sanitise ChatML control tokens in user-supplied content to
-        // prevent prompt injection (a malicious client could inject
-        // <|im_start|>assistant ... <|im_end|> to hijack the response).
-        let safe = crate::llm::inference::sanitize_chatml(content.trim());
-        prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", role, safe));
+        safe_messages.push(crate::store::conversation::Message {
+            role: role.to_string(),
+            content: content.trim().to_string(),
+        });
     }
-    prompt.push_str("<|im_start|>assistant\n");
 
     if stream_mode {
-        stream_sse_response(stream, inf, prompt, origin);
+        stream_sse_response(stream, inf, safe_messages, origin);
         None
     } else {
-        Some(non_stream_response(inf, model_name, prompt))
+        Some(non_stream_response(inf, model_name, safe_messages))
     }
 }
 
@@ -346,7 +345,7 @@ fn handle_chat_completion(
 fn non_stream_response(
     inf: &Arc<Mutex<LlamaInference>>,
     model_name: &str,
-    prompt: String,
+    messages: Vec<crate::store::conversation::Message>,
 ) -> String {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let (tx, rx) = std::sync::mpsc::channel();
@@ -354,7 +353,8 @@ fn non_stream_response(
     let inf = Arc::clone(inf);
     let stop = stop_flag.clone();
     thread::spawn(move || {
-        crate::llm::inference::run_inference(inf, prompt, stop, tx, 2048);
+        // API default output cap; prompt budgeting is handled inside.
+        crate::llm::inference::run_inference(inf, messages, None, None, stop, tx, 2048);
     });
 
     let mut output = String::new();
@@ -365,6 +365,8 @@ fn non_stream_response(
                 log::error!("Inference error: {}", e);
                 output.push_str("[error: internal error]");
             }
+            // Budget notices are UI-facing; API responses stay clean.
+            StreamToken::Notice(_) => {}
             StreamToken::Done => break,
         }
         if output.len() > 4096 {
@@ -395,7 +397,7 @@ fn non_stream_response(
 fn stream_sse_response(
     stream: &mut TcpStream,
     inf: &Arc<Mutex<LlamaInference>>,
-    prompt: String,
+    messages: Vec<crate::store::conversation::Message>,
     origin: Option<&str>,
 ) {
     let cors_origin = origin.unwrap_or("null");
@@ -416,7 +418,8 @@ fn stream_sse_response(
     let inf = Arc::clone(inf);
     let stop = stop_flag.clone();
     thread::spawn(move || {
-        crate::llm::inference::run_inference(inf, prompt, stop, tx, 2048);
+        // API default output cap; prompt budgeting is handled inside.
+        crate::llm::inference::run_inference(inf, messages, None, None, stop, tx, 2048);
     });
 
     let mut buf = String::new();
@@ -427,6 +430,8 @@ fn stream_sse_response(
                 log::error!("Inference error: {}", e);
                 buf.push_str("[error: internal error]");
             }
+            // Budget notices are UI-facing; API responses stay clean.
+            StreamToken::Notice(_) => {}
             StreamToken::Done => break,
         }
         if buf.chars().count() >= 50 {

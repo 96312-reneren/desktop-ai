@@ -594,4 +594,141 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<VectorStore>();
     }
+
+    // ── RAG end-to-end: index -> retrieve -> budgeted prompt ──
+
+    /// Insert a document + chunk + FTS row directly (the embedding engine
+    /// needs a model and is not available in tests).
+    fn index_chunk_sql(store: &VectorStore, doc_id: &str, title: &str, chunk: &str) {
+        store
+            .db
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT INTO documents (id, title, created_at) VALUES (?1, ?2, '2026-01-01')",
+                    params![doc_id, title],
+                )?;
+                let emb = embed_to_blob(&[0.0f32; 4]);
+                c.execute(
+                    "INSERT INTO chunks (doc_id, idx, text, embedding) VALUES (?1, 0, ?2, ?3)",
+                    params![doc_id, chunk, emb],
+                )?;
+                c.execute(
+                    "INSERT INTO chunks_fts (doc_id, text) VALUES (?1, ?2)",
+                    params![doc_id, chunk],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn rag_pipeline_search_then_prompt_within_budget() {
+        use crate::llm::inference::build_rag_prompt_budgeted;
+        use crate::store::conversation::Message;
+
+        let (store, _dir) = temp_store();
+        index_chunk_sql(
+            &store,
+            "d1",
+            "苹果种植手册",
+            "苹果派 的做法：先准备新鲜苹果，去皮切块，加糖腌制。",
+        );
+
+        // 2. Retrieve via FTS5 (no model required).
+        let hits = store.search_text("苹果派", 3).unwrap();
+        assert!(!hits.is_empty(), "FTS should find the indexed chunk");
+
+        // 3. Build the KB context exactly like the UI does.
+        let mut kb_ctx = String::new();
+        for (i, hit) in hits.iter().enumerate() {
+            kb_ctx.push_str(&format!(
+                "[参考{} 来源: {}]\n{}\n\n",
+                i + 1,
+                hit.source,
+                hit.chunk
+            ));
+        }
+
+        // 4. Assemble the budgeted prompt (stub counter: 1 char = 1 token).
+        let msgs = vec![
+            Message {
+                role: "system".into(),
+                content: "你是助手".into(),
+            },
+            Message {
+                role: "user".into(),
+                content: "苹果派怎么做？".into(),
+            },
+        ];
+        let budget = 2000usize;
+        let out = build_rag_prompt_budgeted(&msgs, Some(&kb_ctx), None, budget, |s: &str| {
+            s.chars().count()
+        });
+        assert!(
+            out.prompt.contains("苹果派") && out.prompt.contains("去皮切块"),
+            "retrieved chunk must reach the prompt: {}",
+            out.prompt
+        );
+        assert!(!out.over_budget);
+        assert!(
+            out.prompt.chars().count() <= budget,
+            "prompt exceeds budget: {} > {}",
+            out.prompt.chars().count(),
+            budget
+        );
+        assert_eq!(out.dropped_messages, 0);
+        drop(store);
+    }
+
+    #[test]
+    fn rag_pipeline_truncates_history_but_keeps_kb_context() {
+        use crate::llm::inference::build_rag_prompt_budgeted;
+        use crate::store::conversation::Message;
+
+        let (store, _dir) = temp_store();
+        index_chunk_sql(&store, "d1", "手册", "重要参考：答案就在这一段里。");
+        let hits = store.search_text("重要参考", 1).unwrap();
+        assert!(!hits.is_empty());
+        let kb_ctx = hits[0].chunk.clone();
+
+        // Long history: 20 turns of old chatter + the final question.
+        let mut msgs = vec![Message {
+            role: "system".into(),
+            content: "你是助手".into(),
+        }];
+        for i in 0..20 {
+            msgs.push(Message {
+                role: "user".into(),
+                content: format!("很长的旧消息{}号，包含着大量的历史内容需要被截断。", i),
+            });
+            msgs.push(Message {
+                role: "assistant".into(),
+                content: format!("旧回复{}号。", i),
+            });
+        }
+        msgs.push(Message {
+            role: "user".into(),
+            content: "最终问题".into(),
+        });
+
+        // Budget: enough for system + kb + final question + a couple of
+        // recent turns, not the whole history.
+        let budget = 260usize;
+        let out = build_rag_prompt_budgeted(&msgs, Some(&kb_ctx), None, budget, |s: &str| {
+            s.chars().count()
+        });
+        assert!(out.dropped_messages > 0, "history should be truncated");
+        assert!(
+            out.prompt.contains("重要参考"),
+            "KB context lives in the system prompt and must survive"
+        );
+        assert!(out.prompt.contains("最终问题"), "final question preserved");
+        assert!(
+            !out.prompt.contains("消息0号"),
+            "oldest history should be dropped: {}",
+            out.prompt
+        );
+        assert!(out.prompt.chars().count() <= budget);
+        drop(store);
+    }
 }

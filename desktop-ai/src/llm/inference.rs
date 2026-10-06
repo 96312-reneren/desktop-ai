@@ -5,11 +5,15 @@ pub(crate) enum StreamToken {
     Text(String),
     Done,
     Error(String),
+    /// Non-fatal notice for the UI (e.g. "context full, dropped N early
+    /// messages"). Never part of the model output.
+    Notice(String),
 }
 
 pub struct LlamaInference {
     model: *mut ffi::LlamaModel,
     ctx: *mut ffi::LlamaContext,
+    n_ctx: u32,
 }
 
 // The raw pointers are only ever touched while the external `Mutex` is held
@@ -51,11 +55,15 @@ impl LlamaInference {
             return Err("failed to create context".into());
         }
 
-        Ok(Self { model, ctx })
+        Ok(Self { model, ctx, n_ctx })
     }
 
     pub(crate) fn model_ctx(&self) -> (*mut ffi::LlamaModel, *mut ffi::LlamaContext) {
         (self.model, self.ctx)
+    }
+
+    pub(crate) fn n_ctx(&self) -> u32 {
+        self.n_ctx
     }
 
     fn unload(&mut self) {
@@ -80,18 +88,138 @@ impl Drop for LlamaInference {
     }
 }
 
-/// Run streaming inference. The `Arc<Mutex<LlamaInference>>` is locked for
-/// the entire generation so concurrent callers (UI chat + API requests) are
-/// serialised — llama.cpp contexts are not thread-safe.
+/// Token budget safety margin (special tokens, tokenizer drift).
+const PROMPT_BUDGET_MARGIN: usize = 64;
+
+/// Outcome of budgeted prompt assembly.
+pub(crate) struct BudgetOutcome {
+    pub prompt: String,
+    /// Number of oldest history messages dropped to fit the budget.
+    pub dropped_messages: usize,
+    /// Whether the knowledge-base / search context had to be dropped.
+    pub context_dropped: bool,
+    /// True when even the minimal prompt exceeds the budget (rare; the
+    /// model will likely fail, the caller should surface this).
+    pub over_budget: bool,
+}
+
+/// Assemble the RAG prompt within `prompt_budget` tokens.
+///
+/// Strategy (per the maintainability review):
+/// 1. Build the full prompt; if it fits, done.
+/// 2. Otherwise drop the oldest history message (one at a time, never the
+///    system message and never the final user question) and rebuild.
+/// 3. If only system + final question remain and it still overflows, drop
+///    the KB/search context (degrade to plain chat).
+/// 4. Record what was dropped so the UI can be explicit about it.
+///
+/// `count_tokens` measures a string in model tokens — production passes
+/// `ffi::tokenize`, tests pass a deterministic stub.
+pub(crate) fn build_rag_prompt_budgeted<F: Fn(&str) -> usize>(
+    base_messages: &[crate::store::conversation::Message],
+    kb_context: Option<&str>,
+    search_context: Option<&str>,
+    prompt_budget: usize,
+    count_tokens: F,
+) -> BudgetOutcome {
+    let has_system = base_messages
+        .first()
+        .map(|m| m.role == "system")
+        .unwrap_or(false);
+    let fixed = if has_system { 1 } else { 0 };
+    // Never drop the final message (the current question).
+    let droppable_end = base_messages.len().saturating_sub(1);
+
+    let mut drop_from = fixed;
+    let mut kb = kb_context;
+    let mut search = search_context;
+
+    loop {
+        let effective: Vec<crate::store::conversation::Message> = base_messages[..fixed]
+            .iter()
+            .chain(base_messages[drop_from..].iter())
+            .cloned()
+            .collect();
+        let prompt = build_rag_prompt(&effective, kb, search);
+        if count_tokens(&prompt) <= prompt_budget {
+            return BudgetOutcome {
+                prompt,
+                dropped_messages: drop_from - fixed,
+                context_dropped: kb.is_none() && kb_context.is_some()
+                    || search.is_none() && search_context.is_some(),
+                over_budget: false,
+            };
+        }
+        if drop_from < droppable_end {
+            drop_from += 1;
+            continue;
+        }
+        // History is minimal; degrade the injected context next.
+        if kb.is_some() {
+            kb = None;
+            continue;
+        }
+        if search.is_some() {
+            search = None;
+            continue;
+        }
+        // Nothing left to drop: hand back the minimal prompt as-is.
+        return BudgetOutcome {
+            prompt,
+            dropped_messages: drop_from - fixed,
+            context_dropped: kb_context.is_some() || search_context.is_some(),
+            over_budget: true,
+        };
+    }
+}
+
+/// Run streaming inference with a budgeted prompt. The
+/// `Arc<Mutex<LlamaInference>>` is locked for the entire generation so
+/// concurrent callers (UI chat + API requests) are serialised — llama.cpp
+/// contexts are not thread-safe.
+///
+/// The prompt is assembled inside the lock so the real tokenizer (which
+/// needs the model) can measure it; when history had to be truncated a
+/// `StreamToken::Notice` is emitted before generation starts.
 pub(crate) fn run_inference(
     inf: Arc<Mutex<LlamaInference>>,
-    prompt: String,
+    messages: Vec<crate::store::conversation::Message>,
+    kb_context: Option<String>,
+    search_context: Option<String>,
     stop_flag: Arc<std::sync::atomic::AtomicBool>,
     tx: std::sync::mpsc::Sender<StreamToken>,
     max_tokens: u32,
 ) {
     let inf_guard = inf.lock().unwrap();
     let (model, ctx) = inf_guard.model_ctx();
+    let n_ctx = inf_guard.n_ctx() as usize;
+    let budget = n_ctx.saturating_sub(max_tokens as usize + PROMPT_BUDGET_MARGIN);
+
+    let outcome = build_rag_prompt_budgeted(
+        &messages,
+        kb_context.as_deref(),
+        search_context.as_deref(),
+        budget,
+        |s| unsafe { ffi::tokenize(model, s, false).len() },
+    );
+    if outcome.dropped_messages > 0 {
+        let _ = tx.send(StreamToken::Notice(format!(
+            "上下文已满，已省略较早的 {} 条对话消息",
+            outcome.dropped_messages
+        )));
+    }
+    if outcome.context_dropped {
+        let _ = tx.send(StreamToken::Notice(
+            "上下文已满，本轮未使用知识库/搜索结果".into(),
+        ));
+    }
+    if outcome.over_budget {
+        let _ = tx.send(StreamToken::Notice(
+            "提示词超出上下文窗口，回复可能不完整（可在设置中调大 n_ctx 或调小输出上限）".into(),
+        ));
+    }
+    let prompt = outcome.prompt;
+
     unsafe {
         let tokens = ffi::tokenize(model, &prompt, true);
         if tokens.is_empty() {
@@ -305,5 +433,78 @@ mod tests {
             prompt
         );
         assert!(prompt.ends_with("<|im_start|>assistant\n"));
+    }
+
+    // ── Prompt budget (Token budgeting + history truncation) ──
+
+    fn msg(role: &str, content: &str) -> crate::store::conversation::Message {
+        crate::store::conversation::Message {
+            role: role.into(),
+            content: content.into(),
+        }
+    }
+
+    /// Deterministic token counter for tests: one token per character.
+    fn count_chars(s: &str) -> usize {
+        s.chars().count()
+    }
+
+    #[test]
+    fn budget_keeps_everything_when_it_fits() {
+        let msgs = vec![
+            msg("system", "你是助手"),
+            msg("user", "第一问?第一问"),
+            msg("assistant", "第一答"),
+            msg("user", "第二问?第二问"),
+        ];
+        let out = build_rag_prompt_budgeted(&msgs, Some("参考内容"), None, 10_000, count_chars);
+        assert_eq!(out.dropped_messages, 0);
+        assert!(!out.context_dropped);
+        assert!(!out.over_budget);
+        assert!(out.prompt.contains("第一问"));
+        assert!(out.prompt.contains("第二问"));
+        assert!(out.prompt.contains("参考内容"));
+    }
+
+    #[test]
+    fn budget_drops_oldest_history_first_keeps_system_and_last_question() {
+        let msgs = vec![
+            msg("system", "系统提示"),
+            msg("user", "OLDEST-USER-一个问题很长的旧消息"),
+            msg("assistant", "OLDEST-BOT-旧回复"),
+            msg("user", "RECENT-USER"),
+            msg("assistant", "RECENT-BOT"),
+            msg("user", "FINAL-QUESTION"),
+        ];
+        // A budget slightly below the full prompt forces at least one drop.
+        let full_len = build_rag_prompt(&msgs, None, None).chars().count();
+        let budget = full_len - 25;
+        let out = build_rag_prompt_budgeted(&msgs, None, None, budget, count_chars);
+        assert!(out.dropped_messages >= 1, "should drop something");
+        assert!(!out.prompt.contains("OLDEST-USER"), "{}", out.prompt);
+        assert!(out.prompt.contains("系统提示"));
+        assert!(out.prompt.contains("FINAL-QUESTION"), "last question kept");
+    }
+
+    #[test]
+    fn budget_degrades_context_when_history_minimal() {
+        let msgs = vec![msg("system", "系统"), msg("user", "问题")];
+        // Too small for kb context + system + question, but fits without kb.
+        let min = build_rag_prompt(&msgs, None, None).chars().count();
+        let budget = min + 2;
+        let out =
+            build_rag_prompt_budgeted(&msgs, Some("很长的参考文档内容"), None, budget, count_chars);
+        assert!(out.context_dropped, "kb should be dropped first");
+        assert!(!out.prompt.contains("很长的参考文档内容"));
+        assert!(!out.over_budget);
+        assert!(out.prompt.contains("问题"));
+    }
+
+    #[test]
+    fn budget_reports_over_budget_when_minimal_prompt_too_large() {
+        let msgs = vec![msg("system", "系统提示"), msg("user", &"长".repeat(500))];
+        let out = build_rag_prompt_budgeted(&msgs, None, None, 10, count_chars);
+        assert!(out.over_budget);
+        assert_eq!(out.dropped_messages, 0); // nothing droppable
     }
 }
