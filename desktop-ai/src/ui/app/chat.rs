@@ -97,6 +97,39 @@ impl DesktopAI {
                         );
                     });
                 }
+
+                // ── 参考来源：最近一次回复的知识库命中（排名而非百分数）──
+                if let Some((conv_id, sources)) = &self.last_sources {
+                    if conv_id == &self.current_conv.id && !sources.is_empty() {
+                        ui.add_space(8.0);
+                        egui::CollapsingHeader::new(
+                            RichText::new(format!("📚 参考来源（{} 条）", sources.len()))
+                                .size(13.0)
+                                .color(m.primary),
+                        )
+                        .id_salt("kb_sources")
+                        .show(ui, |ui| {
+                            for s in sources {
+                                ui.label(
+                                    RichText::new(format!("#{}  {}", s.rank, s.source))
+                                        .size(12.5)
+                                        .color(m.on_surface),
+                                );
+                                ui.label(
+                                    RichText::new(&s.snippet)
+                                        .size(11.5)
+                                        .color(m.on_surface_variant),
+                                );
+                                ui.add_space(6.0);
+                            }
+                            ui.label(
+                                RichText::new("按检索相关度排序；命中内容已作为参考注入回答")
+                                    .size(10.5)
+                                    .color(m.outline),
+                            );
+                        });
+                    }
+                }
             });
     }
 

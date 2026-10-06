@@ -3,6 +3,7 @@
 pub(crate) mod chunker;
 pub(crate) mod cleaner;
 pub(crate) mod crawler;
+pub(crate) mod kb_job;
 pub(crate) mod robots;
 pub(crate) mod search;
 pub(crate) mod vector_store;

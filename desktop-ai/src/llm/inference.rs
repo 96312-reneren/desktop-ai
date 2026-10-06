@@ -8,6 +8,9 @@ pub(crate) enum StreamToken {
     /// Non-fatal notice for the UI (e.g. "context full, dropped N early
     /// messages"). Never part of the model output.
     Notice(String),
+    /// Retrieval references for this reply (knowledge-base hits), for the
+    /// "参考来源" section under the answer.
+    Sources(Vec<crate::rag::vector_store::SourceRef>),
 }
 
 pub struct LlamaInference {
@@ -173,6 +176,30 @@ pub(crate) fn build_rag_prompt_budgeted<F: Fn(&str) -> usize>(
     }
 }
 
+/// Everything needed to run one generation (keeps `run_inference`'s
+/// parameter list manageable).
+pub(crate) struct InferenceRequest {
+    pub messages: Vec<crate::store::conversation::Message>,
+    pub kb_context: Option<String>,
+    pub search_context: Option<String>,
+    /// Retrieval references surfaced to the UI under the answer.
+    pub sources: Vec<crate::rag::vector_store::SourceRef>,
+    pub max_tokens: u32,
+}
+
+impl InferenceRequest {
+    /// Chat messages from the API / UI without RAG augmentation.
+    pub(crate) fn plain(messages: Vec<crate::store::conversation::Message>) -> Self {
+        Self {
+            messages,
+            kb_context: None,
+            search_context: None,
+            sources: Vec::new(),
+            max_tokens: 2048,
+        }
+    }
+}
+
 /// Run streaming inference with a budgeted prompt. The
 /// `Arc<Mutex<LlamaInference>>` is locked for the entire generation so
 /// concurrent callers (UI chat + API requests) are serialised — llama.cpp
@@ -183,17 +210,27 @@ pub(crate) fn build_rag_prompt_budgeted<F: Fn(&str) -> usize>(
 /// `StreamToken::Notice` is emitted before generation starts.
 pub(crate) fn run_inference(
     inf: Arc<Mutex<LlamaInference>>,
-    messages: Vec<crate::store::conversation::Message>,
-    kb_context: Option<String>,
-    search_context: Option<String>,
+    req: InferenceRequest,
     stop_flag: Arc<std::sync::atomic::AtomicBool>,
     tx: std::sync::mpsc::Sender<StreamToken>,
-    max_tokens: u32,
 ) {
+    let InferenceRequest {
+        messages,
+        kb_context,
+        search_context,
+        sources,
+        max_tokens,
+    } = req;
     let inf_guard = inf.lock().unwrap();
     let (model, ctx) = inf_guard.model_ctx();
     let n_ctx = inf_guard.n_ctx() as usize;
     let budget = n_ctx.saturating_sub(max_tokens as usize + PROMPT_BUDGET_MARGIN);
+
+    // Emit retrieval references first so the UI can show them under the
+    // answer (or while it streams).
+    if !sources.is_empty() {
+        let _ = tx.send(StreamToken::Sources(sources));
+    }
 
     let outcome = build_rag_prompt_budgeted(
         &messages,

@@ -1,14 +1,26 @@
 # docs/ — 评审与评估文档
 
-本目录归档对项目做过的公开评审(移出仓库根目录,保持根目录整洁)。
+本目录归档对项目做过的评审(移出仓库根目录,保持根目录整洁)。
 
 | 文件 | 内容 | 时间 |
 |------|------|------|
-| `security-review.md` | 安全审查(含修复状态表,最新) | 2026-08 |
-| `security-review-v2.md` | 安全审查早期版本(历史留档) | 2026-08 |
+| `security-review.md` | 安全审查(含修复状态表) | 2026-08 |
 | `maintainability-review.md` | 可维护性与文件架构评审(含仓库重建方案附录) | 2026-08 |
+| `improvement-roadmap.md` | 第二轮改进评估(首轮整改确认 + 新问题) | 2026-10 |
 | `project-evaluation-report.md` | 项目评估报告 | 2026-08 |
 
-其中安全审查的结论已全部落实或明确取舍,详见 `security-review.md`
-末尾的"修复状态"表。仓库卫生相关的整改见 git 历史中的
-`refactor: repo hygiene from maintainability review` 提交。
+## 公开范围说明
+
+这些文档包含对项目代码质量的直接评价,**有意**随仓库公开(便于追溯整改过程)。
+如后续需要转为私有,只需从本目录移除并改由仓库外归档。
+
+## 已落实的结论
+
+- 安全审查的结论已全部落实或明确取舍,见 `security-review.md` 末尾的
+  "修复状态"表
+- 可维护性评审的仓库卫生项已整改,见提交
+  `refactor: repo hygiene from maintainability review (P0-P2)` 与
+  仓库历史重写(196 MB → 3.8 MB,88 次提交保留)
+- 改进路线图(roadmap)的优先级 1-8 项:1(RAG token 预算)、4(死依赖/
+  日志桥接)、5(版本单点化)、6(docs 整理)、7(KB 流水线移出 UI)、
+  8(RAG 端到端测试)均已落实;2(检索来源呈现)已实现

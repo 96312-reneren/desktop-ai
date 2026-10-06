@@ -6,8 +6,7 @@ mod sidebar;
 pub(crate) mod theme;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
@@ -15,7 +14,7 @@ use crate::llm::downloader::{self, DownloadMsg};
 use crate::llm::inference::{self, LlamaInference, StreamToken};
 use crate::llm::model_catalog::find_model;
 use crate::platform::hardware::{detect_gpus, detect_hardware, GpuInfo};
-use crate::rag::crawler::extract_pdf_safe;
+use crate::rag::kb_job::{run_kb_job, KbIndexJob, KbIndexMsg};
 use crate::rag::vector_store::VectorStore;
 use crate::server::api_server::ApiServer;
 use crate::server::sandbox::Sandbox;
@@ -44,6 +43,8 @@ pub(crate) struct GenState {
     pub(crate) pending_text: String,
     /// Budget notice shown above the reply (context full / truncated, ...).
     pub(crate) notice: Option<String>,
+    /// Knowledge-base references for this reply ("参考来源" section).
+    pub(crate) sources: Vec<crate::rag::vector_store::SourceRef>,
     rx: mpsc::Receiver<StreamToken>,
     pub(crate) stop_flag: Arc<AtomicBool>,
 }
@@ -54,39 +55,6 @@ pub(crate) struct GenState {
 pub(crate) struct KbJobState {
     rx: mpsc::Receiver<KbIndexMsg>,
     pub(crate) cancel: Arc<AtomicBool>,
-}
-
-/// 后台索引线程 → UI 线程的消息。
-enum KbIndexMsg {
-    Progress {
-        frac: f32,
-        status: String,
-    },
-    Done {
-        status: String,
-        status_message: String,
-        clear_url: bool,
-        clear_title: bool,
-        clear_content: bool,
-    },
-    Error(String),
-}
-
-/// 待执行的索引任务：UI 线程只做参数准备与校验，重活在后台线程完成。
-enum KbIndexJob {
-    File {
-        path: PathBuf,
-        filename: String,
-        ext: String,
-    },
-    Paste {
-        title: String,
-        content: String,
-    },
-    Crawl {
-        url: String,
-        depth: u32,
-    },
 }
 
 // ─── Model load state (off-UI-thread loading) ──────────
@@ -180,6 +148,9 @@ pub(crate) struct DesktopAI {
     // Chat
     pub(crate) input_text: String,
     pub(crate) gen: Option<GenState>,
+    /// Retrieval references of the most recent reply, shown under the chat
+    /// ("参考来源"): (conversation id, sources).
+    pub(crate) last_sources: Option<(String, Vec<crate::rag::vector_store::SourceRef>)>,
     /// Thread handle for the active inference. Joined in poll_generation
     /// when Done is received (returns immediately — the thread is already
     /// finished at that point). On abrupt process exit the OS reclaims all
@@ -247,225 +218,6 @@ pub(crate) enum ConfirmAction {
     UninstallApp,
 }
 
-/// 成功收尾信息：文案由后台线程生成，UI 线程只负责应用。
-struct KbDoneInfo {
-    single_status: String,
-    single_message: String,
-    clear_url: bool,
-    clear_title: bool,
-    clear_content: bool,
-}
-
-/// 后台知识库索引线程入口：按任务类型执行读取/爬取、分块、向量化与入库，
-/// 通过 `tx` 上报进度与结果；UI 线程由 [`DesktopAI::poll_kb_job`] 接收。
-fn run_kb_job(
-    store: Arc<VectorStore>,
-    job: KbIndexJob,
-    cancel: Arc<AtomicBool>,
-    tx: mpsc::Sender<KbIndexMsg>,
-) {
-    match job {
-        KbIndexJob::File {
-            path,
-            filename,
-            ext,
-        } => {
-            let content = match ext.as_str() {
-                "pdf" => match extract_pdf_safe(&path) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        let _ = tx.send(KbIndexMsg::Error(format!("PDF解析失败: {}", e)));
-                        return;
-                    }
-                },
-                _ => match std::fs::read_to_string(&path) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        let _ = tx.send(KbIndexMsg::Error(format!("读取失败: {}", e)));
-                        return;
-                    }
-                },
-            };
-            let _ = tx.send(KbIndexMsg::Progress {
-                frac: 0.2,
-                status: "分块中...".into(),
-            });
-            let result = index_content(&store, &filename, &content, 500, 50, &cancel, &tx);
-            finish_kb_job(
-                &tx,
-                result,
-                KbDoneInfo {
-                    single_status: format!("已添加: {}", filename),
-                    single_message: format!("已索引文档: {}", filename),
-                    clear_url: false,
-                    clear_title: false,
-                    clear_content: false,
-                },
-            );
-        }
-        KbIndexJob::Paste { title, content } => {
-            let char_count = content.chars().count();
-            let _ = tx.send(KbIndexMsg::Progress {
-                frac: 0.2,
-                status: format!("分块中... ({:.0} 字符)", char_count as f64),
-            });
-            let result = index_content(&store, &title, &content, 512, 64, &cancel, &tx);
-            finish_kb_job(
-                &tx,
-                result,
-                KbDoneInfo {
-                    single_status: "完成".into(),
-                    single_message: format!("已添加文档: {}", title),
-                    clear_url: false,
-                    clear_title: true,
-                    clear_content: true,
-                },
-            );
-        }
-        KbIndexJob::Crawl { url, depth } => {
-            let _ = tx.send(KbIndexMsg::Progress {
-                frac: 0.05,
-                status: if depth > 1 {
-                    format!("深度爬取(≤{}层): {}", depth, url)
-                } else {
-                    format!("正在爬取: {}", url)
-                },
-            });
-            let results = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                if depth > 1 {
-                    let config = crate::rag::crawler::CrawlConfig {
-                        max_depth: depth,
-                        max_pages: 15,
-                        ..Default::default()
-                    };
-                    crate::rag::crawler::crawl_with_depth(&url, config)
-                } else {
-                    vec![crate::rag::crawler::crawl_url(&url)]
-                }
-            }))
-            .unwrap_or_else(|_| {
-                // A panic inside the crawler must not kill the job silently.
-                let _ = tx.send(KbIndexMsg::Error("爬取过程发生内部错误，已中止".into()));
-                Vec::new()
-            });
-
-            let total = results.len();
-            let mut added = 0usize;
-            for result in &results {
-                if cancel.load(Ordering::Relaxed) {
-                    let _ = tx.send(KbIndexMsg::Error("已取消".into()));
-                    return;
-                }
-                match result {
-                    Ok(page) => {
-                        let _ = tx.send(KbIndexMsg::Progress {
-                            frac: 0.3 + (added as f32 / total as f32) * 0.6,
-                            status: format!(
-                                "索引 {}/{}: {}",
-                                added + 1,
-                                total,
-                                &page.title[..page.title.len().min(30)]
-                            ),
-                        });
-                        if let Err(e) = store.add_document(&page.title, &page.text, 500, 50) {
-                            log::warn!("索引失败 {}: {}", page.title, e);
-                        }
-                        added += 1;
-                    }
-                    Err(e) => {
-                        log::warn!("爬取失败: {}", e);
-                    }
-                }
-            }
-
-            if added > 0 {
-                let _ = tx.send(KbIndexMsg::Done {
-                    status: format!("完成: {} 个文档已索引", added),
-                    status_message: format!("已爬取 {} 个文档", added),
-                    clear_url: true,
-                    clear_title: false,
-                    clear_content: false,
-                });
-            } else {
-                let _ = tx.send(KbIndexMsg::Error(
-                    "未爬取到有效内容。页面可能需 JavaScript 渲染，或 URL 不正确。".into(),
-                ));
-            }
-        }
-    }
-}
-
-/// 分块 + 向量化 + 入库，返回 `(成功段数, 总段数)`。
-/// 大文档自动分段并逐段上报进度；单段文档直接入库。
-fn index_content(
-    store: &VectorStore,
-    title: &str,
-    content: &str,
-    chunk_size: usize,
-    overlap: usize,
-    cancel: &AtomicBool,
-    tx: &mpsc::Sender<KbIndexMsg>,
-) -> Result<(usize, usize), String> {
-    let char_count = content.chars().count();
-    if char_count > config::KB_SINGLE_DOC_CHARS {
-        let chunks = crate::rag::chunker::chunk_text(content, chunk_size, overlap);
-        let total = chunks.len();
-        let mut added = 0usize;
-        for (i, chunk) in chunks.iter().enumerate() {
-            if cancel.load(Ordering::Relaxed) {
-                return Err("已取消".into());
-            }
-            let _ = tx.send(KbIndexMsg::Progress {
-                frac: 0.3 + (i as f32 / total as f32) * 0.65,
-                status: format!("索引分段 {}/{}", i + 1, total),
-            });
-            let seg_title = format!("{} 段{}", title, i + 1);
-            match store.add_document(&seg_title, chunk, chunk_size, overlap) {
-                Ok(()) => added += 1,
-                Err(e) => log::warn!("索引段失败 {}: {}", seg_title, e),
-            }
-        }
-        Ok((added, total))
-    } else {
-        store
-            .add_document(title, content, chunk_size, overlap)
-            .map_err(|e| format!("索引失败: {}", e))?;
-        Ok((1, 1))
-    }
-}
-
-/// 统一发送索引收尾消息：成功 → Done，失败 → Error。
-fn finish_kb_job(
-    tx: &mpsc::Sender<KbIndexMsg>,
-    result: Result<(usize, usize), String>,
-    info: KbDoneInfo,
-) {
-    match result {
-        Ok((added, total)) => {
-            if total > 1 {
-                let _ = tx.send(KbIndexMsg::Done {
-                    status: "完成".into(),
-                    status_message: format!("文档较长，已自动切分为 {}/{} 段索引", added, total),
-                    clear_url: info.clear_url,
-                    clear_title: info.clear_title,
-                    clear_content: info.clear_content,
-                });
-            } else {
-                let _ = tx.send(KbIndexMsg::Done {
-                    status: info.single_status,
-                    status_message: info.single_message,
-                    clear_url: info.clear_url,
-                    clear_title: info.clear_title,
-                    clear_content: info.clear_content,
-                });
-            }
-        }
-        Err(e) => {
-            let _ = tx.send(KbIndexMsg::Error(e));
-        }
-    }
-}
-
 #[allow(clippy::new_without_default)]
 impl DesktopAI {
     pub(crate) fn new() -> Self {
@@ -494,6 +246,7 @@ impl DesktopAI {
             show_shortcut_prompt,
             input_text: String::new(),
             gen: None,
+            last_sources: None,
             gen_handle: None,
             model_load: None,
             downloads: HashMap::new(),
@@ -1015,35 +768,38 @@ impl DesktopAI {
             conv_id,
             pending_text: String::new(),
             notice: None,
+            sources: Vec::new(),
             rx,
             stop_flag,
         });
 
         let handle = thread::spawn(move || {
-            let kb_context = if let Some(ref qv) = query_vec {
+            let (kb_context, kb_sources) = if let Some(ref qv) = query_vec {
                 if !kb_data.is_empty() {
                     let results =
                         crate::rag::vector_store::search_by_vector(&kb_data, qv, rag_top_k);
                     if !results.is_empty() {
                         let mut ctx = String::new();
                         for (i, hit) in results.iter().enumerate() {
+                            // Rank only — a cosine "similarity %" would be
+                            // misleading (not a probability, can be negative).
                             ctx.push_str(&format!(
-                                "[参考{} 来源: {} 相似度{:.0}%]\n{}\n\n",
+                                "[参考{}（按相关度排序） 来源: {}]\n{}\n\n",
                                 i + 1,
                                 hit.source,
-                                hit.score * 100.0,
                                 hit.chunk
                             ));
                         }
-                        Some(ctx)
+                        let sources = crate::rag::vector_store::SourceRef::from_hits(&results);
+                        (Some(ctx), sources)
                     } else {
-                        None
+                        (None, Vec::new())
                     }
                 } else {
-                    None
+                    (None, Vec::new())
                 }
             } else {
-                None
+                (None, Vec::new())
             };
 
             let search_context = if do_search {
@@ -1071,7 +827,18 @@ impl DesktopAI {
                 None
             };
 
-            inference::run_inference(inf, messages, kb_context, search_context, stop, tx, max_out);
+            inference::run_inference(
+                inf,
+                inference::InferenceRequest {
+                    messages,
+                    kb_context,
+                    search_context,
+                    sources: kb_sources,
+                    max_tokens: max_out,
+                },
+                stop,
+                tx,
+            );
         });
         self.gen_handle = Some(handle);
     }
@@ -1119,12 +886,19 @@ impl DesktopAI {
                     // Context-budget notice: keep the latest one for display.
                     gen.notice = Some(msg);
                 }
+                StreamToken::Sources(sources) => {
+                    gen.sources = sources;
+                }
             }
         }
 
         if done {
             let response = gen.pending_text.clone();
             let conv_id = gen.conv_id.clone();
+            // Keep this reply's retrieval references for the source section.
+            if !gen.sources.is_empty() {
+                self.last_sources = Some((conv_id.clone(), gen.sources.clone()));
+            }
 
             if let Some(mut conv) = Conversation::load(&conv_id) {
                 conv.add_message("assistant", &response);

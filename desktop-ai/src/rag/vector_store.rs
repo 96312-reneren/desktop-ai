@@ -14,8 +14,35 @@ pub(crate) struct StoredChunk {
 #[derive(Debug, Clone)]
 pub(crate) struct SearchHit {
     pub chunk: String,
+    /// Raw retrieval score (cosine / bm25). Not shown to users as a
+    /// percentage — it is a ranking signal, not a probability.
+    #[allow(dead_code)]
     pub score: f32,
     pub source: String,
+}
+
+/// A retrieval reference surfaced to the user under an answer ("参考来源"):
+/// rank (not a similarity percentage — cosine scores are not a probability
+/// and can even be negative), the document title / URL, and a short excerpt.
+#[derive(Debug, Clone)]
+pub(crate) struct SourceRef {
+    /// 1-based rank within this retrieval.
+    pub rank: usize,
+    pub source: String,
+    pub snippet: String,
+}
+
+impl SourceRef {
+    pub(crate) fn from_hits(hits: &[SearchHit]) -> Vec<Self> {
+        hits.iter()
+            .enumerate()
+            .map(|(i, hit)| Self {
+                rank: i + 1,
+                source: hit.source.clone(),
+                snippet: hit.chunk.chars().take(80).collect(),
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

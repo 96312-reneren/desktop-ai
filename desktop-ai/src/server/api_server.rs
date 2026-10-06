@@ -354,7 +354,12 @@ fn non_stream_response(
     let stop = stop_flag.clone();
     thread::spawn(move || {
         // API default output cap; prompt budgeting is handled inside.
-        crate::llm::inference::run_inference(inf, messages, None, None, stop, tx, 2048);
+        crate::llm::inference::run_inference(
+            inf,
+            crate::llm::inference::InferenceRequest::plain(messages),
+            stop,
+            tx,
+        );
     });
 
     let mut output = String::new();
@@ -365,8 +370,9 @@ fn non_stream_response(
                 log::error!("Inference error: {}", e);
                 output.push_str("[error: internal error]");
             }
-            // Budget notices are UI-facing; API responses stay clean.
+            // Budget notices / sources are UI-facing; API responses stay clean.
             StreamToken::Notice(_) => {}
+            StreamToken::Sources(_) => {}
             StreamToken::Done => break,
         }
         if output.len() > 4096 {
@@ -419,7 +425,12 @@ fn stream_sse_response(
     let stop = stop_flag.clone();
     thread::spawn(move || {
         // API default output cap; prompt budgeting is handled inside.
-        crate::llm::inference::run_inference(inf, messages, None, None, stop, tx, 2048);
+        crate::llm::inference::run_inference(
+            inf,
+            crate::llm::inference::InferenceRequest::plain(messages),
+            stop,
+            tx,
+        );
     });
 
     let mut buf = String::new();
@@ -430,8 +441,9 @@ fn stream_sse_response(
                 log::error!("Inference error: {}", e);
                 buf.push_str("[error: internal error]");
             }
-            // Budget notices are UI-facing; API responses stay clean.
+            // Budget notices / sources are UI-facing; API responses stay clean.
             StreamToken::Notice(_) => {}
+            StreamToken::Sources(_) => {}
             StreamToken::Done => break,
         }
         if buf.chars().count() >= 50 {
