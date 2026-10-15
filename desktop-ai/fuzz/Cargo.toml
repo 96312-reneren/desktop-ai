@@ -1,0 +1,76 @@
+[package]
+name = "desktop-ai-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+# 以 rlib-only 垫片依赖同一份源码（见 host/Cargo.toml 顶部注释），
+# 对外暴露的 crate 名仍是 desktop_ai。
+desktop-ai-fuzz-host = { path = "host" }
+
+[[bin]]
+name = "chunk_text"
+path = "fuzz_targets/chunk_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "clean_text"
+path = "fuzz_targets/clean_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssrf_url"
+path = "fuzz_targets/ssrf_url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "extract_links"
+path = "fuzz_targets/extract_links.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "resolve_url"
+path = "fuzz_targets/resolve_url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ddg_html"
+path = "fuzz_targets/ddg_html.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_parser"
+path = "fuzz_targets/http_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "robots_rules"
+path = "fuzz_targets/robots_rules.rs"
+test = false
+doc = false
+bench = false
+
+# 独立工作区：fuzz/ 不加入主 crate 的成员集合，
+# desktop-ai/ 下的 `cargo build` / `cargo test` / CI 完全不会触碰本目录。
+[workspace]

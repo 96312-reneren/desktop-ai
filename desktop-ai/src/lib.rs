@@ -43,6 +43,52 @@ pub use platform::android;
 
 /// 红队对抗性用例集：针对 SSRF 黑名单覆盖度、文件沙盒路径穿越、
 /// 知识库全文检索注入与语法健壮性。仅测试构建编译。
+/// 仅在 `cargo fuzz` 构建下存在：cargo-fuzz 通过 `RUSTFLAGS --cfg fuzzing`
+/// 编译整个依赖图，本模块随之把 crate 内部的纯解析函数以 `pub` 薄包装
+/// 暴露给 `fuzz/` 独立 crate 使用。稳定构建与 CI 完全看不到本模块。
+///
+/// 使用薄包装而非 `pub use` 再导出：被包装项均为 `pub(crate)`，以更高
+/// 可见性重新导出私有项会触发 E0365。返回值里的 crate 私有类型
+///（`ParsedRequest` / `SearchResult`）也在包装内先行拆解，避免私有类型
+/// 出现在 `pub` 签名中。
+#[cfg(fuzzing)]
+pub mod fuzz_api {
+    /// SSRF 黑名单谓词：字面 IP 等价写法、IPv6 隧道 / NAT64 / 6to4 全判定。
+    pub fn is_ssrf_url(url: &str) -> bool {
+        crate::rag::crawler::is_ssrf_url(url)
+    }
+
+    /// 从 HTML 提取链接（内置 50 条上限与未闭合 href 防越界钳制）。
+    pub fn extract_links(html: &str, base_url: &str) -> Vec<String> {
+        crate::rag::crawler::extract_links(html, base_url)
+    }
+
+    /// 相对 / 绝对 URL 解析（协议相对、根相对、相对路径四分支）。
+    pub fn resolve_url(link: &str, base: &str) -> String {
+        crate::rag::crawler::resolve_url(link, base)
+    }
+
+    /// DuckDuckGo 结果页解析，拆解为 (title, url, snippet) 元组。
+    pub fn parse_ddg_html(html: &str) -> Result<Vec<(String, String, String)>, String> {
+        crate::rag::search::parse_ddg_html(html).map(|results| {
+            results
+                .into_iter()
+                .map(|r| (r.title, r.url, r.snippet))
+                .collect()
+        })
+    }
+
+    /// 手写 HTTP 请求解析器（本机 API 服务器入口）。
+    pub fn parse_http_validated(raw: &str) -> Result<(), (u16, &'static str)> {
+        crate::server::api_server::parse_http_validated(raw).map(|_| ())
+    }
+
+    /// robots.txt 解析 + RFC 9309 匹配（最长规则胜、Allow 平局胜）。
+    pub fn robots_is_allowed(text: &str, path: &str) -> bool {
+        crate::rag::robots::RobotsRules::parse(text).is_allowed(path)
+    }
+}
+
 #[cfg(test)]
 mod redteam;
 

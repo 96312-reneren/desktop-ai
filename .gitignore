@@ -75,3 +75,10 @@ System Volume Information/
 
 # ── 测试临时目录 ──
 **/desktop_ai_*_test/
+
+# ── cargo-fuzz 语料与崩溃产物（fuzz/ 为独立 crate，不参与主构建与 CI）──
+# 注意：模式含斜杠时锚定到仓库根，而 fuzz 位于 desktop-ai/fuzz/，
+# 必须带 desktop-ai/ 前缀才生效（曾因差一层导致 corpus 全量入库）。
+desktop-ai/fuzz/corpus/
+desktop-ai/fuzz/artifacts/
+desktop-ai/fuzz/coverage/

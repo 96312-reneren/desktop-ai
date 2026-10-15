@@ -7,6 +7,12 @@ edition = "2021"
 rust-version = "1.81"
 description = "桌面AI - 本地大模型聊天应用 (RAG知识库)"
 
+# src/lib.rs 的 fuzz_api 模块由 cargo-fuzz 的 --cfg fuzzing 门控（见 fuzz/
+# 子项目）。注册该 cfg 名，否则 clippy -D warnings 会把 unexpected_cfgs
+# 升格为错误（fuzzing 不在 rustc 的 well-known cfg 列表里）。
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
 [lib]
 crate-type = ["rlib", "cdylib"]
 
