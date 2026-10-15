@@ -387,21 +387,50 @@ fn migrate_from_json(store_dir: &std::path::Path, c: &mut Connection) -> Result<
     Ok(())
 }
 
-/// Rebuild the FTS index if chunks exist but the FTS table is empty
-/// (e.g. data created before FTS support was added). Cheap to run and
-/// idempotent: only fires when the counts disagree.
+/// Bring the FTS index back in sync with `chunks` when they disagree.
+///
+/// 三种失同步都必须修复，只比计数不够：
+/// 1. `chunks` 有行而 FTS 缺行（FTS 支持加入前的老数据、迁移导入）→ 全量回填；
+/// 2. `chunks_fts` 有孤儿行（文档已删但 FTS 行残留）→ 孤儿行会毒化计数启发式：
+///    一条孤儿 + 一条漏索引恰好让计数相等，跳过本该发生的重建；且 `chunks`
+///    为空时旧逻辑直接早退，孤儿 FTS 行永久残留（当前只是被 `search_text`
+///    的 INNER JOIN 挡住才不可见——那面 JOIN 是承重墙，这里做存储层清理）；
+/// 3. `chunks` 有孤儿行（历史库曾在 foreign_keys=OFF 下删文档、CASCADE 未
+///    触发的残留）→ 直接从 chunks 回读重建会把已删内容重新灌回索引，且死行
+///    永不清理。
+///
+/// 因此：发现任一孤儿或计数不一致时，在单个事务内先自愈删除两类孤儿行，
+/// 再从活文档的 chunks 全量重建 FTS。幂等；健康库只花三次 COUNT。
 fn rebuild_fts_if_stale(c: &mut Connection) -> rusqlite::Result<()> {
     let chunk_count: i64 = c.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
     let fts_count: i64 = c.query_row("SELECT COUNT(*) FROM chunks_fts", [], |r| r.get(0))?;
-    if chunk_count == 0 || chunk_count == fts_count {
+    let orphan_fts: i64 = c.query_row(
+        "SELECT COUNT(*) FROM chunks_fts WHERE doc_id NOT IN (SELECT id FROM documents)",
+        [],
+        |r| r.get(0),
+    )?;
+    let orphan_chunks: i64 = c.query_row(
+        "SELECT COUNT(*) FROM chunks WHERE doc_id NOT IN (SELECT id FROM documents)",
+        [],
+        |r| r.get(0),
+    )?;
+    if orphan_chunks == 0 && orphan_fts == 0 && (chunk_count == 0 || chunk_count == fts_count) {
         return Ok(());
     }
     log::info!(
-        "rebuilding FTS index ({} chunks, {} indexed)",
+        "rebuilding FTS index ({} chunks, {} indexed, {} orphaned FTS rows, {} orphaned chunks)",
         chunk_count,
-        fts_count
+        fts_count,
+        orphan_fts,
+        orphan_chunks
     );
     let tx = c.transaction()?;
+    // 自愈 1：清理无主 chunks 行（历史 foreign_keys=OFF 期间 DELETE 的残留）。
+    tx.execute(
+        "DELETE FROM chunks WHERE doc_id NOT IN (SELECT id FROM documents)",
+        [],
+    )?;
+    // 自愈 2 + 全量重建：清空 FTS 后只从活文档的 chunks 回填。
     tx.execute("DELETE FROM chunks_fts", [])?;
     {
         let mut select = tx.prepare("SELECT doc_id, text FROM chunks")?;
@@ -603,6 +632,135 @@ mod tests {
         assert_eq!(hits.len(), 1, "backfilled chunk must be searchable");
         assert_eq!(hits[0].source, "测试文档");
         drop(store);
+    }
+
+    #[test]
+    fn delete_document_purges_cascade_and_survives_fts_rebuild() {
+        let dir = tempfile::TempDir::new().unwrap();
+        {
+            let store = VectorStore::new(dir.path());
+            index_chunk_sql(&store, "d1", "待删文档", "甲辰独语 文档一号 保密内容");
+            index_chunk_sql(&store, "d2", "保留文档", "香蕉面包 完全无关 食谱");
+            assert_eq!(store.search_text("甲辰独语", 5).unwrap().len(), 1);
+            assert_eq!(store.search_text("香蕉面包", 5).unwrap().len(), 1);
+
+            store.delete_document("d1").unwrap();
+
+            // ON DELETE CASCADE 不变量：chunks 行必须随文档删除而消失
+            //（delete_document 不显式删 chunks，全靠 foreign_keys=ON）。
+            let orphaned: i64 = store
+                .db
+                .with_conn(|c| {
+                    c.query_row("SELECT COUNT(*) FROM chunks WHERE doc_id = 'd1'", [], |r| {
+                        r.get(0)
+                    })
+                })
+                .unwrap();
+            assert_eq!(orphaned, 0, "CASCADE 必须清掉已删文档的 chunks 行");
+
+            // 已删内容立刻不可检索；其余文档不受影响。
+            assert!(store.search_text("甲辰独语", 5).unwrap().is_empty());
+            assert_eq!(store.search_text("香蕉面包", 5).unwrap().len(), 1);
+        }
+        // 重开（触发 rebuild_fts_if_stale）：已删内容不得借全量重建复活。
+        let store2 = VectorStore::new(dir.path());
+        assert!(
+            store2.search_text("甲辰独语", 5).unwrap().is_empty(),
+            "rebuild 后已删内容不可检索"
+        );
+        assert_eq!(store2.search_text("香蕉面包", 5).unwrap().len(), 1);
+        assert_eq!(store2.documents().len(), 1);
+        drop(store2);
+    }
+
+    #[test]
+    fn rebuild_fts_self_heals_orphaned_rows_despite_equal_counts() {
+        let dir = tempfile::TempDir::new().unwrap();
+        {
+            let store = VectorStore::new(dir.path());
+            index_chunk_sql(&store, "d1", "活文档", "正常内容 活文档 段落");
+            // 模拟历史脏库：老版本在 foreign_keys=OFF 时 DELETE documents 不触发
+            // CASCADE 留下的无主 chunks 行，以及中断删除留下的无主 FTS 行。
+            // 计数恰好相等（2==2）——纯计数启发式会直接早退不修复。
+            store
+                .db
+                .with_conn(|c| {
+                    c.pragma_update(None, "foreign_keys", "OFF")?;
+                    c.execute(
+                        "INSERT INTO chunks (doc_id, idx, text, embedding) \
+                         VALUES ('ghost_c', 0, '幽灵块 已删残留', x'00000000')",
+                        [],
+                    )?;
+                    c.execute(
+                        "INSERT INTO chunks_fts (doc_id, text) \
+                         VALUES ('ghost_f', '幽灵行 已删残留')",
+                        [],
+                    )?;
+                    c.pragma_update(None, "foreign_keys", "ON")?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let store2 = VectorStore::new(dir.path());
+        let (chunks_total, fts_total, ghost_chunks): (i64, i64, i64) = store2
+            .db
+            .with_conn(|c| {
+                Ok((
+                    c.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?,
+                    c.query_row("SELECT COUNT(*) FROM chunks_fts", [], |r| r.get(0))?,
+                    c.query_row(
+                        "SELECT COUNT(*) FROM chunks \
+                         WHERE doc_id NOT IN (SELECT id FROM documents)",
+                        [],
+                        |r| r.get(0),
+                    )?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(ghost_chunks, 0, "无主 chunks 行应被自愈清除");
+        assert_eq!(
+            fts_total, 1,
+            "无主 FTS 行应被清除，只留活文档的行（得到 {fts_total}）"
+        );
+        assert_eq!(chunks_total, 1);
+        // 用户可见层面：幽灵内容不可检索，活文档照常可检索。
+        assert!(store2.search_text("幽灵块", 5).unwrap().is_empty());
+        assert!(store2.search_text("幽灵行", 5).unwrap().is_empty());
+        assert_eq!(store2.search_text("正常内容", 5).unwrap().len(), 1);
+        drop(store2);
+    }
+
+    #[test]
+    fn rebuild_fts_purges_orphans_even_when_chunks_table_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        {
+            let store = VectorStore::new(dir.path());
+            index_chunk_sql(&store, "d1", "文档", "唯一内容 独占词条");
+            store.delete_document("d1").unwrap(); // 干净清空：chunks=0, fts=0
+            store
+                .db
+                .with_conn(|c| {
+                    c.pragma_update(None, "foreign_keys", "OFF")?;
+                    c.execute(
+                        "INSERT INTO chunks_fts (doc_id, text) \
+                         VALUES ('ghost', '复活 词条 残留')",
+                        [],
+                    )?;
+                    c.pragma_update(None, "foreign_keys", "ON")?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        // 旧逻辑在 chunks==0 时直接早退，孤儿 FTS 行会永久残留。
+        let store2 = VectorStore::new(dir.path());
+        let fts_total: i64 = store2
+            .db
+            .with_conn(|c| c.query_row("SELECT COUNT(*) FROM chunks_fts", [], |r| r.get(0)))
+            .unwrap();
+        assert_eq!(fts_total, 0, "空库时孤儿 FTS 行也必须被清理");
+        assert!(store2.search_text("复活", 5).unwrap().is_empty());
+        assert!(store2.documents().is_empty());
+        drop(store2);
     }
 
     #[test]
