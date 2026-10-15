@@ -53,7 +53,7 @@ fn main() {
     };
     let inference = Arc::new(Mutex::new(inference));
 
-    let _server = desktop_ai::ApiServer::start(inference, port, model_name, token.clone());
+    let _server = desktop_ai::ApiServer::start(Some(inference), port, model_name, token.clone());
     println!("API 服务已启动: http://127.0.0.1:{}/v1", port);
     if generated {
         println!("已自动生成 API token（请配置到客户端）: {}", token);

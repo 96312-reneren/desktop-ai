@@ -409,6 +409,11 @@ fn fetch_url(
         let builder = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(cfg.timeout_secs))
             .user_agent(super::robots::USER_AGENT)
+            // Ignore system/http proxy env vars: a proxy would make reqwest
+            // tunnel via CONNECT and do its OWN DNS resolution, silently
+            // bypassing the pin_host() pin above (the proxy resolves the
+            // hostname, possibly reaching intranet hosts the pin rejected).
+            .no_proxy()
             // P0-5: disable auto-redirect so we can re-validate each hop.
             .redirect(reqwest::redirect::Policy::none())
             // Explicit TLS verification (default, but stated for consistency

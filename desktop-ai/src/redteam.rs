@@ -462,10 +462,7 @@ fn redteam_search_parse_hostile_html_no_panic() {
         ),
         (
             "属性值含闭合锚",
-            format!(
-                r#"{}<a class="result__a" title="</a>">T</a>"#,
-                marker
-            ),
+            format!(r#"{}<a class="result__a" title="</a>">T</a>"#, marker),
         ),
         (
             "百 KB 标题",
@@ -552,7 +549,9 @@ fn redteam_sandbox_ads_write_confined_not_listed() {
 fn redteam_sandbox_device_names_pass_path_gate() {
     let tmp = tempfile::TempDir::new().unwrap();
     let sb = Sandbox::new(tmp.path().join("box"));
-    for name in ["CON", "PRN", "AUX", "NUL", "COM1", "LPT2", "CON.txt", "COM1.txt"] {
+    for name in [
+        "CON", "PRN", "AUX", "NUL", "COM1", "LPT2", "CON.txt", "COM1.txt",
+    ] {
         let r = sb.safe_path(name);
         assert!(r.is_ok(), "safe_path({name}) 不应 Err: {:?}", r);
     }

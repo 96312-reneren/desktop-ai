@@ -395,12 +395,8 @@ impl DesktopAI {
                     }
                     let port = self.config.api_port;
                     let token = self.config.api_token.clone();
-                    let server = ApiServer::start(
-                        Some(Arc::clone(&inf)),
-                        port,
-                        model_name.clone(),
-                        token,
-                    );
+                    let server =
+                        ApiServer::start(Some(Arc::clone(&inf)), port, model_name.clone(), token);
                     self.api_server = Some(server);
                     self.status_message = format!(
                         "{} 就绪{} | API: http://127.0.0.1:{}/v1",
@@ -990,10 +986,9 @@ impl DesktopAI {
         };
         // 大小预检：导入的是用户可选的任意本地 JSON，先查 metadata 再读取，
         // 防止 read_to_string 对巨型文件无界分配（crawler 侧已有 5MB 先例）。
-        if let Err(e) = crate::rag::kb_job::ensure_file_size(
-            &path,
-            crate::rag::kb_job::MAX_IMPORT_JSON_BYTES,
-        ) {
+        if let Err(e) =
+            crate::rag::kb_job::ensure_file_size(&path, crate::rag::kb_job::MAX_IMPORT_JSON_BYTES)
+        {
             self.error_message = Some(e);
             return;
         }

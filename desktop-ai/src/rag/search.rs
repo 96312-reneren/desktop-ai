@@ -27,10 +27,7 @@ pub(crate) fn search_duckduckgo(query: &str) -> Result<Vec<SearchResult>, String
 /// 固定搜索端点的 URL 构建：查询串全量百分号编码，无法注入额外参数、
 /// 改写主机或路径。`pub(crate)` 供 redteam 用例锁定该性质。
 pub(crate) fn build_search_url(query: &str) -> String {
-    format!(
-        "https://html.duckduckgo.com/html/?q={}",
-        urlencoding(query)
-    )
+    format!("https://html.duckduckgo.com/html/?q={}", urlencoding(query))
 }
 
 fn fetch_search_html(url: &str) -> Result<String, String> {
@@ -79,8 +76,7 @@ fn fetch_search_html(url: &str) -> Result<String, String> {
                 .get("location")
                 .and_then(|v| v.to_str().ok())
                 .ok_or("重定向缺少 Location 头".to_string())?;
-            current_url =
-                crate::rag::crawler::validate_redirect_target(location, &current_url)?;
+            current_url = crate::rag::crawler::validate_redirect_target(location, &current_url)?;
             hops += 1;
             continue;
         }

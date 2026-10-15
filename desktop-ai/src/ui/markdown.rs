@@ -357,9 +357,7 @@ pub(crate) fn render_markdown(ui: &mut Ui, text: &str, font_size: f32) {
 /// 或空白字符的 URL，防止 "java\tscript:" 这类混淆绕过。
 fn is_safe_link_url(raw: &str) -> bool {
     let url = raw.trim();
-    if url.is_empty()
-        || url.contains(|c: char| c.is_control())
-        || url.contains(char::is_whitespace)
+    if url.is_empty() || url.contains(|c: char| c.is_control()) || url.contains(char::is_whitespace)
     {
         return false;
     }
@@ -442,9 +440,9 @@ mod tests {
             "data:text/html,<script>alert(1)</script>",
             "\\\\attacker\\share\\payload.exe",
             "//attacker.com/redirect",
-            "www.example.com",   // 无 scheme
-            "example.com/path",  // 相对路径
-            "tel:+1234567890",   // OS 注册协议
+            "www.example.com",  // 无 scheme
+            "example.com/path", // 相对路径
+            "tel:+1234567890",  // OS 注册协议
             "ms-settings:default",
             "ftp://example.com/file",
         ] {

@@ -54,9 +54,7 @@ fn get(port: u16, path: &str) -> String {
 }
 
 fn post_chat(port: u16, token: Option<&str>, body: &str) -> String {
-    let mut req = format!(
-        "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
-    );
+    let mut req = "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n".to_string();
     if let Some(t) = token {
         req.push_str(&format!("Authorization: Bearer {}\r\n", t));
     }

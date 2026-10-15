@@ -2,12 +2,33 @@
 //!
 //! Rules are fetched once per origin, parsed into user-agent groups, and
 //! evaluated with the standard longest-match semantics (Allow wins ties).
-//! Fetch failures (404/5xx/network) are treated as "no restrictions", the
-//! common lenient policy for small crawlers.
+//!
+//! Status handling (RFC 9309 §2.2.3.1):
+//! - 2xx: parse the body (capped at 500 KiB, streamed — never buffered whole).
+//! - 401/403: full disallow — the server explicitly does not want robots.
+//! - other 4xx (404 etc.): allow all, per RFC 9309 §2.2.3.1.5.
+//! - 5xx: full disallow — server-side trouble means "don't crawl now"
+//!   (RFC 9309 §2.2.3.1.3 recommends treating unreachable as full disallow;
+//!   also prevents a hostile server from gating us permissive with 503s).
+//! - 3xx (we do not follow robots redirects; the pinned client has
+//!   Policy::none) and network errors: allow all — RFC 9309 permits the
+//!   lenient reading for temporary unavailability, which is friendlier for
+//!   a user-initiated desktop crawler on flaky networks. SSRF safety never
+//!   depends on robots.txt, so leniency here is not a security hole.
 
 use reqwest::blocking::Client;
 use std::collections::HashMap;
+use std::io::Read;
 use std::sync::{Arc, Mutex};
+
+/// Cap for a robots.txt body: RFC 9309 §2.2.3.1.1 — parsers SHOULD use at
+/// least 500 KiB of the content. We read at most 500 KiB, streaming, so a
+/// hostile origin cannot make us buffer an unbounded "robots.txt".
+const MAX_ROBOTS_BYTES: usize = 500 * 1024;
+
+/// Body parsed when the server signals "robots not welcome" (401/403) or
+/// server-side failure (5xx): a star group that disallows everything.
+const FULL_DISALLOW_TEXT: &str = "User-agent: *\nDisallow: /\n";
 
 /// User-agent token used for robots matching. The full UA header is
 /// "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopAI/5.7"; robots.txt
@@ -229,26 +250,48 @@ impl RobotsCache {
             return Arc::clone(r);
         }
         let robots_url = format!("{}/robots.txt", origin);
-        let text = match client.get(&robots_url).send() {
-            Ok(resp) if resp.status().is_success() => {
-                let limited: String = resp
-                    .text()
-                    .unwrap_or_default()
-                    .chars()
-                    .take(500_000)
-                    .collect();
-                limited
-            }
-            // 4xx/5xx/network error: lenient policy — no restrictions.
-            _ => String::new(),
-        };
-        let rules = Arc::new(RobotsRules::parse(&text));
+        let rules = Arc::new(match client.get(&robots_url).send() {
+            Ok(resp) => rules_from_status(resp.status().as_u16(), || parse_robots_bytes(resp)),
+            // Network error: allow all (see module doc for the rationale).
+            Err(_) => RobotsRules::parse(""),
+        });
         self.entries
             .lock()
             .unwrap()
             .insert(origin.to_string(), Arc::clone(&rules));
         rules
     }
+}
+
+/// Map an HTTP status from the robots.txt fetch to parsed rules.
+/// `body` is only consulted for 2xx responses. Pure function (testable).
+fn rules_from_status(status: u16, body: impl FnOnce() -> RobotsRules) -> RobotsRules {
+    match status {
+        s if (200..300).contains(&s) => body(),
+        401 | 403 => RobotsRules::parse(FULL_DISALLOW_TEXT),
+        s if (400..500).contains(&s) => RobotsRules::parse(""),
+        s if (500..600).contains(&s) => RobotsRules::parse(FULL_DISALLOW_TEXT),
+        // 3xx / 1xx / anything else: we did not follow redirects; treat as
+        // temporarily unavailable → allow all (documented leniency).
+        _ => RobotsRules::parse(""),
+    }
+}
+
+/// Stream the robots.txt body with a hard byte cap. The response is never
+/// buffered whole: we read at most `MAX_ROBOTS_BYTES` (RFC 9309 advises
+/// using the first 500 KiB of oversized files). Truncation that cuts a
+/// multi-byte UTF-8 char is healed with the lossy replacement char.
+fn parse_robots_bytes(resp: reqwest::blocking::Response) -> RobotsRules {
+    let mut buf = Vec::new();
+    // take() caps the read stream; +1 lets us detect oversize cheaply if
+    // needed later, while truncate() enforces the exact cap.
+    let _ = resp
+        .take((MAX_ROBOTS_BYTES + 1) as u64)
+        .read_to_end(&mut buf);
+    if buf.len() > MAX_ROBOTS_BYTES {
+        buf.truncate(MAX_ROBOTS_BYTES);
+    }
+    RobotsRules::parse(&String::from_utf8_lossy(&buf))
 }
 
 #[cfg(test)]
@@ -307,5 +350,78 @@ mod tests {
             split_origin_path("http://example.com"),
             Some(("http://example.com".into(), "/".into()))
         );
+    }
+
+    // ── Status mapping (RFC 9309 §2.2.3.1) ──
+
+    #[test]
+    fn status_5xx_and_401_403_mean_full_disallow() {
+        for status in [401u16, 403, 500, 502, 503, 504] {
+            let r = rules_from_status(status, || RobotsRules::parse(""));
+            assert!(
+                !r.is_allowed("/"),
+                "status {status} should disallow everything"
+            );
+            assert!(!r.is_allowed("/any/path"), "status {status}");
+        }
+    }
+
+    #[test]
+    fn status_404_and_other_4xx_mean_allow_all() {
+        for status in [400u16, 404, 410, 451] {
+            let r = rules_from_status(status, || panic!("body must not be read"));
+            assert!(r.is_allowed("/"), "status {status} should allow all");
+            assert!(r.is_allowed("/private"), "status {status}");
+        }
+    }
+
+    #[test]
+    fn status_3xx_unfollowed_means_allow_all() {
+        // We never follow robots redirects (pinned client, Policy::none);
+        // documented leniency for temporary unavailability.
+        for status in [301u16, 302, 307, 308] {
+            let r = rules_from_status(status, || panic!("body must not be read"));
+            assert!(r.is_allowed("/"), "status {status}");
+        }
+    }
+
+    #[test]
+    fn status_2xx_uses_parsed_body() {
+        let r = rules_from_status(200, || {
+            RobotsRules::parse("User-agent: *\nDisallow: /private/\n")
+        });
+        assert!(!r.is_allowed("/private/x"));
+        assert!(r.is_allowed("/public"));
+        // Body fn must not even be called for non-2xx.
+        let mut called = false;
+        let r = rules_from_status(503, || {
+            called = true;
+            RobotsRules::parse("")
+        });
+        assert!(!called);
+        assert!(!r.is_allowed("/"));
+    }
+
+    #[test]
+    fn oversized_robots_body_cap_truncates_without_panic() {
+        // Simulate the byte-cap logic directly: an oversized body is cut to
+        // MAX_ROBOTS_BYTES and any partial UTF-8 tail is healed lossily.
+        let huge = "a".repeat(MAX_ROBOTS_BYTES + 4096);
+        let capped = huge.as_bytes();
+        let mut buf = capped.to_vec();
+        if buf.len() > MAX_ROBOTS_BYTES {
+            buf.truncate(MAX_ROBOTS_BYTES);
+        }
+        let text = String::from_utf8_lossy(&buf);
+        assert_eq!(text.len(), MAX_ROBOTS_BYTES);
+        // Multi-byte truncation: cutting mid-char must not panic.
+        let multibyte = "多".repeat(MAX_ROBOTS_BYTES / 3 + 100);
+        let mut buf = multibyte.as_bytes().to_vec();
+        let cut = MAX_ROBOTS_BYTES;
+        if cut % 3 != 0 {
+            buf.truncate(cut); // lands mid-char on purpose
+        }
+        let text = String::from_utf8_lossy(&buf);
+        assert!(!text.is_empty());
     }
 }
