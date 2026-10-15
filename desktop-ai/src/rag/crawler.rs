@@ -317,7 +317,7 @@ fn read_local_file(path: &str) -> Result<(String, String), String> {
 /// Resolve `host` once, reject private/loopback results, and pin the
 /// host→IP mapping into the client builder. Pinning defeats DNS rebinding:
 /// the connection uses the validated address, not a re-resolved one.
-fn pin_host(
+pub(crate) fn pin_host(
     mut builder: reqwest::blocking::ClientBuilder,
     url: &str,
 ) -> Result<reqwest::blocking::ClientBuilder, String> {
@@ -358,6 +358,25 @@ fn pin_host(
         builder = builder.resolve(host, a);
     }
     Ok(builder)
+}
+
+/// 解析重定向 `Location`（可为相对路径）并对目标 URL 做 SSRF 复检。
+///
+/// crawler 与 search 的重定向循环共用此函数，保证"每一跳都重新校验"
+/// 只有一份实现（downloader 的循环在跳顶校验 `current_url`，语义等价）。
+pub(crate) fn validate_redirect_target(
+    location: &str,
+    current_url: &str,
+) -> Result<String, String> {
+    // Resolve relative Location against the current URL.
+    let next = resolve_url(location.trim(), current_url);
+    if is_ssrf_url(&next) {
+        return Err(format!(
+            "重定向目标指向内网地址，已拦截: {} → {}",
+            current_url, next
+        ));
+    }
+    Ok(next)
 }
 
 fn fetch_url(
@@ -435,15 +454,9 @@ fn fetch_url(
                 .and_then(|v| v.to_str().ok())
                 .ok_or("重定向缺少 Location 头".to_string())?;
 
-            // Resolve relative Location against the current URL.
-            let next = resolve_url(location.trim(), &current_url);
-            if is_ssrf_url(&next) {
-                return Err(format!(
-                    "重定向目标指向内网地址，已拦截: {} → {}",
-                    current_url, next,
-                ));
-            }
-            current_url = next;
+            // 解析+复检收敛在共享函数里，保证每一跳、每个调用方
+            // （crawler / search）拿到完全相同的检查。
+            current_url = validate_redirect_target(location, &current_url)?;
             hops += 1;
             continue;
         }
@@ -487,7 +500,7 @@ fn is_html_content(ct: &str) -> bool {
     ct.contains("text/html") || ct.is_empty()
 }
 
-fn extract_links(html: &str, base_url: &str) -> Vec<String> {
+pub(crate) fn extract_links(html: &str, base_url: &str) -> Vec<String> {
     let mut links = Vec::new();
     // to_ascii_lowercase keeps byte offsets identical to the original string
     // (only ASCII a-z changes; multi-byte UTF-8 is untouched), so slicing

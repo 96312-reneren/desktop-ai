@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::time::Duration;
 
 pub(crate) struct SearchResult {
@@ -6,35 +7,101 @@ pub(crate) struct SearchResult {
     pub snippet: String,
 }
 
+/// 搜索结果页的字节上限。DDG 的 HTML 结果页通常只有 50–200KB；
+/// 恶意或异常响应可以无视 Content-Length 持续输出（同类问题与修复
+/// 见 `crawler::fetch_url`），因此必须流式截断，不能 `response.text()`
+/// 一次性读入。
+const MAX_SEARCH_HTML_BYTES: usize = 2 * 1024 * 1024;
+
+/// 红队审查（2026-10）指出的两个出口面缺口在此修复：
+///   1. 旧实现 `resp.text()` 无大小上限——内存放大窗口；
+///   2. 旧实现未禁用自动重定向——reqwest 默认跟随且不复查 SSRF，
+///      曾是全项目唯一漏掉逐跳校验的网络出口（`crawler::fetch_url`
+///      与 `downloader` 均为 Policy::none + 逐跳复检）。
 pub(crate) fn search_duckduckgo(query: &str) -> Result<Vec<SearchResult>, String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        .danger_accept_invalid_certs(false)
-        .danger_accept_invalid_hostnames(false)
-        .build()
-        .map_err(|e| format!("client: {}", e))?;
-
-    let url = format!("https://html.duckduckgo.com/html/?q={}", urlencoding(query));
-    let resp = client.get(&url).send().map_err(|e| {
-        if e.is_timeout() {
-            "搜索超时，请稍后再试".into()
-        } else {
-            format!("搜索失败: {}", e)
-        }
-    })?;
-
-    let status = resp.status().as_u16();
-    if status == 429 {
-        return Err("搜索过于频繁，请稍后再试".into());
-    }
-    if !resp.status().is_success() {
-        return Err(format!("搜索服务异常 (HTTP {})", status));
-    }
-
-    let html = resp.text().map_err(|e| format!("读取失败: {}", e))?;
-
+    let url = build_search_url(query);
+    let html = fetch_search_html(&url)?;
     parse_ddg_html(&html)
+}
+
+/// 固定搜索端点的 URL 构建：查询串全量百分号编码，无法注入额外参数、
+/// 改写主机或路径。`pub(crate)` 供 redteam 用例锁定该性质。
+pub(crate) fn build_search_url(query: &str) -> String {
+    format!(
+        "https://html.duckduckgo.com/html/?q={}",
+        urlencoding(query)
+    )
+}
+
+fn fetch_search_html(url: &str) -> Result<String, String> {
+    // 种子校验：固定端点本应恒为公网，保留此检查使本函数对任意入参
+    // 安全，防御未来调用方传入不可信 URL。
+    if crate::rag::crawler::is_ssrf_url(url) {
+        return Err("禁止访问内网或回环地址".into());
+    }
+
+    let mut current_url = url.to_string();
+    let mut hops: u32 = 0;
+    loop {
+        if hops >= 5 {
+            return Err("重定向次数过多".into());
+        }
+
+        // 每跳新建 client：DNS 单次解析、校验后 pin（防 rebinding），
+        // 与 `crawler::fetch_url` 的逐跳防护一致。
+        let builder = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .danger_accept_invalid_certs(false)
+            .danger_accept_invalid_hostnames(false)
+            // 禁自动重定向：每一跳都必须经过下方的 SSRF 复检。
+            .redirect(reqwest::redirect::Policy::none());
+        let client = crate::rag::crawler::pin_host(builder, &current_url)?
+            .build()
+            .map_err(|e| format!("client: {}", e))?;
+
+        let resp = client.get(&current_url).send().map_err(|e| {
+            if e.is_timeout() {
+                "搜索超时，请稍后再试".into()
+            } else {
+                format!("搜索失败: {}", e)
+            }
+        })?;
+
+        let status = resp.status().as_u16();
+        if status == 429 {
+            return Err("搜索过于频繁，请稍后再试".into());
+        }
+
+        if resp.status().is_redirection() {
+            let location = resp
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .ok_or("重定向缺少 Location 头".to_string())?;
+            current_url =
+                crate::rag::crawler::validate_redirect_target(location, &current_url)?;
+            hops += 1;
+            continue;
+        }
+
+        if !resp.status().is_success() {
+            return Err(format!("搜索服务异常 (HTTP {})", status));
+        }
+
+        // 流式截断：先按字节上限读，再解码（与 `crawler::fetch_url`
+        // 的修复一致——恶意服务器可无视 Content-Length 持续输出）。
+        let mut raw_bytes = Vec::with_capacity(64 * 1024);
+        resp.take(MAX_SEARCH_HTML_BYTES as u64 + 1)
+            .read_to_end(&mut raw_bytes)
+            .map_err(|e| format!("读取失败: {}", e))?;
+        if raw_bytes.len() > MAX_SEARCH_HTML_BYTES {
+            return Err("搜索结果页面异常过大".into());
+        }
+        // 本构建未启用 reqwest 的 `charset` 特性，原 `text()` 即为
+        // UTF-8 有损解码；此处保持一致的行为。
+        return Ok(String::from_utf8_lossy(&raw_bytes).into_owned());
+    }
 }
 
 fn urlencoding(s: &str) -> String {
@@ -62,7 +129,9 @@ fn hex(n: u8) -> char {
     }
 }
 
-fn parse_ddg_html(html: &str) -> Result<Vec<SearchResult>, String> {
+/// DDG 结果页解析。`pub(crate)`：解析器直接消费不可信 HTML，
+/// redteam 模块需要锁定其"敌意输入不 panic"的性质。
+pub(crate) fn parse_ddg_html(html: &str) -> Result<Vec<SearchResult>, String> {
     let mut results = Vec::new();
 
     // Parse DDG HTML result blocks: each result is in a div with class "result"
@@ -78,8 +147,13 @@ fn parse_ddg_html(html: &str) -> Result<Vec<SearchResult>, String> {
 
         let block = &block[..block_end];
 
-        // Extract title
+        // Extract title. The marker may be followed by further attributes
+        // (`href="..."`) before the opening tag closes; cut at the first
+        // `>` so attribute text never leaks into the title. DDG's real
+        // markup puts the class before the href, so without this guard
+        // titles render as `href="URL"Title`.
         let title = extract_between(block, r#"class="result__a""#, "</a>")
+            .and_then(|s| s.split_once('>').map(|(_, rest)| rest))
             .map(strip_html)
             .unwrap_or_default();
 
@@ -94,8 +168,11 @@ fn parse_ddg_html(html: &str) -> Result<Vec<SearchResult>, String> {
             })
             .unwrap_or_default();
 
-        // Extract snippet
+        // Extract snippet — snippets are anchors too
+        // (`<a class="result__snippet" href="...">text</a>`), so apply the
+        // same attribute-leak guard as titles.
         let snippet = extract_between(block, r#"class="result__snippet""#, "</a>")
+            .and_then(|s| s.split_once('>').map(|(_, rest)| rest))
             .map(strip_html)
             .unwrap_or_default();
 
