@@ -395,8 +395,12 @@ impl DesktopAI {
                     }
                     let port = self.config.api_port;
                     let token = self.config.api_token.clone();
-                    let server =
-                        ApiServer::start(Arc::clone(&inf), port, model_name.clone(), token);
+                    let server = ApiServer::start(
+                        Some(Arc::clone(&inf)),
+                        port,
+                        model_name.clone(),
+                        token,
+                    );
                     self.api_server = Some(server);
                     self.status_message = format!(
                         "{} 就绪{} | API: http://127.0.0.1:{}/v1",
@@ -984,6 +988,15 @@ impl DesktopAI {
             Some(p) => p,
             None => return,
         };
+        // 大小预检：导入的是用户可选的任意本地 JSON，先查 metadata 再读取，
+        // 防止 read_to_string 对巨型文件无界分配（crawler 侧已有 5MB 先例）。
+        if let Err(e) = crate::rag::kb_job::ensure_file_size(
+            &path,
+            crate::rag::kb_job::MAX_IMPORT_JSON_BYTES,
+        ) {
+            self.error_message = Some(e);
+            return;
+        }
         let content = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => {
@@ -1179,6 +1192,22 @@ impl eframe::App for DesktopAI {
         if !self.theme_applied {
             self.theme_applied = true;
             apply_theme(ctx, &self.config.theme);
+        }
+
+        // ─── 完整性告警横幅（红队缓解：ffi SHA 基线失配抬升到 UI）──
+        if crate::llm::ffi::integrity_alert_triggered() {
+            egui::TopBottomPanel::top("integrity_banner").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("⚠").size(16.0).color(Color32::from_rgb(244, 67, 54)));
+                    ui.label(
+                        RichText::new(
+                            "模型库完整性告警：llama 运行库的 SHA-256 与上次记录不一致，可能已被替换或升级。",
+                        )
+                        .color(Color32::from_rgb(244, 67, 54)),
+                    );
+                    ui.label("基线已自动刷新；如非本人操作，请重新下载运行库。");
+                });
+            });
         }
 
         // ─── Top bar ───────────────────────────────

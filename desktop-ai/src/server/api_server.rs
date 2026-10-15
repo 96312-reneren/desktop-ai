@@ -1,4 +1,4 @@
-﻿use std::io::{Read, Write};
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
@@ -48,11 +48,13 @@ const ALLOWED_METHODS: &[&str] = &["GET", "POST", "OPTIONS"];
 pub struct ApiServer {
     stop_flag: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
+    /// 实际绑定的端口（bind 成功后由监听线程回传；0 = OS 分配临时端口）。
+    port: Option<u16>,
 }
 
 impl ApiServer {
     pub fn start(
-        inf: Arc<Mutex<LlamaInference>>,
+        inf: Option<Arc<Mutex<LlamaInference>>>,
         port: u16,
         active_model: String,
         api_token: String,
@@ -60,15 +62,21 @@ impl ApiServer {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop = stop_flag.clone();
         let active_conns = Arc::new(AtomicU32::new(0));
+        // bind 结果由监听线程回传：端口 0 时 OS 分配临时端口，测试用它
+        // 定位实际地址；bind 失败回传 None（port() 返回 None）。
+        let (port_tx, port_rx) = std::sync::mpsc::channel::<Option<u16>>();
 
         let handle = thread::spawn(move || {
             let addr = format!("127.0.0.1:{}", port);
             let listener = match TcpListener::bind(&addr) {
                 Ok(l) => {
+                    let actual = l.local_addr().map(|a| a.port()).ok();
+                    let _ = port_tx.send(actual);
                     log::info!("API server listening on http://{}", addr);
                     l
                 }
                 Err(e) => {
+                    let _ = port_tx.send(None);
                     log::error!("API server bind failed: {}", e);
                     return;
                 }
@@ -117,7 +125,7 @@ impl ApiServer {
                             );
                             continue;
                         }
-                        let inf = Arc::clone(&inf);
+                        let inf = inf.clone();
                         let model_name = active_model.clone();
                         let conns = Arc::clone(&active_conns);
                         let token = api_token.clone();
@@ -135,10 +143,22 @@ impl ApiServer {
             log::info!("API server stopped");
         });
 
+        // start 返回时端口已确定：监听线程 bind 成功/失败都会立即回传。
+        let port = port_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .ok()
+            .flatten();
         ApiServer {
             stop_flag,
             handle: Some(handle),
+            port,
         }
+    }
+
+    /// 实际监听端口。bind 失败（或 2 秒内未确认）时为 None。
+    /// 测试传端口 0 让 OS 分配临时端口，避免用例间冲突。
+    pub fn port(&self) -> Option<u16> {
+        self.port
     }
 
     pub fn stop(&mut self) {
@@ -157,7 +177,7 @@ impl Drop for ApiServer {
 
 fn handle_client(
     mut stream: TcpStream,
-    inf: Arc<Mutex<LlamaInference>>,
+    inf: Option<Arc<Mutex<LlamaInference>>>,
     model_name: String,
     api_token: &str,
 ) {
@@ -269,7 +289,7 @@ fn handle_client(
 fn handle_chat_completion(
     stream: &mut TcpStream,
     body: &str,
-    inf: &Arc<Mutex<LlamaInference>>,
+    inf: &Option<Arc<Mutex<LlamaInference>>>,
     model_name: &str,
     origin: Option<&str>,
 ) -> Option<String> {
@@ -327,6 +347,19 @@ fn handle_chat_completion(
             content: content.trim().to_string(),
         });
     }
+
+    // 模型未加载：所有 400 级校验通过后才返回 503（只有 otherwise-valid
+    // 的请求才暴露服务状态；无模型的测试桩也借此可用）。
+    let inf = match inf {
+        Some(ref i) => i,
+        None => {
+            return Some(json_error(
+                503,
+                "model_not_loaded",
+                "model is not loaded; select a model first",
+            ))
+        }
+    };
 
     if stream_mode {
         stream_sse_response(stream, inf, safe_messages, origin);
@@ -506,7 +539,7 @@ fn validate_messages(messages: &[serde_json::Value]) -> Option<String> {
 
 /// 安全加固后的 HTTP 请求解析结果。
 #[derive(Debug)]
-struct ParsedRequest {
+pub(crate) struct ParsedRequest {
     method: String,
     path: String,
     body: String,
@@ -536,7 +569,7 @@ fn is_valid_header_name(name: &str) -> bool {
 /// 安全加固的 HTTP 请求解析器。对请求行、请求头进行完善的边界检查，
 /// 返回 `Result<ParsedRequest, (u16, &'static str)>` 以便调用方直接返回
 /// 合适的 HTTP 错误状态码。
-fn parse_http_validated(raw: &str) -> Result<ParsedRequest, (u16, &'static str)> {
+pub(crate) fn parse_http_validated(raw: &str) -> Result<ParsedRequest, (u16, &'static str)> {
     let lines: Vec<&str> = raw.split("\r\n").collect();
     if lines.is_empty() {
         return Err((400, "bad request"));

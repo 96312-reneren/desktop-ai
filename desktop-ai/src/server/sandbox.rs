@@ -66,7 +66,7 @@ impl Sandbox {
     /// aware) rather than a string prefix check. The previous string-prefix
     /// fallback accepted `root/../escape.txt` because it textually started
     /// with `root` — a path-traversal bug.
-    fn safe_path(&self, relative: &str) -> Result<PathBuf, String> {
+    pub(crate) fn safe_path(&self, relative: &str) -> Result<PathBuf, String> {
         let cleaned = relative.replace('\\', "/").trim_matches('/').to_string();
         if cleaned.is_empty() || cleaned == "." {
             return Ok(self.root.clone());

@@ -45,7 +45,7 @@ pub(crate) fn default_catalog() -> Vec<ModelInfo> {
             // SHA-256 后自动合并为完整 GGUF。
             url: "https://hf-mirror.com/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf".into(),
             filename: "qwen2.5-7b-instruct-q4_k_m.gguf".into(),
-            expected_sha256: None,
+            expected_sha256: Some("0bb400ccfe4201fecfc96ed6e4442fe1106d1e003c09e024bd7981c4b69ef899".into()),
             parts: vec![
                 crate::store::config::ModelPart {
                     url: "https://hf-mirror.com/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf".into(),

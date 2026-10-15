@@ -11,6 +11,30 @@ use std::sync::{mpsc, Arc};
 use super::crawler::extract_pdf_safe;
 use super::vector_store::VectorStore;
 
+/// 知识库文本文件大小上限（64 MiB）。超限文件在 read_to_string 之前即被
+/// 拒绝，避免把整个文件一次性读进内存（正文入库另有 KB_SINGLE_DOC_CHARS
+/// 分段，此限只防无界分配，不影响正常文档）。
+pub(crate) const MAX_KB_TEXT_FILE_BYTES: u64 = 64 * 1024 * 1024;
+/// 知识库 PDF 大小上限（256 MiB）：pdf-extract 会把整份 PDF 载入内存。
+pub(crate) const MAX_KB_PDF_FILE_BYTES: u64 = 256 * 1024 * 1024;
+/// 导入对话 JSON 的大小上限（64 MiB），供 ui::app::import_conversation 复用。
+pub(crate) const MAX_IMPORT_JSON_BYTES: u64 = 64 * 1024 * 1024;
+
+/// 读取前大小预检：文件超过 `max_bytes` 时返回用户可读的错误信息。
+/// 先 metadata 再读取，保证超大文件不会先被完整载入内存才失败。
+pub(crate) fn ensure_file_size(path: &std::path::Path, max_bytes: u64) -> Result<(), String> {
+    match std::fs::metadata(path) {
+        Ok(m) if m.len() > max_bytes => Err(format!(
+            "文件过大: {:.1} MB（上限 {:.0} MB）: {}",
+            m.len() as f64 / (1024.0 * 1024.0),
+            max_bytes as f64 / (1024.0 * 1024.0),
+            path.display()
+        )),
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("无法读取文件信息: {}: {}", path.display(), e)),
+    }
+}
+
 /// 后台索引线程 → UI 线程的消息。
 pub(crate) enum KbIndexMsg {
     Progress {
@@ -66,6 +90,17 @@ pub(crate) fn run_kb_job(
             filename,
             ext,
         } => {
+            // 大小预检：用户可选中任意本地文件（包括恶意构造的巨型文件），
+            // 必须在 read_to_string / pdf-extract 之前拒绝超限文件。
+            let max_bytes = if ext == "pdf" {
+                MAX_KB_PDF_FILE_BYTES
+            } else {
+                MAX_KB_TEXT_FILE_BYTES
+            };
+            if let Err(e) = ensure_file_size(&path, max_bytes) {
+                let _ = tx.send(KbIndexMsg::Error(e));
+                return;
+            }
             let content = match ext.as_str() {
                 "pdf" => match extract_pdf_safe(&path) {
                     Ok(t) => t,
@@ -261,5 +296,35 @@ fn finish_kb_job(
         Err(e) => {
             let _ = tx.send(KbIndexMsg::Error(e));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_file_size_allows_file_within_cap() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("small.txt");
+        std::fs::write(&p, "0123456789").unwrap(); // 10 字节
+        assert!(ensure_file_size(&p, 10).is_ok());
+        assert!(ensure_file_size(&p, 100).is_ok());
+    }
+
+    #[test]
+    fn ensure_file_size_rejects_oversized_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("big.txt");
+        std::fs::write(&p, vec![b'x'; 20]).unwrap(); // 20 字节
+        let err = ensure_file_size(&p, 10).unwrap_err();
+        assert!(err.contains("文件过大"), "错误信息应说明原因: {err}");
+    }
+
+    #[test]
+    fn ensure_file_size_missing_file_is_err() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("nonexistent.txt");
+        assert!(ensure_file_size(&p, 1024).is_err());
     }
 }

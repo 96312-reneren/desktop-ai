@@ -8,10 +8,17 @@
 //! 已有 25 个内联用例（请求走私、重复 Content-Length、控制字符等），
 //! 此处不重复；其 DNS 固定逻辑见 `crawler::pin_host`，由本模块的 URL 用例覆盖。
 //!
+//! web 搜索出口面（URL 构建 / 重定向复检 / 结果页解析）自 2026-10 审查
+//! 起纳入第 4 节——search 曾是全项目唯一未做逐跳重定向校验的网络出口。
+//!
 //! 所有用例只使用回环/保留地址与临时目录，不产生任何对外网络流量。
 
-use crate::rag::crawler::is_ssrf_url;
+use crate::rag::chunker::chunk_text;
+use crate::rag::cleaner::clean_text;
+use crate::rag::crawler::{extract_links, is_ssrf_url, resolve_url, validate_redirect_target};
+use crate::rag::search::{build_search_url, parse_ddg_html};
 use crate::rag::vector_store::VectorStore;
+use crate::server::api_server::parse_http_validated;
 use crate::server::sandbox::Sandbox;
 
 // ═══════════════════════════════════════════════════════════════
@@ -306,4 +313,442 @@ fn redteam_fts_hostile_syntax_does_not_error() {
         errors.len(),
         errors.join("\n")
     );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 4. 检索出口面：web 搜索的 URL 构建 / 重定向 / 结果页解析
+// ═══════════════════════════════════════════════════════════════
+
+/// 搜索查询直接拼入固定 URL。若编码不完整，输入中的 `& ? # / :` 等
+/// 字符可以注入额外参数或改写路径。本用例锁定"查询串只出现在
+/// `q=` 之后、且完全由百分号编码构成"这一性质。
+#[test]
+fn redteam_search_query_injection_has_no_effect() {
+    const PREFIX: &str = "https://html.duckduckgo.com/html/?q=";
+    let hostile: Vec<(&str, String)> = vec![
+        ("参数注入", "q=1&kl=wa-nf".into()),
+        ("路径穿越", "../../etc/passwd".into()),
+        ("锚点注入", "x#fragment".into()),
+        ("协议注入", "file:///etc/passwd".into()),
+        ("元数据字面量", "169.254.169.254".into()),
+        ("控制字符", "a b\tc\rd\ne".into()),
+        ("HTML 标签", "<script>alert(1)</script>".into()),
+        ("引号反斜杠", "\"'`\\".into()),
+        ("百分号原文", "%41%42%zz".into()),
+        ("加号语义", "a+b+c".into()),
+        ("中文", "中文查询".into()),
+        ("Emoji", "🦀🚀".into()),
+        ("超长输入", "x".repeat(10_000)),
+    ];
+    let mut escaped = Vec::new();
+    for (name, q) in &hostile {
+        let url = build_search_url(q);
+        let tail = match url.strip_prefix(PREFIX) {
+            Some(t) => t,
+            None => {
+                escaped.push(format!("  {:<12} 前缀被改写 → {}", name, url));
+                continue;
+            }
+        };
+        if let Some(why) = find_unencoded_byte(tail) {
+            escaped.push(format!("  {:<12} {} → 尾段 {:?}", name, why, tail));
+        }
+    }
+    assert!(
+        escaped.is_empty(),
+        "\n查询串存在未编码字节（{} 项）：\n{}\n",
+        escaped.len(),
+        escaped.join("\n")
+    );
+}
+
+/// 编码后的查询段只允许 URL 非保留字符、`+`（空格）与完整的 `%XX`。
+/// 返回 Some(原因) 表示发现违规字节。
+fn find_unencoded_byte(tail: &str) -> Option<String> {
+    let b = tail.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            c if c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'~' | b'+') => {
+                i += 1;
+            }
+            b'%' => {
+                if i + 2 >= b.len()
+                    || !b[i + 1].is_ascii_hexdigit()
+                    || !b[i + 2].is_ascii_hexdigit()
+                {
+                    return Some(format!("不完整转义 @{}", i));
+                }
+                i += 3;
+            }
+            c => return Some(format!("未编码字节 0x{:02X} @{}", c, i)),
+        }
+    }
+    None
+}
+
+/// 重定向 `Location` 完全由响应方控制，是检索出口面最危险的通道。
+/// 2026-10 审查发现 search 曾未禁用自动重定向（reqwest 默认跟随且
+/// 不复查 SSRF），是全项目唯一漏掉逐跳校验的网络出口。本用例锁定
+/// "每一跳必须复检"；同时确认合法跳转不被误杀——否则搜索会在
+/// DDG 正常 302 时中断。
+#[test]
+fn redteam_search_redirect_targets_private_rejected() {
+    let base = "https://html.duckduckgo.com/html/?q=x";
+    let hostile = [
+        ("云元数据", "https://169.254.169.254/latest/meta-data/"),
+        ("阿里元数据", "http://100.100.100.200/latest/meta-data/"),
+        ("IPv4 回环", "http://127.0.0.1:8080/"),
+        ("IPv6 回环", "http://[::1]/"),
+        ("NAT64 回环", "http://[64:ff9b::7f00:1]/"),
+        ("十进制回环", "http://2130706433/"),
+        ("十六进制回环", "http://0x7f000001/"),
+        ("八进制回环", "http://0177.0.0.1/"),
+        ("userinfo 伪装", "http://evil.com@10.0.0.1/"),
+        ("协议相对私网", "//10.0.0.1/x"),
+        ("CGNAT 段", "http://100.64.0.1/"),
+        ("localhost 主机名", "http://localhost/x"),
+    ];
+    let mut escaped = Vec::new();
+    for (name, loc) in hostile {
+        if validate_redirect_target(loc, base).is_ok() {
+            escaped.push(format!("  {:<20} Location: {}", name, loc));
+        }
+    }
+    assert!(
+        escaped.is_empty(),
+        "\n重定向复检放行了私网目标（{} 项）：\n{}\n",
+        escaped.len(),
+        escaped.join("\n")
+    );
+
+    // 合法跳转不得误杀（否则搜索功能会在 DDG 正常跳转时中断）
+    let legit = [
+        ("绝对公网", "https://duckduckgo.com/html/?q=x"),
+        ("根相对", "/html/?q=y"),
+        ("协议相对公网", "//duckduckgo.com/html"),
+    ];
+    let mut blocked = Vec::new();
+    for (name, loc) in legit {
+        if validate_redirect_target(loc, base).is_err() {
+            blocked.push(format!("  {:<20} Location: {}", name, loc));
+        }
+    }
+    assert!(
+        blocked.is_empty(),
+        "\n误杀合法重定向，搜索会在正常跳转时中断：\n{}\n",
+        blocked.join("\n")
+    );
+}
+
+/// 搜索结果解析器直接消费不可信 HTML（DDG 被劫持或中间人篡改时，
+/// 页面内容完全受控）。敌意语料不得 panic；正向对照确保合法结果块
+/// 仍能被解析出来，防止"永远 Err"造成的假绿。
+#[test]
+fn redteam_search_parse_hostile_html_no_panic() {
+    let marker = r#"class="result__body""#;
+    let corpus: Vec<(&str, String)> = vec![
+        ("空输入", String::new()),
+        ("巨量重复 marker", marker.repeat(5000)),
+        ("marker 在串尾", format!("x {} y", marker)),
+        ("深层嵌套未闭合", "<div>".repeat(100_000)),
+        (
+            "snippet 实体轰炸",
+            format!(
+                r#"{}<a class="result__snippet">{}&amp;lt;</a>"#,
+                marker,
+                "&amp;".repeat(50_000)
+            ),
+        ),
+        (
+            "属性值含闭合锚",
+            format!(
+                r#"{}<a class="result__a" title="</a>">T</a>"#,
+                marker
+            ),
+        ),
+        (
+            "百 KB 标题",
+            format!(r#"{}<a class="result__a">{}"#, marker, "T".repeat(100_000)),
+        ),
+        (
+            "marker 交错",
+            r#"class="result__snippet"class="result__a"class="result__body""#.into(),
+        ),
+        ("二进制残渣", "\u{0}\u{1}\u{FFFD}garbage\u{7F}".into()),
+    ];
+    for (_name, html) in &corpus {
+        // 唯一断言：不 panic（返回 Ok/Err 均可接受）
+        let _ = parse_ddg_html(html);
+    }
+
+    // 正向对照：合法结果块必须恰好产出 1 条且字段正确。
+    let ok = concat!(
+        r#"<div class="result__body">"#,
+        r#"<a class="result__a" href="https://example.com/a">Example Title</a>"#,
+        r#"<a class="result__url" href="https://example.com/a">example.com/a</a>"#,
+        r#"<a class="result__snippet">Example snippet</a>"#,
+        "</div>",
+    );
+    let results = parse_ddg_html(ok).expect("合法结果块解析失败");
+    assert_eq!(results.len(), 1, "合法结果块应恰好产出 1 条");
+    assert_eq!(results[0].title, "Example Title");
+    assert_eq!(results[0].url, "https://example.com/a");
+    assert_eq!(results[0].snippet, "Example snippet");
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 5. NTFS ADS / 设备保留名 / Win32 名字规范化（沙盒数据藏匿面）
+// ═══════════════════════════════════════════════════════════════
+//
+// 差距注记（2026-10 审查）：`sandbox::safe_path` 只拦 `..` 与沙盒外
+// canonicalize，对三类 Win32 特殊名字语义无感知。这些语义**不会逃逸
+// 沙盒**（写入都落在沙盒内或被设备吞掉），但构成"数据藏匿面"——
+// 沙盒里存着 list 看不见、read 读不到的内容。当前 GUI/API 没有任何
+// sandbox.write 调用点（kb_panel 只读展示），此面暂不可达；待 Agent
+// 协议接入 sandbox.write 后，应实现：拒绝冒号流语法、设备保留名
+//（CON/PRN/AUX/NUL/COM1-9/LPT1-9，含带扩展名形态）、尾点/尾空格名。
+// 本节用例钉住现状：防止回归，也防止"已修复"的错觉。
+
+/// NTFS 备用数据流：`ads_probe.txt:hidden` 不含 `..`，safe_path 放行；
+/// Windows 上写入进入命名流——主流不受污染、目录列举看不到流。非
+/// Windows 上冒号只是普通文件名字符，落成沙盒内一个独立文件。两平台
+/// 都不得逃逸沙盒。
+#[test]
+fn redteam_sandbox_ads_write_confined_not_listed() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let box_dir = tmp.path().join("box");
+    let sb = Sandbox::new(box_dir.clone());
+
+    let _ = sb.write("ads_probe.txt:hidden", "stowaway");
+    let _ = sb.write("ads_probe.txt", "main");
+    // 主流不被 ADS 写入污染（两平台一致）
+    assert_eq!(sb.read("ads_probe.txt").unwrap(), "main");
+
+    #[cfg(windows)]
+    {
+        let entries: Vec<String> = std::fs::read_dir(&box_dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            entries.iter().all(|n| n != "ads_probe.txt:hidden"),
+            "ADS 名不应出现在目录列举: {:?}",
+            entries
+        );
+    }
+    // 沙盒外无新增文件（藏匿面 ⊆ 沙盒内）
+    assert!(!tmp.path().join("ads_probe.txt").exists());
+    assert!(!tmp.path().join("ads_probe.txt:hidden").exists());
+}
+
+/// Windows 设备保留名不含 `..`，会被 safe_path 放行——钉住现状：路径
+/// 关卡对这些名字既不 panic 也不做拦截。本用例**只探关卡、不打开
+/// 设备**（真实打开设备的行为由 NUL 用例单独覆盖）。
+#[test]
+fn redteam_sandbox_device_names_pass_path_gate() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let sb = Sandbox::new(tmp.path().join("box"));
+    for name in ["CON", "PRN", "AUX", "NUL", "COM1", "LPT2", "CON.txt", "COM1.txt"] {
+        let r = sb.safe_path(name);
+        assert!(r.is_ok(), "safe_path({name}) 不应 Err: {:?}", r);
+    }
+}
+
+/// 写 NUL 设备：Windows 语义是丢弃写入。断言不 panic、且沙盒目录内
+/// 不出现名为 NUL 的真实文件（设备不占目录项）。
+#[test]
+#[cfg(windows)]
+fn redteam_sandbox_nul_write_swallowed_and_confined() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let box_dir = tmp.path().join("box");
+    let sb = Sandbox::new(box_dir.clone());
+
+    let _ = sb.write("NUL", "swallowed");
+    let entries: Vec<String> = std::fs::read_dir(&box_dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !entries.iter().any(|n| n.eq_ignore_ascii_case("nul")),
+        "NUL 不应在沙盒内变成真实文件: {:?}",
+        entries
+    );
+}
+
+/// Win32 名字规范化剥掉尾点/尾空格：`dot.txt.` 与 `dot.txt` 是同一文件。
+/// 断言写路径不 panic、（Windows 上）两种写法命中同一文件、沙盒外无残留。
+#[test]
+fn redteam_sandbox_trailing_dot_names_no_panic() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let sb = Sandbox::new(tmp.path().join("box"));
+
+    let _ = sb.write("dot.txt.", "a");
+    let _ = sb.write("sp.txt ", "b");
+    let _ = sb.write("dot.txt", "c");
+
+    #[cfg(windows)]
+    {
+        // 尾点/空格被规范化：与 dot.txt 是同一文件，后写覆盖
+        assert_eq!(sb.read("dot.txt").unwrap(), "c");
+    }
+    assert!(!tmp.path().join("dot.txt").exists());
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 6. 模糊测试种子（零依赖 PRNG · 纯函数鲁棒性）
+// ═══════════════════════════════════════════════════════════════
+//
+// 第 1-5 节是手工构造的攻击向量；本节用固定种子的伪随机补充
+// "没想到的形状"：随机字节、随机长度、语料变异（替换/插入/删除）。
+// 覆盖对象全部是**零外联纯函数**（清洗/分块/URL 解析/HTML 解析/
+// HTTP 解析），断言只有一条：不 panic。种子固定 → 失败可精确复现。
+
+/// xorshift64：测试内嵌 PRNG，零依赖、可复现。种子必须非零。
+struct FuzzRng(u64);
+
+impl FuzzRng {
+    fn new(seed: u64) -> Self {
+        assert!(seed != 0, "xorshift 种子必须非零");
+        FuzzRng(seed)
+    }
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+    fn byte(&mut self) -> u8 {
+        (self.next_u64() >> 32) as u8
+    }
+    fn below(&mut self, n: usize) -> usize {
+        if n == 0 {
+            0
+        } else {
+            (self.next_u64() % n as u64) as usize
+        }
+    }
+    fn random_string(&mut self, max_len: usize) -> String {
+        let len = self.below(max_len);
+        let bytes: Vec<u8> = (0..len).map(|_| self.byte()).collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+/// 随机字节 → clean_text（html/md/txt 三格式）：清洗管线不 panic。
+#[test]
+fn redteam_fuzz_clean_text_random_bytes() {
+    let mut rng = FuzzRng::new(0x9E3779B97F4A7C15);
+    for fmt in ["html", "md", "txt"] {
+        for _ in 0..500 {
+            let s = rng.random_string(2048);
+            let _ = clean_text(&s, fmt);
+        }
+    }
+}
+
+/// 随机长文本 → chunk_text：每段字符数不超上限（字符边界安全）。
+#[test]
+fn redteam_fuzz_chunker_random_text_respects_char_limit() {
+    let mut rng = FuzzRng::new(0x123456789ABCDEF0);
+    for _ in 0..300 {
+        let s = rng.random_string(30_000);
+        for c in chunk_text(&s, 500, 50) {
+            assert!(
+                c.chars().count() <= 500,
+                "chunk 超过 500 字符上限: {}",
+                c.chars().count()
+            );
+        }
+    }
+}
+
+/// 合法 DDG 结果页语料 → 结构化变异（单字节替换/插入/删除 ×1..8 次）：
+/// 解析器不得 panic（与第 4 节静态敌意语料互补）。
+#[test]
+fn redteam_fuzz_ddg_parser_mutations() {
+    let corpus = concat!(
+        r#"<div class="result__body">"#,
+        r#"<a class="result__a" href="https://example.com/a">Example Title</a>"#,
+        r#"<a class="result__url" href="https://example.com/a">example.com/a</a>"#,
+        r#"<a class="result__snippet">Example snippet</a>"#,
+        "</div>",
+    );
+    let mut rng = FuzzRng::new(0xDEADBEEFCAFEF00D);
+    for _ in 0..1000 {
+        let mut bytes = corpus.as_bytes().to_vec();
+        for _ in 0..(1 + rng.below(8)) {
+            if bytes.is_empty() {
+                break;
+            }
+            let pos = rng.below(bytes.len());
+            match rng.below(3) {
+                0 => bytes[pos] = rng.byte(),
+                1 => bytes.insert(pos, rng.byte()),
+                _ => {
+                    bytes.remove(pos);
+                }
+            }
+        }
+        let html = String::from_utf8_lossy(&bytes);
+        let _ = parse_ddg_html(&html);
+    }
+}
+
+/// 随机串 → is_ssrf_url / resolve_url / extract_links：三个 URL 面
+/// 纯函数在任意输入（含裸控制字符、残缺 URL）下不 panic。
+#[test]
+fn redteam_fuzz_url_parsers_random_strings() {
+    let mut rng = FuzzRng::new(0xF00DBEEF12345678);
+    let bases = ["https://example.com/a/b", "http://example.com", ""];
+    for _ in 0..1000 {
+        let s = rng.random_string(512);
+        for base in bases {
+            let _ = is_ssrf_url(&s);
+            let _ = resolve_url(&s, base);
+            let _ = extract_links(&s, base);
+        }
+    }
+}
+
+/// 合法 HTTP 请求语料 → 结构化变异：api_server 解析器（25 个内联用例
+/// 之外的随机覆盖）不得 panic。变异可破坏请求行/头区/长度字段任意处。
+#[test]
+fn redteam_fuzz_http_parser_mutations() {
+    let corpus = concat!(
+        "POST /v1/chat/completions HTTP/1.1\r\n",
+        "Host: 127.0.0.1\r\n",
+        "Content-Type: application/json\r\n",
+        "Content-Length: 7\r\n",
+        "Origin: http://localhost:3000\r\n",
+        "\r\n",
+        "{\"x\":1}",
+    );
+    let mut rng = FuzzRng::new(0xC0FFEEC0DE202610);
+    for _ in 0..1000 {
+        let mut bytes = corpus.as_bytes().to_vec();
+        for _ in 0..(1 + rng.below(8)) {
+            if bytes.is_empty() {
+                break;
+            }
+            let pos = rng.below(bytes.len());
+            match rng.below(3) {
+                0 => bytes[pos] = rng.byte(),
+                1 => bytes.insert(pos, rng.byte()),
+                _ => {
+                    bytes.remove(pos);
+                }
+            }
+        }
+        let raw = String::from_utf8_lossy(&bytes);
+        let _ = parse_http_validated(&raw);
+    }
 }

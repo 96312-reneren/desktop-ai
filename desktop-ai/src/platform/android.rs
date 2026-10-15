@@ -199,7 +199,8 @@ fn start_service(api_port: u16, api_token: String) {
     let name = "desktop-ai".to_string();
     // Keep the server alive: dropping it sets the stop flag and the
     // listener thread exits immediately.
-    let mut _server = crate::server::api_server::ApiServer::start(inf, api_port, name, api_token);
+    let mut _server =
+        crate::server::api_server::ApiServer::start(Some(inf), api_port, name, api_token);
     log::info!("api server on 127.0.0.1:{}", api_port);
     android_log(&format!(
         "start_service: api server on 127.0.0.1:{}",

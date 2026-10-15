@@ -94,7 +94,9 @@ pub(crate) fn download_model(
             Err(_) => { /* 错误消息已在函数内发出 */ }
         }
     } else {
-        download_model_parts(parts, &dest, &cancel, &tx);
+        // 分卷模型：逐卷校验 + 合并产物整体 SHA-256 校验（此前缺后者：
+        // 逐卷都合法但镜像换文件的场景会静默产出错误的合并文件）。
+        download_model_parts(parts, &dest, &cancel, &tx, expected_sha256);
     }
 }
 
@@ -105,6 +107,7 @@ fn download_model_parts(
     dest: &Path,
     cancel: &Arc<AtomicBool>,
     tx: &mpsc::Sender<DownloadMsg>,
+    expected_sha256: Option<&str>,
 ) {
     if let Err(e) = validate_download_path(dest) {
         let _ = tx.send(DownloadMsg::Error(format!("路径安全验证失败: {}", e)));
@@ -165,18 +168,52 @@ fn download_model_parts(
     }
 
     let _ = tx.send(DownloadMsg::Status("合并分卷...".into()));
-    if let Err(e) = merge_parts(dest, &part_paths) {
+    if let Err(e) = merge_parts_no_cleanup(dest, &part_paths) {
         // 删除不完整的合并产物，保留分卷以便重试
         let _ = fs::remove_file(dest);
         let _ = tx.send(DownloadMsg::Error(format!("合并失败: {}", e)));
         return;
     }
 
+    // 合并产物整体校验：分卷各自通过 ≠ 拼接结果正确（镜像换文件、磁盘
+    // 损坏都会破坏整体）。必须放在 cleanup_parts 之前——分卷是已逐卷
+    // 验证过的资产，失配时保留它们，重试只需重新合并，不必重新下载。
+    if let Some(expected) = expected_sha256 {
+        let _ = tx.send(DownloadMsg::Status("校验合并文件...".into()));
+        match compute_sha256(dest) {
+            Ok(actual) if actual == expected => { /* 校验通过 */ }
+            Ok(actual) => {
+                let _ = fs::remove_file(dest);
+                let _ = tx.send(DownloadMsg::Error(format!(
+                    "SHA-256 校验失败\n期望: {}\n实际: {}",
+                    expected, actual
+                )));
+                return;
+            }
+            Err(e) => {
+                let _ = fs::remove_file(dest);
+                let _ = tx.send(DownloadMsg::Error(format!("SHA-256 计算失败: {}", e)));
+                return;
+            }
+        }
+    }
+    cleanup_parts(&part_paths);
+
     let _ = tx.send(DownloadMsg::Done);
 }
 
 /// 将分卷文件按序拼接为最终模型文件，成功后清理分卷文件。
+#[cfg(test)]
 fn merge_parts(dest: &Path, part_paths: &[PathBuf]) -> Result<(), String> {
+    merge_parts_no_cleanup(dest, part_paths)?;
+    cleanup_parts(part_paths);
+    Ok(())
+}
+
+/// `merge_parts` 的合并阶段：只拼接，不删分卷。调用方必须在合并产物
+/// 通过 SHA-256 校验后再调 `cleanup_parts`——分卷是已逐卷验证过的资产，
+/// 整体校验失配时保留它们，重试只需重新合并，不必重新下载。
+fn merge_parts_no_cleanup(dest: &Path, part_paths: &[PathBuf]) -> Result<(), String> {
     let mut out = File::create(dest).map_err(|e| format!("创建合并文件失败: {}", e))?;
     let mut buf = vec![0u8; 1024 * 1024];
     for p in part_paths {
@@ -193,13 +230,17 @@ fn merge_parts(dest: &Path, part_paths: &[PathBuf]) -> Result<(), String> {
         }
     }
     drop(out);
+    Ok(())
+}
+
+/// 合并完成且整体校验通过后清理分卷文件。
+fn cleanup_parts(part_paths: &[PathBuf]) {
     for p in part_paths {
         if let Err(e) = fs::remove_file(p) {
             // 分卷残留不影响使用，仅告警
             log::warn!("failed to remove part file {}: {}", p.display(), e);
         }
     }
-    Ok(())
 }
 
 /// 下载暂存路径：`<dest>.download`。只有完整通过校验的文件才会改名到最终
@@ -663,6 +704,25 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_no_cleanup_keeps_parts_then_cleanup_removes() {
+        // "合并不清理 → 整体校验 → 清理"三段式：校验前置要求分卷在
+        // 校验完成前必须仍然存在（失配重试只需重新合并）。
+        let dir = tempfile::TempDir::new().unwrap();
+        let dest = dir.path().join("model.gguf");
+        let p1 = dir.path().join("model.part1");
+        let p2 = dir.path().join("model.part2");
+        fs::write(&p1, b"hello ").unwrap();
+        fs::write(&p2, b"world").unwrap();
+
+        merge_parts_no_cleanup(&dest, &[p1.clone(), p2.clone()]).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"hello world");
+        assert!(p1.exists() && p2.exists(), "不清理阶段分卷必须保留");
+
+        cleanup_parts(&[p1.clone(), p2.clone()]);
+        assert!(!p1.exists() && !p2.exists(), "清理阶段应删除分卷");
+    }
+
+    #[test]
     fn test_part_filename_traversal_rejected() {
         crate::test_util::temp_data_dir();
         // 分卷文件名含路径分隔符时 download_model_parts 应拒绝并报错
@@ -676,7 +736,7 @@ mod tests {
             filename: "../evil.gguf".into(),
             sha256: None,
         };
-        download_model_parts(&[evil], &dir.join("model.gguf"), &cancel, &tx);
+        download_model_parts(&[evil], &dir.join("model.gguf"), &cancel, &tx, None);
         let mut msgs = Vec::new();
         while let Ok(m) = rx.try_recv() {
             msgs.push(m);

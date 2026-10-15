@@ -212,7 +212,7 @@ fn api_server_smoke_test() {
 
     let test_port = 11435u16;
     let mut server = ApiServer::start(
-        Arc::clone(&inference),
+        Some(Arc::clone(&inference)),
         test_port,
         model_id.clone(),
         "test-token".into(),

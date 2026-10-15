@@ -405,21 +405,26 @@ pub(crate) unsafe fn init() -> Result<(), String> {
                 use std::io::Write;
                 let baseline = crate::store::config::data_root().join("llama_library.sha256");
                 if let Ok(hash) = sha256_of_file(&lib_path) {
-                    match std::fs::read_to_string(&baseline) {
-                        Ok(stored) if stored.trim() == hash => {
+                    let stored = std::fs::read_to_string(&baseline).ok();
+                    match classify_baseline(stored.as_deref(), &hash) {
+                        BaselineOutcome::Match => {
                             log::info!("llama library SHA-256 verified: {}", hash);
                         }
-                        Ok(stored) => {
+                        BaselineOutcome::Mismatch => {
                             log::warn!(
                                 "llama library SHA-256 MISMATCH — file may have been \
                                  tampered with or upgraded: baseline={} actual={}",
-                                stored.trim(),
+                                stored.as_deref().unwrap_or("").trim(),
                                 hash
                             );
+                            // 抬升为进程级告警：只写日志用户无感，UI 需在状态栏
+                            // 常驻横幅提示。基线仍刷新（用户决策），让告警对
+                            // 每次变更恰好触发一次。
+                            INTEGRITY_ALERT.store(true, std::sync::atomic::Ordering::Relaxed);
                             let _ = std::fs::File::create(&baseline)
                                 .and_then(|mut f| f.write_all(hash.as_bytes()));
                         }
-                        Err(_) => {
+                        BaselineOutcome::NewBaseline => {
                             log::info!("llama library SHA-256 baseline: {}", hash);
                             let _ = std::fs::File::create(&baseline)
                                 .and_then(|mut f| f.write_all(hash.as_bytes()));
@@ -433,6 +438,76 @@ pub(crate) unsafe fn init() -> Result<(), String> {
             Ok(lib)
         })
         .map(|_| ())
+}
+
+/// llama 库 SHA-256 基线比对结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BaselineOutcome {
+    /// 与基线一致。
+    Match,
+    /// 基线存在但与实测哈希不一致（可能被篡改，也可能只是升级）。
+    Mismatch,
+    /// 尚无基线（首次运行），本次写入。
+    NewBaseline,
+}
+
+/// 纯函数：给定已存基线内容与实测哈希，判定比对结果。
+/// 基线读取失败（文件不存在等）视为 NewBaseline；空白基线与原逻辑
+/// 一致地视为 Mismatch（保守：损坏的基线也应触发告警并刷新）。
+fn classify_baseline(stored: Option<&str>, hash: &str) -> BaselineOutcome {
+    match stored {
+        Some(s) if s.trim() == hash => BaselineOutcome::Match,
+        Some(_) => BaselineOutcome::Mismatch,
+        None => BaselineOutcome::NewBaseline,
+    }
+}
+
+/// 进程级完整性告警：llama 库 SHA-256 与基线失配时置位。UI 轮询
+/// `integrity_alert_triggered()` 在状态栏常驻横幅，避免只写日志用户无感。
+static INTEGRITY_ALERT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 当前进程是否检测到 llama 库文件哈希失配（供 UI 轮询）。
+pub(crate) fn integrity_alert_triggered() -> bool {
+    INTEGRITY_ALERT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod baseline_tests {
+    use super::*;
+
+    #[test]
+    fn classify_baseline_match_with_trailing_newline() {
+        assert_eq!(
+            classify_baseline(Some("abc123\n"), "abc123"),
+            BaselineOutcome::Match
+        );
+    }
+
+    #[test]
+    fn classify_baseline_mismatch_on_different_hash_and_blank() {
+        assert_eq!(
+            classify_baseline(Some("deadbeef\n"), "abc123"),
+            BaselineOutcome::Mismatch
+        );
+        // 空白基线按原逻辑算失配：损坏的基线也要触发告警
+        assert_eq!(
+            classify_baseline(Some("   "), "abc123"),
+            BaselineOutcome::Mismatch
+        );
+    }
+
+    #[test]
+    fn classify_baseline_new_when_no_file() {
+        assert_eq!(
+            classify_baseline(None, "abc123"),
+            BaselineOutcome::NewBaseline
+        );
+    }
+
+    #[test]
+    fn integrity_alert_defaults_to_off() {
+        assert!(!integrity_alert_triggered());
+    }
 }
 
 /// Probe the freshly loaded library by calling `llama_print_system_info`.

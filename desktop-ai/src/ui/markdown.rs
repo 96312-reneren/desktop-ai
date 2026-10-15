@@ -259,7 +259,17 @@ impl State {
                 let text = std::mem::take(&mut self.link_buf);
                 let url = std::mem::take(&mut self.link_url);
                 let display = if text.is_empty() { url.clone() } else { text };
-                ui.hyperlink_to(display, url);
+                // 只允许可控 scheme（http/https/mailto）进入可点击超链接；
+                // 其余（file://、javascript:、data:、UNC \\host、任意 OS 注册
+                // 协议等）一律降级为不可点击的纯文本，避免把"打开链接"交给
+                // 操作系统的协议处理器。
+                if is_safe_link_url(&url) {
+                    ui.hyperlink_to(display, url);
+                } else if !display.is_empty() {
+                    ui.add(
+                        Label::new(RichText::new(display).size(self.font_size)).selectable(true),
+                    );
+                }
             }
             TagEnd::Image => {}
             TagEnd::Table => {
@@ -342,6 +352,21 @@ pub(crate) fn render_markdown(ui: &mut Ui, text: &str, font_size: f32) {
     st.flush(ui);
 }
 
+/// 判断 URL 是否允许渲染为可点击链接（红队缓解：scheme 白名单）。
+/// 仅放行 http://、https://、mailto:（大小写不敏感）；拒绝包含控制字符
+/// 或空白字符的 URL，防止 "java\tscript:" 这类混淆绕过。
+fn is_safe_link_url(raw: &str) -> bool {
+    let url = raw.trim();
+    if url.is_empty()
+        || url.contains(|c: char| c.is_control())
+        || url.contains(char::is_whitespace)
+    {
+        return false;
+    }
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,5 +421,43 @@ mod tests {
         st.in_table_cell = true;
         st.push_text("cell");
         assert_eq!(st.table_cell_buf, "cell");
+    }
+
+    #[test]
+    fn test_safe_link_url_accepts_http_https_mailto() {
+        assert!(is_safe_link_url("http://example.com/a?b=c#d"));
+        assert!(is_safe_link_url("https://example.com"));
+        assert!(is_safe_link_url("mailto:user@example.com"));
+        assert!(is_safe_link_url("HTTPS://EXAMPLE.COM/Path"));
+        assert!(is_safe_link_url("  https://example.com  "));
+    }
+
+    #[test]
+    fn test_safe_link_url_rejects_dangerous_schemes() {
+        for url in [
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            "file:///C:/Windows/System32/calc.exe",
+            "vbscript:msgbox(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "\\\\attacker\\share\\payload.exe",
+            "//attacker.com/redirect",
+            "www.example.com",   // 无 scheme
+            "example.com/path",  // 相对路径
+            "tel:+1234567890",   // OS 注册协议
+            "ms-settings:default",
+            "ftp://example.com/file",
+        ] {
+            assert!(!is_safe_link_url(url), "应当拒绝: {url}");
+        }
+    }
+
+    #[test]
+    fn test_safe_link_url_rejects_control_and_whitespace() {
+        assert!(!is_safe_link_url(""));
+        assert!(!is_safe_link_url("http://example.com/x\n.html"));
+        assert!(!is_safe_link_url("http://a b.com"));
+        assert!(!is_safe_link_url("java\tscript:alert(1)"));
+        assert!(!is_safe_link_url("\u{0}https://evil"));
     }
 }
