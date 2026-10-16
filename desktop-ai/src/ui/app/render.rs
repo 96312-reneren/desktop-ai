@@ -436,7 +436,7 @@ impl eframe::App for DesktopAI {
                 .show(ctx, |ui| {
                     egui::Frame::new()
                         .fill(m.surface_container_high)
-                        .stroke(egui::Stroke::new(1.0, m.outline_variant))
+                        .stroke(egui::Stroke::new(1.0_f32, m.outline_variant))
                         .corner_radius(egui::CornerRadius::same(12))
                         .inner_margin(egui::Margin::symmetric(20, 12))
                         .show(ui, |ui| {
