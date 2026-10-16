@@ -63,6 +63,17 @@ pub struct Config {
     /// answered, so it never shows again.
     #[serde(default)]
     pub shortcut_prompted: bool,
+    /// Persist sidebar collapsed state across restarts.
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
+    /// Remember whether the user prefers the reasoning/thinking section
+    /// expanded or collapsed in assistant replies.
+    #[serde(default = "default_reasoning_expanded")]
+    pub reasoning_expanded: bool,
+}
+
+fn default_reasoning_expanded() -> bool {
+    false
 }
 
 fn default_api_port() -> u16 {
@@ -133,6 +144,8 @@ impl Default for Config {
             max_output_tokens: default_max_output_tokens(),
             rag_top_k: default_rag_top_k(),
             shortcut_prompted: false,
+            sidebar_collapsed: false,
+            reasoning_expanded: false,
         }
     }
 }

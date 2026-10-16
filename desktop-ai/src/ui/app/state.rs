@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 
 use crate::llm::downloader::DownloadMsg;
 use crate::llm::inference::{LlamaInference, StreamToken};
@@ -233,6 +234,11 @@ pub(crate) struct DesktopAI {
     /// One-shot status shown in the model-select panel after a catalog
     /// refresh attempt (success count or error).
     pub(crate) catalog_refresh_status: Option<String>,
+
+    // Toast notification (auto-dismissing, replaces modal error dialog)
+    /// Non-modal toast: (message, when it was created). Auto-dismissed
+    /// after `TOAST_DURATION_SECS` seconds.
+    pub(crate) toast: Option<(String, Instant)>,
 }
 
 #[allow(clippy::new_without_default)]
@@ -308,6 +314,7 @@ impl DesktopAI {
             loaded_model_name: None,
             catalog_rx: Some(crate::llm::model_catalog::fetch_remote_catalog()),
             catalog_refresh_status: None,
+            toast: None,
         };
 
         // Auto-load the previously selected model so a restart (or a
@@ -321,5 +328,17 @@ impl DesktopAI {
 
     pub(crate) fn is_generating(&self) -> bool {
         self.gen.is_some()
+    }
+
+    /// Show a non-modal toast notification that auto-dismisses after a few
+    /// seconds. Replaces the old modal error dialog for non-critical errors.
+    pub(crate) fn show_toast(&mut self, msg: impl Into<String>) {
+        self.toast = Some((msg.into(), Instant::now()));
+    }
+
+    /// Dismiss the current toast immediately.
+    #[allow(dead_code)]
+    pub(crate) fn dismiss_toast(&mut self) {
+        self.toast = None;
     }
 }

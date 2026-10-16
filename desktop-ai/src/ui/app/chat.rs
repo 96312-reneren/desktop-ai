@@ -111,6 +111,15 @@ impl DesktopAI {
                 }
 
                 // ── Render only visible messages ──
+                // #7: Adaptive bubble max-width based on available space
+                let bubble_max_w = if avail_w > 800.0 {
+                    avail_w * 0.72 // wide window: 72% of available width
+                } else if avail_w > 500.0 {
+                    avail_w * 0.80 // medium window: 80%
+                } else {
+                    avail_w * 0.92 // narrow window: nearly full width
+                };
+
                 for i in render_start..render_end {
                     let msg = &self.current_conv.messages[i];
                     let is_user = msg.role == "user";
@@ -119,6 +128,7 @@ impl DesktopAI {
                     if is_user {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                             theme::user_bubble(m).show(ui, |ui| {
+                                ui.set_max_width(bubble_max_w * 0.75);
                                 ui.add(
                                     Label::new(
                                         RichText::new(&msg.content)
@@ -131,6 +141,7 @@ impl DesktopAI {
                         });
                     } else {
                         theme::bot_bubble(m).show(ui, |ui| {
+                            ui.set_max_width(bubble_max_w);
                             markdown::render_markdown(ui, &msg.content, font_size);
                         });
                     }
@@ -204,10 +215,46 @@ impl DesktopAI {
                                 .size(14.0)
                                 .color(m.on_surface_variant),
                         );
-                        ui.add_space(6.0);
+                        ui.add_space(16.0);
+
+                        // ── #8: Quick-action buttons for empty state ──
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 12.0;
+                            if self.inference.is_none() {
+                                if ui
+                                    .add(theme::tonal_button(
+                                        RichText::new("📦 选择模型").size(13.0),
+                                        m,
+                                    ))
+                                    .clicked()
+                                {
+                                    self.show_model_select = true;
+                                }
+                            }
+                            if ui
+                                .add(theme::tonal_button(
+                                    RichText::new("📚 知识库").size(13.0),
+                                    m,
+                                ))
+                                .clicked()
+                            {
+                                self.show_kb_panel = !self.show_kb_panel;
+                            }
+                            if ui
+                                .add(theme::tonal_button(
+                                    RichText::new("🔍 搜索").size(13.0),
+                                    m,
+                                ))
+                                .clicked()
+                            {
+                                self.show_search_panel = !self.show_search_panel;
+                            }
+                        });
+
+                        ui.add_space(12.0);
                         ui.label(
-                            RichText::new("选择模型后即可开始对话")
-                                .size(12.0)
+                            RichText::new("快捷键：Ctrl+N 新对话 · Ctrl+F 搜索 · Esc 停止生成")
+                                .size(10.5)
                                 .color(m.outline),
                         );
                     });

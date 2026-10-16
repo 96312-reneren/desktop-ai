@@ -9,6 +9,16 @@ use crate::llm::model_catalog::find_model;
 use crate::store::config;
 use eframe::egui;
 use egui::{Color32, RichText};
+use std::time::Duration;
+
+/// How long a toast notification stays visible before auto-dismissing.
+const TOAST_DURATION_SECS: u64 = 5;
+/// Sidebar width when expanded.
+const SIDEBAR_WIDTH: f32 = 200.0;
+/// Collapsed sidebar width (just the toggle button).
+const SIDEBAR_COLLAPSED_WIDTH: f32 = 36.0;
+/// Auto-collapse the sidebar when the window is narrower than this.
+const NARROW_WINDOW_THRESHOLD: f32 = 700.0;
 
 impl eframe::App for DesktopAI {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -18,6 +28,20 @@ impl eframe::App for DesktopAI {
         self.poll_search();
         self.poll_kb_job();
         self.poll_catalog_refresh();
+
+        // Auto-dismiss expired toast
+        if let Some((_, created)) = &self.toast {
+            if created.elapsed() > Duration::from_secs(TOAST_DURATION_SECS) {
+                self.toast = None;
+            }
+        }
+
+        // Auto-collapse sidebar on very narrow windows (#12)
+        let window_w = ctx.screen_rect().width();
+        if window_w < NARROW_WINDOW_THRESHOLD && !self.config.sidebar_collapsed {
+            self.config.sidebar_collapsed = true;
+            // Don't save config here — this is a transient responsive state
+        }
 
         // Keyboard shortcuts
         let input = ctx.input(|i| i.clone());
@@ -36,6 +60,9 @@ impl eframe::App for DesktopAI {
                 self.show_model_select = false;
             } else if self.show_search_panel {
                 self.show_search_panel = false;
+            } else if self.is_generating() {
+                // #11: Esc stops generation when no dialog is open
+                self.stop_generation();
             }
         }
 
@@ -150,13 +177,49 @@ impl eframe::App for DesktopAI {
             }
         });
 
-        // ─── Sidebar ───────────────────────────────
-        egui::SidePanel::left("sidebar")
-            .resizable(false)
-            .default_width(200.0)
-            .show(ctx, |ui| {
-                self.render_sidebar(ui);
-            });
+        // ─── Sidebar (collapsible, persisted) ──────
+        if self.config.sidebar_collapsed {
+            // Collapsed: just a narrow strip with an expand button
+            egui::SidePanel::left("sidebar_collapsed")
+                .resizable(false)
+                .exact_width(SIDEBAR_COLLAPSED_WIDTH)
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(8.0);
+                        if ui
+                            .button(RichText::new("»").size(16.0))
+                            .on_hover_text("展开侧边栏")
+                            .clicked()
+                        {
+                            self.config.sidebar_collapsed = false;
+                            config::save_config(&self.config);
+                        }
+                    });
+                });
+        } else {
+            egui::SidePanel::left("sidebar")
+                .resizable(false)
+                .default_width(SIDEBAR_WIDTH)
+                .show(ctx, |ui| {
+                    // Collapse button at the very top
+                    ui.horizontal(|ui| {
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Min),
+                            |ui| {
+                                if ui
+                                    .button(RichText::new("«").size(12.0))
+                                    .on_hover_text("折叠侧边栏")
+                                    .clicked()
+                                {
+                                    self.config.sidebar_collapsed = true;
+                                    config::save_config(&self.config);
+                                }
+                            },
+                        );
+                    });
+                    self.render_sidebar(ui);
+                });
+        }
 
         // ─── Input bar (BEFORE CentralPanel: egui panels added after the
         // central panel overlap it instead of reducing its space — this was
@@ -336,8 +399,7 @@ impl eframe::App for DesktopAI {
                                     self.status_message = "未创建快捷方式".into();
                                 }
                                 Err(e) => {
-                                    self.error_message =
-                                        Some(format!("创建快捷方式失败: {}", e));
+                                    self.show_toast(format!("创建快捷方式失败: {}", e));
                                 }
                             }
                             self.config.shortcut_prompted = true;
@@ -353,7 +415,8 @@ impl eframe::App for DesktopAI {
                 });
         }
 
-        // ─── Error toast ───────────────────────────
+        // ─── Error handling: legacy modal dialog for error_message,
+        // plus non-modal toast for toast notifications ──
         if let Some(ref err) = self.error_message.clone() {
             egui::Window::new("错误")
                 .collapsible(false)
@@ -364,6 +427,34 @@ impl eframe::App for DesktopAI {
                     if ui.button("确定").clicked() {
                         self.error_message = None;
                     }
+                });
+        }
+
+        // ─── Toast notification (non-modal, auto-dismissing) ──
+        if let Some((ref msg, _)) = self.toast.clone() {
+            let m = super::theme::palette(self.config.theme != "light");
+            egui::Area::new(egui::Id::new("toast_area"))
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -60.0])
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(m.surface_container_high)
+                        .stroke(egui::Stroke::new(1.0, m.outline_variant))
+                        .corner_radius(egui::CornerRadius::same(12))
+                        .inner_margin(egui::Margin::symmetric(20, 12))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("ℹ").size(14.0).color(m.primary),
+                                );
+                                ui.label(
+                                    RichText::new(msg).size(13.0).color(m.on_surface),
+                                );
+                                if ui.small_button("✕").clicked() {
+                                    self.toast = None;
+                                }
+                            });
+                        });
                 });
         }
 

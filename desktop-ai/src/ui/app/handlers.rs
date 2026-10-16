@@ -152,7 +152,7 @@ impl DesktopAI {
 
     pub(crate) fn delete_kb_document(&mut self, id: &str) {
         if let Err(e) = self.vector_store.delete_document(id) {
-            self.error_message = Some(format!("删除失败: {}", e));
+            self.show_toast(format!("删除失败: {}", e));
         }
     }
 
@@ -177,7 +177,7 @@ impl DesktopAI {
             }
             let p = std::path::PathBuf::from(&filepath);
             if !p.exists() {
-                self.error_message = Some(format!("文件不存在: {}", filepath));
+                self.show_toast(format!("文件不存在: {}", filepath));
                 return;
             }
             p
@@ -187,12 +187,12 @@ impl DesktopAI {
             // Android: no native file dialog — use the typed path instead.
             let filepath = self.kb_title.trim().to_string();
             if filepath.is_empty() {
-                self.error_message = Some("请输入文件路径".into());
+                self.show_toast("请输入文件路径");
                 return;
             }
             let p = std::path::PathBuf::from(&filepath);
             if !p.exists() {
-                self.error_message = Some(format!("文件不存在: {}", filepath));
+                self.show_toast(format!("文件不存在: {}", filepath));
                 return;
             }
             p
@@ -209,7 +209,7 @@ impl DesktopAI {
 
         // ── File type whitelist ──
         if !matches!(ext.as_str(), "txt" | "md" | "pdf") {
-            self.error_message = Some(format!("不支持的文件类型 .{} — 仅支持 .txt .md .pdf", ext));
+            self.show_toast(format!("不支持的文件类型 .{} — 仅支持 .txt .md .pdf", ext));
             return;
         }
 
@@ -221,7 +221,7 @@ impl DesktopAI {
                 let n = f.read(&mut head).unwrap_or(0);
                 let zeros = head[..n].iter().filter(|&&b| b == 0).count();
                 if n >= 4 && zeros * 2 >= n {
-                    self.error_message = Some("请转换为纯文本格式".into());
+                    self.show_toast("请转换为纯文本格式");
                     return;
                 }
             }
@@ -324,7 +324,7 @@ impl DesktopAI {
                     return;
                 }
                 Ok(KbIndexMsg::Error(e)) => {
-                    self.error_message = Some(e);
+                    self.show_toast(format!("知识库索引失败: {}", e));
                     self.kb_indexing = false;
                     self.kb_job = None;
                     return;
@@ -434,7 +434,7 @@ impl DesktopAI {
         }
         for (id, err) in errors {
             self.downloads.remove(&id);
-            self.error_message = Some(format!("下载 {} 失败: {}", id, err));
+            self.show_toast(format!("下载 {} 失败: {}", id, err));
         }
     }
 
@@ -671,7 +671,7 @@ impl DesktopAI {
 
     pub(crate) fn export_current_conversation(&mut self) {
         if self.current_conv.messages.is_empty() {
-            self.error_message = Some("当前对话为空，无法导出".into());
+            self.show_toast("当前对话为空，无法导出");
             return;
         }
         let default_name = format!("conversation_{}.json", self.current_conv.id);
@@ -692,12 +692,12 @@ impl DesktopAI {
         match self.current_conv.export_json() {
             Ok(json) => {
                 if let Err(e) = std::fs::write(&path, json) {
-                    self.error_message = Some(format!("写入失败: {}", e));
+                    self.show_toast(format!("导出失败: {}", e));
                     return;
                 }
-                self.error_message = Some(format!("已导出至 {:?}", path));
+                self.show_toast(format!("已导出至 {:?}", path));
             }
-            Err(e) => self.error_message = Some(e),
+            Err(e) => self.show_toast(format!("导出失败: {}", e)),
         }
     }
 
@@ -715,13 +715,13 @@ impl DesktopAI {
         if let Err(e) =
             crate::rag::kb_job::ensure_file_size(&path, crate::rag::kb_job::MAX_IMPORT_JSON_BYTES)
         {
-            self.error_message = Some(e);
+            self.show_toast(e);
             return;
         }
         let content = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => {
-                self.error_message = Some(format!("读取失败: {}", e));
+                self.show_toast(format!("读取失败: {}", e));
                 return;
             }
         };
@@ -730,16 +730,17 @@ impl DesktopAI {
                 conv.save();
                 self.current_conv = conv;
                 self.conv_cache_dirty = true;
-                self.error_message = Some("导入成功".into());
+                self.msg_heights.clear();
+                self.show_toast("导入成功");
             }
-            Err(e) => self.error_message = Some(e),
+            Err(e) => self.show_toast(format!("导入失败: {}", e)),
         }
     }
 
     /// Android has no native file picker.
     #[cfg(target_os = "android")]
     pub(crate) fn import_conversation(&mut self) {
-        self.error_message = Some("安卓端暂不支持导入对话".into());
+        self.show_toast("安卓端暂不支持导入对话");
     }
 
     // ─── Model / data management ────────────────────────
