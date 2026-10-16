@@ -203,19 +203,16 @@ impl eframe::App for DesktopAI {
                 .show(ctx, |ui| {
                     // Collapse button at the very top
                     ui.horizontal(|ui| {
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Min),
-                            |ui| {
-                                if ui
-                                    .button(RichText::new("«").size(12.0))
-                                    .on_hover_text("折叠侧边栏")
-                                    .clicked()
-                                {
-                                    self.config.sidebar_collapsed = true;
-                                    config::save_config(&self.config);
-                                }
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                            if ui
+                                .button(RichText::new("«").size(12.0))
+                                .on_hover_text("折叠侧边栏")
+                                .clicked()
+                            {
+                                self.config.sidebar_collapsed = true;
+                                config::save_config(&self.config);
+                            }
+                        });
                     });
                     self.render_sidebar(ui);
                 });
@@ -444,12 +441,8 @@ impl eframe::App for DesktopAI {
                         .inner_margin(egui::Margin::symmetric(20, 12))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new("ℹ").size(14.0).color(m.primary),
-                                );
-                                ui.label(
-                                    RichText::new(msg).size(13.0).color(m.on_surface),
-                                );
+                                ui.label(RichText::new("ℹ").size(14.0).color(m.primary));
+                                ui.label(RichText::new(msg).size(13.0).color(m.on_surface));
                                 if ui.small_button("✕").clicked() {
                                     self.toast = None;
                                 }

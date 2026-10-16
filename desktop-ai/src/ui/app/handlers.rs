@@ -8,9 +8,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
-use super::state::{
-    DownloadState, GenState, KbJobState, ModelLoadResult, ModelLoadState,
-};
+use super::state::{DownloadState, GenState, KbJobState, ModelLoadResult, ModelLoadState};
 use crate::llm::downloader::{self, DownloadMsg};
 use crate::llm::inference::{self, LlamaInference, StreamToken};
 use crate::llm::model_catalog::find_model;
@@ -897,8 +895,7 @@ impl DesktopAI {
                         &mut self.config.model_catalog,
                         remote,
                     );
-                    self.catalog_refresh_status =
-                        Some(format!("已从云端更新 {} 个模型条目", n));
+                    self.catalog_refresh_status = Some(format!("已从云端更新 {} 个模型条目", n));
                     config::save_config(&self.config);
                     log::info!("model catalog refreshed: {} entries merged", n);
                 }

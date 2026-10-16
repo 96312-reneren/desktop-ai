@@ -94,9 +94,7 @@ impl DesktopAI {
                     .partition_point(|&y| y < vis_top)
                     .saturating_sub(1)
                     .min(total.saturating_sub(1));
-                let last_vis = cum
-                    .partition_point(|&y| y <= vis_bottom)
-                    .min(total);
+                let last_vis = cum.partition_point(|&y| y <= vis_bottom).min(total);
 
                 // Expand range with margin for smooth scrolling.
                 let render_start = first_vis.saturating_sub(SCROLL_MARGIN);
@@ -220,16 +218,15 @@ impl DesktopAI {
                         // ── #8: Quick-action buttons for empty state ──
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing.x = 12.0;
-                            if self.inference.is_none() {
-                                if ui
+                            if self.inference.is_none()
+                                && ui
                                     .add(theme::tonal_button(
                                         RichText::new("📦 选择模型").size(13.0),
                                         m,
                                     ))
                                     .clicked()
-                                {
-                                    self.show_model_select = true;
-                                }
+                            {
+                                self.show_model_select = true;
                             }
                             if ui
                                 .add(theme::tonal_button(
@@ -241,10 +238,7 @@ impl DesktopAI {
                                 self.show_kb_panel = !self.show_kb_panel;
                             }
                             if ui
-                                .add(theme::tonal_button(
-                                    RichText::new("🔍 搜索").size(13.0),
-                                    m,
-                                ))
+                                .add(theme::tonal_button(RichText::new("🔍 搜索").size(13.0), m))
                                 .clicked()
                             {
                                 self.show_search_panel = !self.show_search_panel;
