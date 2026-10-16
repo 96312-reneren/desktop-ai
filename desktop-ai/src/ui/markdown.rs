@@ -216,17 +216,49 @@ impl State {
             TagEnd::CodeBlock => {
                 if let Some(code) = self.code_block_buf.take() {
                     if !code.is_empty() {
+                        let code = code.trim_end().to_string();
                         ui.add_space(4.0);
-                        ui.add(
-                            Label::new(
-                                RichText::new(code.trim_end())
-                                    .monospace()
-                                    .size(self.font_size - 1.0)
-                                    .color(Color32::from_rgb(200, 200, 200)),
-                            )
-                            .selectable(true)
-                            .wrap(),
-                        );
+                        egui::Frame::new()
+                            .fill(Color32::from_rgb(30, 30, 30))
+                            .corner_radius(egui::CornerRadius::same(8))
+                            .inner_margin(egui::Margin {
+                                left: 12,
+                                right: 12,
+                                top: 6,
+                                bottom: 8,
+                            })
+                            .show(ui, |ui| {
+                                // ── Copy button row ──
+                                ui.horizontal(|ui| {
+                                    ui.add_space(ui.available_width() - 50.0);
+                                    let copy_btn = ui.add(
+                                        egui::Button::new(
+                                            RichText::new("📋 复制")
+                                                .size(self.font_size - 3.0)
+                                                .color(Color32::from_rgb(160, 160, 160)),
+                                        )
+                                        .fill(Color32::from_rgb(45, 45, 45))
+                                        .corner_radius(egui::CornerRadius::same(6)),
+                                    );
+                                    if copy_btn.clicked() {
+                                        ui.ctx().copy_text(code.clone());
+                                    }
+                                    if copy_btn.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                });
+                                ui.add_space(2.0);
+                                ui.add(
+                                    Label::new(
+                                        RichText::new(&code)
+                                            .monospace()
+                                            .size(self.font_size - 1.0)
+                                            .color(Color32::from_rgb(200, 200, 200)),
+                                    )
+                                    .selectable(true)
+                                    .wrap(),
+                                );
+                            });
                         ui.add_space(4.0);
                     }
                 }

@@ -1,5 +1,5 @@
 // DesktopAI sub-module: chat area + input bar (Material Design 3 styling)
-use super::{theme, DesktopAI};
+use super::{state, theme, DesktopAI};
 use crate::store::config;
 use crate::ui::markdown;
 use egui::{vec2, Color32, CornerRadius, Label, Margin, RichText, ScrollArea, Stroke, TextEdit};
@@ -12,8 +12,36 @@ impl DesktopAI {
             .auto_shrink([false; 2])
             .show(ui, |ui| {
                 let font_size = self.config.font_size as f32;
+                let total = self.current_conv.messages.len();
+                let start = total.saturating_sub(self.visible_msg_count);
 
-                for msg in &self.current_conv.messages {
+                // ── "Load earlier messages" button ──
+                if start > 0 {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(8.0);
+                        let btn = ui.add(
+                            egui::Button::new(
+                                RichText::new(format!(
+                                    "⬆ 加载更早的消息 (还有 {} 条)",
+                                    start
+                                ))
+                                .size(12.0)
+                                .color(m.primary),
+                            )
+                            .fill(m.surface_container_high)
+                            .corner_radius(CornerRadius::same(16)),
+                        );
+                        if btn.clicked() {
+                            self.visible_msg_count += state::MSG_PAGE_SIZE;
+                        }
+                        if btn.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        ui.add_space(4.0);
+                    });
+                }
+
+                for msg in &self.current_conv.messages[start..] {
                     let is_user = msg.role == "user";
                     if is_user {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
