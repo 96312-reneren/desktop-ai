@@ -649,7 +649,7 @@ impl DesktopAI {
     pub(crate) fn new_conversation(&mut self) {
         self.current_conv = Conversation::new();
         self.conv_cache_dirty = true;
-        self.visible_msg_count = super::state::DEFAULT_VISIBLE_MSGS;
+        self.msg_heights.clear();
     }
 
     pub(crate) fn load_conversation(&mut self, id: &str) {
@@ -657,7 +657,7 @@ impl DesktopAI {
             self.current_conv = conv;
             self.config.last_conversation_id = Some(id.to_string());
             config::save_config(&self.config);
-            self.visible_msg_count = super::state::DEFAULT_VISIBLE_MSGS;
+            self.msg_heights.clear();
         }
     }
 
@@ -879,6 +879,35 @@ impl DesktopAI {
             }
             self.search_loading = false;
             self.search_rx = None;
+        }
+    }
+
+    /// Poll the background model-catalog fetch (started once in `new()`).
+    /// On success, merges remote entries into the local catalog and saves.
+    pub(crate) fn poll_catalog_refresh(&mut self) {
+        let rx = match self.catalog_rx.as_mut() {
+            Some(r) => r,
+            None => return,
+        };
+        if let Ok(result) = rx.try_recv() {
+            match result {
+                Ok(remote) => {
+                    let n = crate::llm::model_catalog::merge_catalog(
+                        &mut self.config.model_catalog,
+                        remote,
+                    );
+                    self.catalog_refresh_status =
+                        Some(format!("已从云端更新 {} 个模型条目", n));
+                    config::save_config(&self.config);
+                    log::info!("model catalog refreshed: {} entries merged", n);
+                }
+                Err(e) => {
+                    self.catalog_refresh_status =
+                        Some(format!("目录更新失败（使用内置目录）: {}", e));
+                    log::warn!("model catalog refresh failed: {}", e);
+                }
+            }
+            self.catalog_rx = None;
         }
     }
 }

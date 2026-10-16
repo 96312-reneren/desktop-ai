@@ -33,6 +33,13 @@ impl DesktopAI {
                     .color(Color32::from_rgb(255, 200, 50)),
             );
         }
+        if let Some(ref status) = self.catalog_refresh_status {
+            ui.label(
+                RichText::new(status)
+                    .size(10.5)
+                    .color(Color32::from_rgb(100, 200, 255)),
+            );
+        }
         ui.separator();
         ui.add_space(4.0);
 

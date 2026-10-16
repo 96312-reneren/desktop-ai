@@ -1,48 +1,121 @@
 // DesktopAI sub-module: chat area + input bar (Material Design 3 styling)
-use super::{state, theme, DesktopAI};
+use super::{theme, DesktopAI};
 use crate::store::config;
 use crate::ui::markdown;
 use egui::{vec2, Color32, CornerRadius, Label, Margin, RichText, ScrollArea, Stroke, TextEdit};
 
+/// Rough height estimate for an unmeasured message.
+/// Uses content length and role to guess how tall the bubble will be.
+/// After the message is rendered once, the actual height is cached in
+/// `DesktopAI::msg_heights` and this estimate is no longer consulted.
+fn estimate_msg_height(content: &str, role: &str, font_size: f32, avail_width: f32) -> f32 {
+    let chars = content.chars().count();
+    if chars == 0 {
+        return 36.0;
+    }
+    // Average char width: CJK ≈ 1.0×font_size, Latin ≈ 0.55×font_size.
+    // Use 0.7 as a conservative blend.
+    let avg_char_w = font_size * 0.7;
+    let effective_w = if role == "user" {
+        // user bubble is right-aligned and narrower
+        (avail_width * 0.65 - 32.0).max(60.0)
+    } else {
+        (avail_width - 80.0).max(100.0)
+    };
+    let chars_per_line = (effective_w / avg_char_w).max(1.0);
+    let lines = (chars as f32 / chars_per_line).ceil();
+    let line_h = font_size * 1.5;
+    let text_h = lines * line_h;
+    // Bubble padding + code-block extra
+    let pad: f32 = if role == "user" { 24.0 } else { 28.0 };
+    let code_extra = if content.contains("```") {
+        // Each code block adds ~40px for the frame + button row
+        content.matches("```").count() as f32 * 20.0 + 30.0
+    } else {
+        0.0
+    };
+    text_h + pad + code_extra
+}
+
+/// Spacing between consecutive message bubbles.
+const MSG_SPACING: f32 = 4.0;
+/// How many extra messages to render above/below the visible viewport
+/// to avoid pop-in during fast scrolling.
+const SCROLL_MARGIN: usize = 4;
+/// Invalidate the height cache when the window width changes by more
+/// than this many pixels (text wrapping changes → heights change).
+const WIDTH_INVALIDATE_THRESHOLD: f32 = 50.0;
+
 impl DesktopAI {
     pub(crate) fn render_chat_area(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         let m = theme::palette(self.config.theme != "light");
+        let font_size = self.config.font_size as f32;
+        let total = self.current_conv.messages.len();
+        let avail_w = ui.available_width();
+
+        // ── Invalidate height cache on significant width change ──
+        if (self.msg_heights_width - avail_w).abs() > WIDTH_INVALIDATE_THRESHOLD {
+            self.msg_heights.clear();
+            self.msg_heights_width = avail_w;
+        }
+        // Ensure the cache matches the message count
+        if self.msg_heights.len() != total {
+            self.msg_heights.resize(total, 0.0);
+        }
+
+        // ── Build cumulative height table (prefix sums) ──
+        // cum[i] = y-offset of message i from the top of the scroll content.
+        let mut cum: Vec<f32> = Vec::with_capacity(total + 1);
+        cum.push(0.0);
+        for i in 0..total {
+            let h = if self.msg_heights[i] > 0.0 {
+                self.msg_heights[i]
+            } else {
+                estimate_msg_height(
+                    &self.current_conv.messages[i].content,
+                    &self.current_conv.messages[i].role,
+                    font_size,
+                    avail_w,
+                )
+            };
+            cum.push(cum[i] + h + MSG_SPACING);
+        }
+        let total_content_h = cum[total];
+
         ScrollArea::vertical()
             .stick_to_bottom(true)
             .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                let font_size = self.config.font_size as f32;
-                let total = self.current_conv.messages.len();
-                let start = total.saturating_sub(self.visible_msg_count);
+            .show_viewport(ui, |ui, viewport| {
+                let vis_top = viewport.min.y;
+                let vis_bottom = viewport.max.y;
 
-                // ── "Load earlier messages" button ──
-                if start > 0 {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(8.0);
-                        let btn = ui.add(
-                            egui::Button::new(
-                                RichText::new(format!(
-                                    "⬆ 加载更早的消息 (还有 {} 条)",
-                                    start
-                                ))
-                                .size(12.0)
-                                .color(m.primary),
-                            )
-                            .fill(m.surface_container_high)
-                            .corner_radius(CornerRadius::same(16)),
-                        );
-                        if btn.clicked() {
-                            self.visible_msg_count += state::MSG_PAGE_SIZE;
-                        }
-                        if btn.hovered() {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                        }
-                        ui.add_space(4.0);
-                    });
+                // Binary search for the visible message range.
+                let first_vis = cum
+                    .partition_point(|&y| y < vis_top)
+                    .saturating_sub(1)
+                    .min(total.saturating_sub(1));
+                let last_vis = cum
+                    .partition_point(|&y| y <= vis_bottom)
+                    .min(total);
+
+                // Expand range with margin for smooth scrolling.
+                let render_start = first_vis.saturating_sub(SCROLL_MARGIN);
+                let render_end = (last_vis + SCROLL_MARGIN).min(total);
+
+                // ── Reserve space above visible range ──
+                if render_start > 0 {
+                    let above_h = cum[render_start];
+                    if above_h > 0.0 {
+                        ui.allocate_space(vec2(ui.available_width(), above_h));
+                    }
                 }
 
-                for msg in &self.current_conv.messages[start..] {
+                // ── Render only visible messages ──
+                for i in render_start..render_end {
+                    let msg = &self.current_conv.messages[i];
                     let is_user = msg.role == "user";
+                    let y_before = ui.cursor().top();
+
                     if is_user {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                             theme::user_bubble(m).show(ui, |ui| {
@@ -61,12 +134,26 @@ impl DesktopAI {
                             markdown::render_markdown(ui, &msg.content, font_size);
                         });
                     }
-                    ui.add_space(4.0);
+                    ui.add_space(MSG_SPACING);
+
+                    // ── Measure actual height and update cache ──
+                    let actual_h = ui.cursor().top() - y_before;
+                    if actual_h > 0.0 && (self.msg_heights[i] - actual_h).abs() > 1.0 {
+                        self.msg_heights[i] = actual_h;
+                    }
                 }
 
+                // ── Reserve space below visible range ──
+                if render_end < total {
+                    let below_h = total_content_h - cum[render_end];
+                    if below_h > 0.0 {
+                        ui.allocate_space(vec2(ui.available_width(), below_h));
+                    }
+                }
+
+                // ── Streaming / generation indicator (always at bottom) ──
                 if let Some(ref gen) = self.gen {
                     if gen.conv_id == self.current_conv.id {
-                        // Context-budget notice (truncation / degraded context).
                         if let Some(ref notice) = gen.notice {
                             ui.vertical_centered(|ui| {
                                 ui.label(
@@ -126,7 +213,7 @@ impl DesktopAI {
                     });
                 }
 
-                // ── 参考来源：最近一次回复的知识库命中（排名而非百分数）──
+                // ── 参考来源 ──
                 if let Some((conv_id, sources)) = &self.last_sources {
                     if conv_id == &self.current_conv.id && !sources.is_empty() {
                         ui.add_space(8.0);

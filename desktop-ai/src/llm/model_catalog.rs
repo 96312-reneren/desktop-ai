@@ -1,4 +1,11 @@
 use crate::store::config::ModelInfo;
+use std::sync::mpsc;
+
+/// Remote JSON catalog URL. The file must be a JSON array of ModelInfo-shaped
+/// objects. Fetched in a background thread on app start; on failure the
+/// hardcoded defaults below are used.
+const CATALOG_URL: &str =
+    "https://raw.githubusercontent.com/96312-reneren/desktop-ai/main/model_catalog.json";
 
 pub(crate) fn default_catalog() -> Vec<ModelInfo> {
     vec![
@@ -86,4 +93,71 @@ pub(crate) fn default_catalog() -> Vec<ModelInfo> {
 
 pub fn find_model<'a>(catalog: &'a [ModelInfo], id: &str) -> Option<&'a ModelInfo> {
     catalog.iter().find(|m| m.id == id)
+}
+
+/// Fetch the remote model catalog in a background thread.
+///
+/// Returns a receiver that will deliver the fetched catalog (or an error
+/// message) exactly once. The caller should poll with `try_recv()` and, on
+/// success, merge the result into `config.model_catalog` via
+/// [`merge_catalog`].
+///
+/// The fetch has a 10-second connect timeout and 30-second total timeout.
+/// On any failure (network, parse, empty list) the error string is sent.
+pub(crate) fn fetch_remote_catalog() -> mpsc::Receiver<Result<Vec<ModelInfo>, String>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = fetch_catalog_sync();
+        let _ = tx.send(result);
+    });
+    rx
+}
+
+fn fetch_catalog_sync() -> Result<Vec<ModelInfo>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("HTTP client 构建失败: {e}"))?;
+
+    let resp = client
+        .get(CATALOG_URL)
+        .header("Accept", "application/json")
+        .send()
+        .map_err(|e| format!("请求失败: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+
+    let body = resp.text().map_err(|e| format!("读取响应失败: {e}"))?;
+    let catalog: Vec<ModelInfo> =
+        serde_json::from_str(&body).map_err(|e| format!("JSON 解析失败: {e}"))?;
+
+    if catalog.is_empty() {
+        return Err("远程目录为空".into());
+    }
+
+    Ok(catalog)
+}
+
+/// Merge a remote catalog into the local one.
+///
+/// - Entries with the same `id` are replaced by the remote version.
+/// - New remote entries are appended after existing ones.
+/// - Local-only entries (not in remote) are kept unchanged.
+///
+/// Returns the number of entries added or updated.
+pub(crate) fn merge_catalog(local: &mut Vec<ModelInfo>, remote: Vec<ModelInfo>) -> usize {
+    let mut changed = 0;
+    for entry in remote {
+        if let Some(existing) = local.iter_mut().find(|m| m.id == entry.id) {
+            *existing = entry;
+        } else {
+            local.push(entry);
+        }
+        changed += 1;
+    }
+    changed
 }

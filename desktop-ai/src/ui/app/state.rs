@@ -23,15 +23,6 @@ pub(crate) fn apply_theme(ctx: &egui::Context, theme: &str) {
     super::theme::apply(ctx, theme == "dark");
 }
 
-/// Default number of recent messages rendered in the chat window.
-/// Older messages are hidden behind a "load earlier" button to keep
-/// the per-frame widget count bounded on long conversations.
-pub(crate) const DEFAULT_VISIBLE_MSGS: usize = 50;
-
-/// How many more messages to reveal each time the user clicks
-/// "load earlier messages".
-pub(crate) const MSG_PAGE_SIZE: usize = 30;
-
 // ─── Download state ────────────────────────────────────
 
 pub(crate) struct DownloadState {
@@ -214,10 +205,14 @@ pub(crate) struct DesktopAI {
     pub(crate) conv_filter: String,
 
     // UI
-    /// How many recent messages to render in the chat area (virtual window).
-    /// Older messages are hidden behind a "load earlier" button. Reset to
-    /// `DEFAULT_VISIBLE_MSGS` on conversation switch.
-    pub(crate) visible_msg_count: usize,
+    /// Per-message measured pixel heights for virtual scrolling.
+    /// `0.0` = not yet measured (estimate will be used).
+    /// Resized to match `current_conv.messages.len()` each frame.
+    pub(crate) msg_heights: Vec<f32>,
+    /// Window width at the time `msg_heights` was last measured.
+    /// When the window is resized by more than 50px the cache is invalidated
+    /// because text wrapping (and therefore heights) changes.
+    pub(crate) msg_heights_width: f32,
     pub(crate) show_model_select: bool,
     pub(crate) show_settings: bool,
     pub(crate) status_message: String,
@@ -229,6 +224,15 @@ pub(crate) struct DesktopAI {
     pub(crate) conv_cache_dirty: bool,
     /// Display name of the currently loaded model (None = not loaded).
     pub(crate) loaded_model_name: Option<String>,
+
+    // Model catalog (remote refresh)
+    /// Receiver for the background catalog fetch. Polled once per frame in
+    /// `update()`; consumed and set to `None` on first result.
+    pub(crate) catalog_rx:
+        Option<mpsc::Receiver<Result<Vec<crate::store::config::ModelInfo>, String>>>,
+    /// One-shot status shown in the model-select panel after a catalog
+    /// refresh attempt (success count or error).
+    pub(crate) catalog_refresh_status: Option<String>,
 }
 
 #[allow(clippy::new_without_default)]
@@ -288,7 +292,8 @@ impl DesktopAI {
             search_error: None,
             search_rx: None,
             conv_filter: String::new(),
-            visible_msg_count: DEFAULT_VISIBLE_MSGS,
+            msg_heights: Vec::new(),
+            msg_heights_width: 0.0,
             show_model_select: false,
             show_settings: false,
             status_message: "就绪".into(),
@@ -301,6 +306,8 @@ impl DesktopAI {
             conv_cache_dirty: true,
             // Current model display name (None = nothing loaded yet).
             loaded_model_name: None,
+            catalog_rx: Some(crate::llm::model_catalog::fetch_remote_catalog()),
+            catalog_refresh_status: None,
         };
 
         // Auto-load the previously selected model so a restart (or a

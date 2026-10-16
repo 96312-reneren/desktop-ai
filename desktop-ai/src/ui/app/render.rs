@@ -17,6 +17,7 @@ impl eframe::App for DesktopAI {
         self.poll_generation();
         self.poll_search();
         self.poll_kb_job();
+        self.poll_catalog_refresh();
 
         // Keyboard shortcuts
         let input = ctx.input(|i| i.clone());
