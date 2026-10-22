@@ -1,3 +1,10 @@
+//! 桌面 AI 应用主框架（`eframe::App` 实现）：每帧 `update` 主循环的编排入口。
+//!
+//! 职责：轮询各后台任务通道、按既定顺序布局面板（顶栏、侧边栏、输入栏、聊天区）、
+//! 管理弹出窗口（模型选择、搜索、知识库、设置及各类对话框）。
+//! 业务逻辑集中在 `handlers.rs`，本模块只负责 egui 帧的协调与呈现。
+//! 安全边界：读取 `ffi::integrity_alert_triggered()`，在 llama 运行库 SHA-256
+//! 与基线失配时置顶红色完整性告警横幅。
 // DesktopAI eframe::App implementation: the update() entry point that
 // orchestrates polling, panel layout, window management, and dialog rendering.
 //
@@ -21,7 +28,13 @@ const SIDEBAR_COLLAPSED_WIDTH: f32 = 36.0;
 const NARROW_WINDOW_THRESHOLD: f32 = 700.0;
 
 impl eframe::App for DesktopAI {
+    /// `eframe` 每帧回调入口：轮询后台任务、处理快捷键与主题，并布局面板与弹窗。
+    ///
+    /// 每帧先消费后台任务通道（模型加载/下载/生成/搜索/知识库）的进度与结果，
+    /// 再按窗口宽度自适应折叠侧边栏；弹窗遵循“单一起、优先级高者先”的呈现策略。
+    /// 仅在 `self` 状态与 egui 上产生副作用，不做阻塞式 IO，最后请求下次重绘。
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 每帧轮询各后台任务的进度/完成通道，及时把结果同步到界面状态。
         self.poll_model_load();
         self.poll_all_downloads();
         self.poll_generation();
@@ -451,6 +464,7 @@ impl eframe::App for DesktopAI {
                 });
         }
 
+        // 主动请求 50ms 后重绘，保证下载/生成等后台进度持续刷新而不必等待用户输入。
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
 }

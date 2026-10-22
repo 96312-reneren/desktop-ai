@@ -1,8 +1,18 @@
 // DesktopAI sub-module: knowledge-base panel + search panel
+//!
+//! 知识库面板与联网搜索面板的渲染逻辑。
+//!
+//! 由顶层 `DesktopAI::update` 依据 `show_kb_panel`/`show_search_panel` 调用。
+//! 面板承载三类索引入口（文件/粘贴/爬取），均经清洗管道转为纯文本后
+//! 分块向量化写入 `vector_store`；沙盒区块仅只读展示 `sandbox` 目录内容。
 use super::DesktopAI;
 use egui::{vec2, Color32, RichText, ScrollArea, TextEdit};
 
 impl DesktopAI {
+    /// 渲染联网搜索面板：关键词输入、加载/错误状态与结果列表。
+    ///
+    /// 回车或点击“搜索”触发 `start_search`（`DuckDuckGo` 检索）；当
+    /// `search_loading` 为真时忽略重复提交，避免并发发起多次请求。
     pub(crate) fn render_search_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.add_sized(
@@ -53,6 +63,10 @@ impl DesktopAI {
         }
     }
 
+    /// 渲染知识库面板：文档索引入口、`FTS5` 关键词检索、文档列表与沙盒展示。
+    ///
+    /// 索引入口分文件/粘贴/网页爬取三类，删除文档与取消索引进度由
+    /// `delete_kb_document` 及任务句柄驱动；沙盒区块只读列出 `sandbox` 目录。
     pub(crate) fn render_kb_panel(&mut self, ui: &mut egui::Ui) {
         // Close button at top
         ui.horizontal(|ui| {

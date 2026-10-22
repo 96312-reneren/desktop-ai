@@ -7,6 +7,11 @@ use std::sync::mpsc;
 const CATALOG_URL: &str =
     "https://raw.githubusercontent.com/96312-reneren/desktop-ai/main/model_catalog.json";
 
+/// 返回内置的六模型兜底清单。
+///
+/// 网络目录（[`CATALOG_URL`]）拉取失败或无缓存时使用。每个条目给出下载
+/// `url`、本地 `filename`、整体 `expected_sha256` 以及分卷信息 `parts`
+/// （单文件模型 `parts` 为空；分卷模型由下载器逐卷校验后合并）。
 pub(crate) fn default_catalog() -> Vec<ModelInfo> {
     vec![
         ModelInfo {
@@ -91,6 +96,7 @@ pub(crate) fn default_catalog() -> Vec<ModelInfo> {
     ]
 }
 
+/// 按 `id` 在目录中查找模型条目，未命中返回 `None`。
 pub fn find_model<'a>(catalog: &'a [ModelInfo], id: &str) -> Option<&'a ModelInfo> {
     catalog.iter().find(|m| m.id == id)
 }
@@ -113,6 +119,11 @@ pub(crate) fn fetch_remote_catalog() -> mpsc::Receiver<Result<Vec<ModelInfo>, St
     rx
 }
 
+/// 同步拉取并解析远程模型目录（阻塞，仅应在本模块的后台线程中调用）。
+///
+/// 使用禁用重定向的 HTTP 客户端，带 10 秒连接超时与 30 秒总超时。要求响应
+/// 为 `ModelInfo` 数组的 JSON；非 2xx 状态、读取或解析失败、以及空列表均
+/// 以错误字符串返回。
 fn fetch_catalog_sync() -> Result<Vec<ModelInfo>, String> {
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))

@@ -1,8 +1,13 @@
-// DesktopAI sub-module: sidebar (Material Design 3 styling)
+//! DesktopAI 侧边栏子模块（Material Design 3 样式）。
+//!
+//! 负责渲染侧边栏：新对话按钮、当前模型指示、对话历史列表，以及搜索/知识库
+//! 面板开关与导入导出入口。对话列表来自缓存的 `ConversationMeta`（由
+//! `store::conversation` 的 `list_all` 懒刷新），仅在变更后重新查询。
 use super::{theme, DesktopAI};
 use egui::{vec2, RichText, ScrollArea, TextEdit};
 
 impl DesktopAI {
+    /// 渲染侧边栏：新对话按钮、当前模型指示、对话历史列表及搜索/知识库与导入导出入口。
     pub(crate) fn render_sidebar(&mut self, ui: &mut egui::Ui) {
         let m = theme::palette(self.config.theme != "light");
 

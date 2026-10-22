@@ -1,3 +1,12 @@
+//! `desktop-ai` 的 UI 交互事件处理器集合。
+//!
+//! 由 `App` 的 `update()`/渲染函数在按钮点击、输入提交等交互发生时调用，
+//! 覆盖发送消息、重新生成、模型选择、下载启动/取消、导入对话、知识库任务、
+//! 网页搜索等入口；本模块只编排状态与后台任务，不直接绘制 UI。
+//!
+//! 安全边界：导入对话前先做文件大小预检；删除/重置/卸载等破坏性操作集中于
+//! 此以便审计；跨线程协作用 `mpsc` 通道 + `AtomicBool` 取消标志，后台线程
+//! 不直接触碰 UI 状态。
 // DesktopAI event handlers: model loading, generation, downloads, KB ops,
 // conversation management, search, and app-level destructive actions.
 //
@@ -22,6 +31,10 @@ use super::state::DesktopAI;
 impl DesktopAI {
     // ─── Model loading ─────────────────────────────────
 
+    /// 按配置异步加载选中的本地模型，并（可选）初始化 `embedding` 引擎。
+    ///
+    /// 仅当模型文件存在且当前无进行中的加载时才启动；实际加载在后台线程执行，
+    /// 结果经通道交给 `poll_model_load` 消费，避免阻塞 UI 线程。
     pub(crate) fn load_selected_model(&mut self) {
         if self.model_load.is_some() {
             return;
@@ -91,6 +104,8 @@ impl DesktopAI {
         });
     }
 
+    /// 非阻塞轮询模型加载结果：成功则装配推理句柄、按需启动 API 服务并注入
+    /// `embedding`；失败则记录日志并设置醒目的错误提示（而非只留在状态行）。
     pub(crate) fn poll_model_load(&mut self) {
         let load = match self.model_load.as_ref() {
             Some(l) => l,
@@ -148,12 +163,18 @@ impl DesktopAI {
 
     // ─── Knowledge base ────────────────────────────────
 
+    /// 从向量库删除指定文档，失败时以 toast 提示用户。
     pub(crate) fn delete_kb_document(&mut self, id: &str) {
         if let Err(e) = self.vector_store.delete_document(id) {
             self.show_toast(format!("删除失败: {}", e));
         }
     }
 
+    /// 挑选本地文档并提交后台知识库索引。
+    ///
+    /// 先做扩展名白名单校验，再对非 `pdf` 文件做二进制嗅探（前 10 字节的零字节
+    /// 占比过高即判定为二进制并拒绝），防止将非文本内容喂给分身。桌面端使用
+    /// 原生文件对话框；Android 无原生对话框，退化为读取输入框中的路径。
     pub(crate) fn pick_and_index_file(&mut self) {
         if self.kb_indexing {
             return;
@@ -233,6 +254,9 @@ impl DesktopAI {
         });
     }
 
+    /// 将输入框中的标题与正文作为粘贴文本提交后台知识库索引。
+    ///
+    /// 标题或正文为空时静默返回；未加载 `embedding` 引擎则提示需先加载模型。
     pub(crate) fn paste_and_index_text(&mut self) {
         let title = self.kb_title.trim().to_string();
         let content = self.kb_content.trim().to_string();
@@ -247,6 +271,7 @@ impl DesktopAI {
         self.start_kb_job(KbIndexJob::Paste { title, content });
     }
 
+    /// 按指定深度异步爬取 URL 并入库；深度被夹取到 1~3 层以限制抓取范围。
     pub(crate) fn crawl_url_to_kb(&mut self) {
         if self.kb_indexing {
             return;
@@ -343,6 +368,10 @@ impl DesktopAI {
 
     // ─── Concurrent downloads ──────────────────────────
 
+    /// 启动指定模型的并发下载任务并登记进度/取消句柄。
+    ///
+    /// 同一模型已在下载中则直接返回，避免重复任务；下载在后台线程执行，
+    /// 支持分片与 `SHA256` 校验，进度经通道由 `poll_all_downloads` 汇总。
     pub(crate) fn start_download(&mut self, model_id: &str) {
         if self.downloads.contains_key(model_id) {
             return;
@@ -375,12 +404,17 @@ impl DesktopAI {
         });
     }
 
+    /// 置位指定下载任务的取消标志；实际中止由下载线程协作式响应。
     pub(crate) fn cancel_download(&mut self, model_id: &str) {
         if let Some(ds) = self.downloads.get(model_id) {
             ds.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
+    /// 汇总所有下载任务的进度与终态，并清理已完成/失败项。
+    ///
+    /// 下载完成后，若该模型已被选中或当前未加载任何模型，则自动选中并触发加载，
+    /// 让便携版用户下载完即可直接对话，无需再去模型选择器中翻找。
     pub(crate) fn poll_all_downloads(&mut self) {
         let mut finished = vec![];
         let mut errors = vec![];
@@ -438,6 +472,11 @@ impl DesktopAI {
 
     // ─── Generation ────────────────────────────────────
 
+    /// 发送当前输入框内容：追加用户消息并异步启动一次推理生成。
+    ///
+    /// 生成中或输入为空时直接返回；模型未加载则置状态提示。KB 检索仅在索引空闲
+    /// 时进行（`embedding` 锁可能被后台索引任务持有，避免 UI 线程长时间等待），
+    /// 开启搜索引擎时同步抓取网页上下文；检索与生成全部在后台线程执行。
     pub(crate) fn send_message(&mut self) {
         if self.is_generating() {
             return;
@@ -565,6 +604,7 @@ impl DesktopAI {
         self.gen_handle = Some(handle);
     }
 
+    /// 请求停止当前生成：置位停止标志，由推理线程协作式退出。
     pub(crate) fn stop_generation(&mut self) {
         if let Some(ref gen) = self.gen {
             gen.stop_flag
@@ -572,6 +612,10 @@ impl DesktopAI {
         }
     }
 
+    /// 非阻塞排空生成流：累积增量文本、探测重复输出死循环，结束时落库助手回复。
+    ///
+    /// 检测到连续 50 个相同字符即判定模型陷入循环，自动停止并追加提示；结束时将
+    /// 完整回复写入对话存储，并 join 后台生成线程以回收资源。
     pub(crate) fn poll_generation(&mut self) {
         let gen = match self.gen.as_mut() {
             Some(g) => g,
@@ -644,12 +688,14 @@ impl DesktopAI {
         }
     }
 
+    /// 新建空白对话，并清空消息高度缓存、标记列表缓存失效。
     pub(crate) fn new_conversation(&mut self) {
         self.current_conv = Conversation::new();
         self.conv_cache_dirty = true;
         self.msg_heights.clear();
     }
 
+    /// 按 ID 加载对话为当前对话，并持久化"最近会话"记录。
     pub(crate) fn load_conversation(&mut self, id: &str) {
         if let Some(conv) = Conversation::load(id) {
             self.current_conv = conv;
@@ -659,6 +705,7 @@ impl DesktopAI {
         }
     }
 
+    /// 删除指定对话；若删除的是当前对话则切换为新建的空白对话。
     pub(crate) fn delete_conversation(&mut self, id: &str) {
         Conversation::delete(id);
         self.conv_cache_dirty = true;
@@ -667,6 +714,9 @@ impl DesktopAI {
         }
     }
 
+    /// 将当前对话导出为 JSON 文件；空对话直接拒绝并提示。
+    ///
+    /// 桌面端弹出保存对话框由用户选路径；Android 无原生对话框，写入应用数据目录。
     pub(crate) fn export_current_conversation(&mut self) {
         if self.current_conv.messages.is_empty() {
             self.show_toast("当前对话为空，无法导出");
@@ -699,6 +749,10 @@ impl DesktopAI {
         }
     }
 
+    /// 从本地 JSON 文件导入对话并设为当前对话。
+    ///
+    /// 所选文件由用户任意指定，读取前先用 metadata 做大小预检，防止
+    /// `read_to_string` 对巨型文件无界分配内存。
     #[cfg(not(target_os = "android"))]
     pub(crate) fn import_conversation(&mut self) {
         let path = match rfd::FileDialog::new()
@@ -743,6 +797,8 @@ impl DesktopAI {
 
     // ─── Model / data management ────────────────────────
 
+    /// 删除指定模型的权重文件，并顺带清理其未完成下载的暂存文件
+    /// （`<filename>.download` / `.download.meta`）。
     pub(crate) fn delete_model_file(&mut self, model_id: &str) {
         if let Some(info) = find_model(&self.config.model_catalog, model_id) {
             let dir = config::models_dir();
@@ -762,6 +818,7 @@ impl DesktopAI {
         }
     }
 
+    /// 删除整个模型目录，清空选中模型并卸载当前推理句柄。
     pub(crate) fn delete_all_models(&mut self) {
         let dir = config::models_dir();
         if dir.exists() {
@@ -775,6 +832,7 @@ impl DesktopAI {
         self.status_message = "所有模型已删除".into();
     }
 
+    /// 删除全部已保存对话，并重置为空白对话、丢弃当前生成状态。
     pub(crate) fn delete_all_conversations(&mut self) {
         Conversation::delete_all();
         self.current_conv = Conversation::new();
@@ -782,6 +840,7 @@ impl DesktopAI {
         self.status_message = "所有对话已删除".into();
     }
 
+    /// 将应用重置为初始状态：清空数据目录与配置文件并恢复默认配置。
     pub(crate) fn reset_app(&mut self) {
         let app_dir = config::data_root();
         if let Err(e) = std::fs::remove_dir_all(&app_dir) {
@@ -800,6 +859,10 @@ impl DesktopAI {
         self.status_message = "应用已重置。请重新选择模型。".into();
     }
 
+    /// 卸载应用：删除数据/配置文件后自删可执行文件与动态库，并退出进程。
+    ///
+    /// Windows 无法删除正在运行的可执行文件，故生成批处理脚本延迟删除；类 Unix
+    /// 系统可直接 unlink 运行中的可执行文件。此操作不可逆，最后调用 `exit(0)`。
     pub(crate) fn uninstall_app(&mut self) {
         let app_dir = config::data_root();
         let _ = std::fs::remove_dir_all(&app_dir);
@@ -851,6 +914,7 @@ impl DesktopAI {
 
     // ─── Search ────────────────────────────────────────
 
+    /// 对输入框关键词发起一次 DuckDuckGo 网页搜索；加载中或关键词为空时不重复发起。
     pub(crate) fn start_search(&mut self) {
         let query = self.search_query.trim().to_string();
         if query.is_empty() || self.search_loading {
@@ -866,6 +930,7 @@ impl DesktopAI {
         });
     }
 
+    /// 非阻塞轮询网页搜索结果：写入结果或错误，并复位加载态与通道。
     pub(crate) fn poll_search(&mut self) {
         let rx = match self.search_rx.as_mut() {
             Some(r) => r,

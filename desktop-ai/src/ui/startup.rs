@@ -8,6 +8,9 @@ use super::app;
 use crate::llm::ffi;
 use crate::store::config;
 
+/// 按平台返回候选中文字体文件路径列表（`Windows`/`Linux`/`macOS`）。
+///
+/// 列表按优先级排列，供 [`load_chinese_fonts`] 顺序探测；其余平台返回空切片。
 fn font_candidates() -> &'static [&'static str] {
     #[cfg(target_os = "windows")]
     {
@@ -46,6 +49,10 @@ fn font_candidates() -> &'static [&'static str] {
     }
 }
 
+/// 顺序读取 [`font_candidates`] 中首个可用的中文字体文件。
+///
+/// 命中时返回字体字节并记 info 日志；全部缺失时返回 `None` 并告警，此时 CJK
+/// 字符可能无法渲染，但不阻断启动。
 fn load_chinese_fonts() -> Option<Vec<u8>> {
     for path in font_candidates() {
         if let Ok(data) = std::fs::read(path) {

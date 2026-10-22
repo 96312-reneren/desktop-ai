@@ -1,4 +1,12 @@
 // DesktopAI sub-module: chat area + input bar (Material Design 3 styling)
+//!
+//! 聊天区与输入栏渲染（Material Design 3 风格）。
+//!
+//! 由顶层 `DesktopAI::update` 调用 `render_chat_area` 与 `render_input_bar`；
+//! 依赖 `theme` 调色板、`markdown` 渲染器与 `config` 常量。
+//!
+//! 消息列表采用虚拟滚动：仅渲染视口内（外扩 `SCROLL_MARGIN`）的气泡，
+//! 用前缀和估算各消息纵向偏移，实测高度缓存进 `DesktopAI::msg_heights`。
 use super::{theme, DesktopAI};
 use crate::store::config;
 use crate::ui::markdown;
@@ -47,6 +55,11 @@ const SCROLL_MARGIN: usize = 4;
 const WIDTH_INVALIDATE_THRESHOLD: f32 = 50.0;
 
 impl DesktopAI {
+    /// 渲染聊天消息区，含气泡、流式生成回显、空状态与参考来源折叠区。
+    ///
+    /// 采用虚拟滚动：以 `msg_heights` 前缀和定位视口内消息，仅绘制可见范围
+    /// 并在上下补足占位空间；宽度变化超过 `WIDTH_INVALIDATE_THRESHOLD` 时清空
+    /// 高度缓存（换行方式改变会使旧高度失效）。须在 UI 线程调用。
     pub(crate) fn render_chat_area(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         let m = theme::palette(self.config.theme != "light");
         let font_size = self.config.font_size as f32;
@@ -289,6 +302,11 @@ impl DesktopAI {
             });
     }
 
+    /// 渲染底部输入栏（多行文本框 + 发送/停止按钮）及截断提示。
+    ///
+    /// 仅在已加载模型且未处于生成中时允许发送；发送前用
+    /// `config::strip_zero_width` 清洗零宽字符并受 `MAX_INPUT_GRAPHEMES`
+    /// 限制；生成期间按钮切换为“停止”。
     pub(crate) fn render_input_bar(&mut self, ui: &mut egui::Ui) {
         let m = theme::palette(self.config.theme != "light");
         let can_send = !self.is_generating() && self.inference.is_some();

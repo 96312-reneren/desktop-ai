@@ -1,6 +1,19 @@
+//! `Markdown` 到 `egui` 控件的渲染器，基于 `pulldown-cmark` 解析事件流。
+//!
+//! 由聊天视图展示消息时调用 [`render_markdown`]：行内事件归并为 `Run` 序列后
+//! 一次性绘制，代码块、表格、引用与列表分别特殊处理。
+//!
+//! 安全边界：链接必须通过 [`is_safe_link_url`] 的 scheme 白名单（`http`/`https`/
+//! `mailto`）才渲染为可点击超链接，其余（`file://`、`javascript:`、`data:`、UNC
+//! `\\host` 及任意操作系统注册协议等）一律降级为不可点击纯文本，绝不把任意外部
+//! scheme 交给操作系统协议处理器；图片仅输出占位文本，不发起任何远程拉取。
+
 use egui::{Color32, Label, RichText, Ui};
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
+/// 一段带行内样式的文本，是渲染的最小单元。
+///
+/// `text` 为内容，其余布尔量分别标记粗体、斜体、删除线与行内代码。
 struct Run {
     text: String,
     bold: bool,
@@ -9,33 +22,54 @@ struct Run {
     code: bool,
 }
 
+/// `Markdown` 渲染过程中的可变状态：行内样式、文本缓冲、缩进深度与表格收集。
 struct State {
+    /// 当前基础字号，标题会在其基础上临时放大。
     font_size: f32,
+    /// 当前是否处于粗体行内样式。
     bold: bool,
+    /// 当前是否处于斜体行内样式。
     italic: bool,
+    /// 当前是否处于删除线行内样式。
     strike: bool,
+    /// 待绘制的文本块序列，由 [`Self::flush`] 消费。
     runs: Vec<Run>,
+    /// 当前正在拼接的普通行内文本缓冲。
     cur: String,
 
+    /// 代码块文本缓冲；为 `Some` 表示正处于代码块内。
     code_block_buf: Option<String>,
 
+    /// 是否正在解析链接的显示文本。
     link_active: bool,
+    /// 链接显示文本缓冲。
     link_buf: String,
+    /// 链接目标地址。
     link_url: String,
 
+    /// 列表嵌套深度，用于计算项目符号缩进。
     list_depth: u32,
+    /// 引用嵌套深度，用于计算左侧缩进。
     blockquote_depth: u32,
+    /// 标题字号恢复栈：进入标题时压入、离开时弹出。
     font_size_stack: Vec<f32>,
 
+    /// 已收集的表格行（每行含多个单元格）。
     table_rows: Vec<Vec<String>>,
+    /// 当前处理的行是否为表头。
     table_is_head: bool,
+    /// 当前正在收集的表格行。
     table_cur_row: Vec<String>,
+    /// 是否正在收集某个表格单元格。
     in_table_cell: bool,
+    /// 当前单元格文本缓冲。
     table_cell_buf: String,
+    /// 表格自增计数，用于生成唯一网格 `Id`。
     table_counter: u32,
 }
 
 impl State {
+    /// 以给定基础字号创建空的渲染状态。
     fn new(font_size: f32) -> Self {
         Self {
             font_size,
@@ -60,6 +94,7 @@ impl State {
         }
     }
 
+    /// 按当前样式标记构造 `Run` 并追加到待渲染序列；空文本直接忽略。
     fn push_run_text(&mut self, text: String, code: bool) {
         if text.is_empty() {
             return;
@@ -73,6 +108,7 @@ impl State {
         });
     }
 
+    /// 把 `cur` 中累积的普通文本固化为一个非代码 `Run` 并清空缓冲。
     fn close_cur_run(&mut self) {
         if !self.cur.is_empty() {
             let text = std::mem::take(&mut self.cur);
@@ -80,6 +116,9 @@ impl State {
         }
     }
 
+    /// 绘制并清空当前累积的 `Run`：按引用深度缩进，逐段套用样式后以可选中标签显示。
+    ///
+    /// 代码 `Run` 使用等宽字体与深色底；无内容时直接返回。
     fn flush(&mut self, ui: &mut Ui) {
         self.close_cur_run();
         if self.runs.is_empty() {
@@ -113,6 +152,7 @@ impl State {
         });
     }
 
+    /// 按当前上下文把文本追加到正确的缓冲：代码块、链接文本、表格单元格或普通行内文本。
     fn push_text(&mut self, t: &str) {
         if let Some(buf) = self.code_block_buf.as_mut() {
             buf.push_str(t);
@@ -125,6 +165,9 @@ impl State {
         }
     }
 
+    /// 处理 `pulldown-cmark` 的开始标签：切换行内样式、压入字号或初始化代码块/表格缓冲。
+    ///
+    /// 块级标签（标题、代码块、引用、列表、表格等）会先调用 [`Self::flush`] 收尾上一段。
     fn start(&mut self, ui: &mut Ui, tag: Tag) {
         match tag {
             Tag::Paragraph => {}
@@ -200,6 +243,10 @@ impl State {
         }
     }
 
+    /// 处理 `pulldown-cmark` 的结束标签：收尾代码块/表格并弹出样式与字号状态。
+    ///
+    /// 链接结束经 [`is_safe_link_url`] 过滤，决定渲染为超链接还是纯文本；图片的空
+    /// 处理见 `TagEnd::Image` 分支说明。
     fn end(&mut self, ui: &mut Ui, tag: TagEnd) {
         match tag {
             TagEnd::Paragraph => {
@@ -303,6 +350,8 @@ impl State {
                     );
                 }
             }
+            // 图片不做任何拉取：`Tag::Image` 开始时已把地址写成占位文本，避免
+            // 远程加载带来的 SSRF、追踪与隐私泄露，故结束标签为空实现。
             TagEnd::Image => {}
             TagEnd::Table => {
                 self.flush(ui);
@@ -326,6 +375,9 @@ impl State {
         }
     }
 
+    /// 将收集到的表格行渲染为 `egui` 网格：首行加粗作表头，随后清空缓冲并留白。
+    ///
+    /// 用自增计数器生成唯一 `Id`，避免同一帧内多个表格共用网格状态。
     fn render_table(&mut self, ui: &mut Ui) {
         if self.table_rows.is_empty() {
             return;
@@ -354,6 +406,9 @@ impl State {
     }
 }
 
+/// 渲染 `Markdown` 文本：解析事件流并驱动 [`State`]，最后绘制剩余文本。
+///
+/// `font_size` 为基础字号，标题会在此基础上放大；函数就地绘制，无返回值。
 pub(crate) fn render_markdown(ui: &mut Ui, text: &str, font_size: f32) {
     let parser = Parser::new(text);
     let mut st = State::new(font_size);

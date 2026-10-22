@@ -1,7 +1,7 @@
-// DesktopAI application state: data structures, startup checks, constructor.
-//
-// This module owns the `DesktopAI` struct definition and its initialisation
-// logic. Rendering and event-handling live in sibling modules.
+//! DesktopAI application state: data structures, startup checks, constructor.
+//!
+//! This module owns the `DesktopAI` struct definition and its initialisation
+//! logic. Rendering and event-handling live in sibling modules.
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
@@ -20,12 +20,14 @@ use crate::store::config::{self, Config};
 use crate::store::conversation::Conversation;
 use eframe::egui;
 
+/// 根据 `theme` 是否等于 `"dark"` 选择暗色或亮色主题并应用到 `egui` 上下文。
 pub(crate) fn apply_theme(ctx: &egui::Context, theme: &str) {
     super::theme::apply(ctx, theme == "dark");
 }
 
 // ─── Download state ────────────────────────────────────
 
+/// 单个并发下载任务的 UI 侧状态：进度、状态文本、消息通道与取消标志。
 pub(crate) struct DownloadState {
     pub(crate) progress: f32,
     pub(crate) status: String,
@@ -35,6 +37,7 @@ pub(crate) struct DownloadState {
 
 // ─── Generation state ──────────────────────────────────
 
+/// 一次流式生成任务的状态：目标会话、待写入文本、检索来源与停止标志。
 pub(crate) struct GenState {
     pub(crate) conv_id: String,
     pub(crate) pending_text: String,
@@ -56,6 +59,7 @@ pub(crate) struct KbJobState {
 
 // ─── Model load state (off-UI-thread loading) ──────────
 
+/// 后台模型加载线程回传的结果：成功携带推理/嵌入引擎，失败携带错误文本。
 pub(crate) enum ModelLoadResult {
     Loaded {
         inference: LlamaInference,
@@ -66,6 +70,7 @@ pub(crate) enum ModelLoadResult {
     Error(String),
 }
 
+/// 后台加载模型线程的接收端句柄，UI 每帧轮询其结果。
 pub(crate) struct ModelLoadState {
     pub(crate) rx: mpsc::Receiver<ModelLoadResult>,
 }
@@ -135,6 +140,7 @@ fn startup_notice(config: &Config) -> Option<StartupNotice> {
 
 // ─── Confirm actions ───────────────────────────────────
 
+/// 需要用户在确认对话框中二次确认的破坏性操作类型。
 #[derive(Clone, PartialEq)]
 pub(crate) enum ConfirmAction {
     DeleteAllModels,
@@ -145,6 +151,7 @@ pub(crate) enum ConfirmAction {
 
 // ─── App state ─────────────────────────────────────────
 
+/// 应用全局状态：配置、当前会话、推理句柄，以及下载/生成/搜索/知识库等后台任务句柄。
 pub(crate) struct DesktopAI {
     pub(crate) config: Config,
     pub(crate) inference: Option<Arc<Mutex<LlamaInference>>>,
@@ -203,6 +210,7 @@ pub(crate) struct DesktopAI {
     pub(crate) search_error: Option<String>,
     pub(crate) search_rx:
         Option<mpsc::Receiver<Result<Vec<crate::rag::search::SearchResult>, String>>>,
+    /// 侧边栏对话列表的关键字过滤条件（匹配标题或会话 ID）。
     pub(crate) conv_filter: String,
 
     // UI
@@ -218,6 +226,7 @@ pub(crate) struct DesktopAI {
     pub(crate) show_settings: bool,
     pub(crate) status_message: String,
     pub(crate) error_message: Option<String>,
+    /// 主题是否已应用；用于首帧只应用一次，避免每帧重复设置样式。
     pub(crate) theme_applied: bool,
     pub(crate) confirm_action: Option<ConfirmAction>,
     /// Conversation list cache (sidebar). Refreshed only when dirty.
@@ -243,6 +252,8 @@ pub(crate) struct DesktopAI {
 
 #[allow(clippy::new_without_default)]
 impl DesktopAI {
+    /// 构造应用状态：加载配置、恢复上次会话、探测硬件、启动远程模型目录拉取，
+    /// 并在已选中模型时异步触发后台加载。
     pub(crate) fn new() -> Self {
         let config = config::load_config();
         let current_conv = if let Some(ref id) = config.last_conversation_id {
@@ -326,6 +337,7 @@ impl DesktopAI {
         app
     }
 
+    /// 是否正有一次生成任务在进行中。
     pub(crate) fn is_generating(&self) -> bool {
         self.gen.is_some()
     }

@@ -15,10 +15,16 @@ use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
+/// 单个数据库文件的所有权句柄，用互斥锁串行化对该文件的全部访问。
 pub(crate) struct Db {
+    /// 受锁保护的连接；任何 SQL 都必须先持有此锁（见 `Db::with_conn`、`Db::lock`）。
     conn: Mutex<Connection>,
 }
 
+/// 打开（必要时创建）指定路径的 `SQLite` 数据库，并逐项应用运行时 `PRAGMA`。
+///
+/// 会先建立父目录，避免 `SQLITE_CANTOPEN`。`PRAGMA` 每一项对并发与崩溃恢复
+/// 都有影响，失败时以中文错误串带上具体项名返回，便于日志定位。
 pub(crate) fn open(path: &Path) -> Result<Db, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {:?}: {}", parent, e))?;
@@ -28,12 +34,16 @@ pub(crate) fn open(path: &Path) -> Result<Db, String> {
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
     )
     .map_err(|e| format!("open {:?}: {}", path, e))?;
+    // WAL 日志：读写可并发，且崩溃后能从 WAL 回放所有已提交事务。
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|e| format!("enable WAL: {}", e))?;
+    // synchronous=NORMAL：WAL 下的推荐档位，兼顾耐久性与写入吞吐（不必每次 fsync）。
     conn.pragma_update(None, "synchronous", "NORMAL")
         .map_err(|e| format!("set synchronous: {}", e))?;
+    // SQLite 默认关闭外键约束，且该开关是每连接生效，必须显式开启。
     conn.pragma_update(None, "foreign_keys", "ON")
         .map_err(|e| format!("enable foreign keys: {}", e))?;
+    // 写锁冲突时等待最多 5 秒再放弃，避免直接抛 `SQLITE_BUSY`。
     conn.busy_timeout(std::time::Duration::from_secs(5))
         .map_err(|e| format!("set busy_timeout: {}", e))?;
     Ok(Db {

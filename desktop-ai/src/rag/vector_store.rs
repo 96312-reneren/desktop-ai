@@ -1,3 +1,11 @@
+//! 知识库的 SQLite 持久化层：`documents`/`chunks` 双表存储文档与分块，
+//! `chunks_fts` 是手工双写的独立 FTS5 索引（非 content-linked）。
+//!
+//! 对外：向上服务 RAG 检索流程，向下依赖 [`crate::store::db`] 取连接、
+//! 依赖 `EmbeddingEngine` 生成向量。两条检索路径并存：向量余弦相似度
+//! （`search_by_vector`，embedding 以 BLOB 存储）与 FTS5 关键词检索
+//! （`search_text`）。设计边界：分块行随文档 `ON DELETE CASCADE`，但 FTS
+//! 行不受级联影响，故由 [`rebuild_fts_if_stale`] 做孤儿感知的自愈重建。
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -5,12 +13,14 @@ use std::sync::{Arc, Mutex};
 use crate::llm::embedding::EmbeddingEngine;
 use crate::store::db::Db;
 
+/// 一个持久化的文本分块及其 embedding 向量。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StoredChunk {
     pub text: String,
     pub embedding: Vec<f32>,
 }
 
+/// 一次检索命中的分块：正文、可选的相似度分数与来源标题。
 #[derive(Debug, Clone)]
 pub(crate) struct SearchHit {
     pub chunk: String,
@@ -35,6 +45,8 @@ pub(crate) struct SourceRef {
 }
 
 impl SourceRef {
+    /// 由检索命中构造用户可见的来源引用；`rank` 按命中顺序自 1 递增，
+    /// `snippet` 取分块前 80 个字符。
     pub(crate) fn from_hits(hits: &[SearchHit]) -> Vec<Self> {
         hits.iter()
             .enumerate()
@@ -47,6 +59,7 @@ impl SourceRef {
     }
 }
 
+/// 一篇完整持久化的文档：元信息加其全部分块（含 embedding）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StoredDocument {
     pub id: String,
@@ -67,12 +80,17 @@ pub(crate) struct StoredDocument {
 /// engine is only ever touched by one thread at a time. Keep heavy work
 /// inside the lock to a minimum.
 pub(crate) struct VectorStore {
+    /// SQLite 连接封装（负责运行时 PRAGMA 与事务）。
     db: Db,
+    /// 嵌入后端；[`VectorStore::set_engine`] 之前为 `None`。
     engine: Option<Arc<Mutex<EmbeddingEngine>>>,
 }
 
+/// 当前 schema 版本；用作 `PRAGMA user_version` 门控一次性 JSON 迁移。
 const SCHEMA_VERSION: i64 = 1;
 
+/// 建表 DDL：`documents`/`chunks` 双表（分块外键 `ON DELETE CASCADE`），
+/// 外加手工双写的独立 FTS5 表 `chunks_fts`（非 content-linked）。
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS documents (
     id         TEXT PRIMARY KEY,
@@ -90,6 +108,7 @@ CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(doc_id UNINDEXED, text);
 ";
 
+/// 将 f32 向量按小端序序列化为 BLOB（与 [`blob_to_embed`] 互逆）。
 fn embed_to_blob(v: &[f32]) -> Vec<u8> {
     let mut bytes = vec![0u8; v.len() * 4];
     for (i, x) in v.iter().enumerate() {
@@ -98,6 +117,10 @@ fn embed_to_blob(v: &[f32]) -> Vec<u8> {
     bytes
 }
 
+/// 将小端序 BLOB 反序列化为 f32 向量。
+///
+/// 前提：`bytes` 长度为 4 的倍数（由 [`embed_to_blob`] 保证）；
+/// 内部 `copy_nonoverlapping` 依赖该前提，否则会越界。
 fn blob_to_embed(bytes: &[u8]) -> Vec<f32> {
     let mut out = vec![0f32; bytes.len() / 4];
     unsafe {
@@ -107,6 +130,11 @@ fn blob_to_embed(bytes: &[u8]) -> Vec<f32> {
 }
 
 impl VectorStore {
+    /// 打开（或新建）知识库并初始化 schema。
+    ///
+    /// `store_dir` 下的 `kb.db` 打开失败时降级到进程级临时库，保证功能可用而非崩溃。
+    /// 初始化依次执行：建表、按 `user_version` 门控的一次性 JSON 迁移、
+    /// [`rebuild_fts_if_stale`] 的 FTS 自愈重建；这些步骤出错只记日志、不阻断构造。
     pub(crate) fn new(store_dir: &std::path::Path) -> Self {
         let db = crate::store::db::open(&store_dir.join("kb.db")).unwrap_or_else(|e| {
             log::error!("failed to open kb.db: {} — using in-memory fallback", e);
@@ -147,16 +175,22 @@ impl VectorStore {
         self.engine = Some(Arc::new(Mutex::new(engine)));
     }
 
+    /// 是否已装入嵌入后端；未装时向量检索路径不可用。
     pub(crate) fn has_engine(&self) -> bool {
         self.engine.is_some()
     }
 
+    /// 加载全部文档及其分块（含向量）；读取失败时返回空列表而非报错。
     pub(crate) fn documents(&self) -> Vec<StoredDocument> {
         self.db
             .with_conn(|c| load_all_documents(c))
             .unwrap_or_default()
     }
 
+    /// 切分文本、逐块求 embedding，并作为一篇新文档持久化。
+    ///
+    /// 契约：须先 [`VectorStore::set_engine`]，否则返回错误；文本切不出任何块时同样报错。
+    /// 并发：embedding 推断在加锁外完成，仅写库的短事务持锁（见结构体文档）。
     pub(crate) fn add_document(
         &self,
         title: &str,
@@ -205,6 +239,11 @@ impl VectorStore {
         })
     }
 
+    /// 删除文档及其全部分块与 FTS 行。
+    ///
+    /// 单事务内先显式删 `chunks_fts` 中该 `doc_id` 的行，再删 `documents`；
+    /// `chunks` 行由外键 `ON DELETE CASCADE`（需 `foreign_keys=ON`）随之清除。
+    /// 显式删 FTS 是必需的：`chunks_fts` 是独立表，不参与该级联。
     pub(crate) fn delete_document(&self, id: &str) -> Result<(), String> {
         self.db.with_conn(|c| {
             let tx = c.transaction()?;
@@ -214,6 +253,10 @@ impl VectorStore {
         })
     }
 
+    /// 向量检索：对查询求 embedding，再对全部分块按余弦相似度排序取前 `top_k`。
+    ///
+    /// 契约：须先装入嵌入后端，否则返回错误。内部全量加载文档计算，适合中小知识库。
+    /// 与 [`VectorStore::search_text`]（FTS5 关键词）是并存的另一条检索路径。
     #[allow(dead_code)]
     pub(crate) fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>, String> {
         let engine = self.engine.as_ref().ok_or("embedding engine not loaded")?;
@@ -222,11 +265,15 @@ impl VectorStore {
         Ok(search_by_vector(&docs, &query_vec, top_k))
     }
 
+    /// 对查询文本求 embedding 向量。
+    ///
+    /// 契约：须先装入嵌入后端，否则返回错误；与索引期共用同一把引擎锁。
     pub(crate) fn embed_query(&self, query: &str) -> Result<Vec<f32>, String> {
         let engine = self.engine.as_ref().ok_or("embedding engine not loaded")?;
         Ok(engine.lock().unwrap().embed(query))
     }
 
+    /// [`VectorStore::documents`] 的语义别名，用于对外暴露只读快照。
     pub(crate) fn documents_snapshot(&self) -> Vec<StoredDocument> {
         self.documents()
     }
@@ -238,6 +285,14 @@ impl VectorStore {
     /// 运算符、`^` 被解释成列锚定）。这里把元字符统一替换为空格：
     /// 既保证任何输入都不会报错，又保留分词效果（`GPT-4` → `GPT 4`，
     /// 与内容侧 unicode61 的分词结果一致）。
+    ///
+    /// 结果经 `JOIN documents` 过滤：`chunks_fts` 可能残留文档已删的孤儿行，
+    /// 该 INNER JOIN 是挡住孤儿内容的承重墙——一旦缺失，已删文档的关键词命中
+    /// 会重新出现在用户视野里（存储层由 [`rebuild_fts_if_stale`] 清理孤儿，
+    /// 但查询侧仍须自保）。
+    ///
+    /// 另注：`unicode61` 把连续 CJK 串视作单个 token，故以空格分隔的中文词组
+    /// 更易命中（测试数据据此用空格分词）。
     pub(crate) fn search_text(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>, String> {
         /// FTS5 查询语法中的元字符。
         const META: &[char] = &['"', '*', '(', ')', '^', ':', '{', '}', '[', ']', '-', '+'];
@@ -285,6 +340,8 @@ impl VectorStore {
     }
 }
 
+/// 读取全部文档及其分块（按 `created_at`、`idx` 排序），并把 embedding
+/// BLOB 还原为向量。
 fn load_all_documents(c: &Connection) -> rusqlite::Result<Vec<StoredDocument>> {
     let mut stmt = c.prepare("SELECT id, title, created_at FROM documents ORDER BY created_at")?;
     let rows: Vec<(String, String, String)> = stmt
@@ -400,7 +457,7 @@ fn migrate_from_json(store_dir: &std::path::Path, c: &mut Connection) -> Result<
 ///    永不清理。
 ///
 /// 因此：发现任一孤儿或计数不一致时，在单个事务内先自愈删除两类孤儿行，
-/// 再从活文档的 chunks 全量重建 FTS。幂等；健康库只花三次 COUNT。
+/// 再从活文档的 chunks 全量重建 FTS。幂等；健康库只花四次 COUNT。
 fn rebuild_fts_if_stale(c: &mut Connection) -> rusqlite::Result<()> {
     let chunk_count: i64 = c.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
     let fts_count: i64 = c.query_row("SELECT COUNT(*) FROM chunks_fts", [], |r| r.get(0))?;
@@ -445,6 +502,9 @@ fn rebuild_fts_if_stale(c: &mut Connection) -> rusqlite::Result<()> {
     tx.commit()
 }
 
+/// 计算两向量的余弦相似度，值域 -1..1；任一向量模为零（或长度为零）时返回 0.0。
+///
+/// 按较短向量对齐（`zip` 截断），不要求两向量等长。
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let n = a.len().min(b.len());
     if n == 0 {
@@ -463,6 +523,10 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (na.sqrt() * nb.sqrt())
 }
 
+/// 对给定文档集合按与 `query_vec` 的余弦相似度降序排序，返回前 `top_k` 条命中。
+///
+/// 纯内存计算、不触库；`source` 取文档标题（超过 40 字符截断并加省略号）。
+/// 与 FTS 关键词路径（`search_text`）是并存的另一条检索路径。
 pub(crate) fn search_by_vector(
     docs: &[StoredDocument],
     query_vec: &[f32],

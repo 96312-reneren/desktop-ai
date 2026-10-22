@@ -1,3 +1,12 @@
+//! 模型文件下载器：支持单文件与分卷模型的下载、断点续传、SHA-256 校验与合并。
+//!
+//! 安全关键路径：所有落盘目标都先经 `validate_download_path` 做路径遍历校验
+//! （拦截 `..` 以及会被 `Win32` 规范化成 `..` 的点/空格变体，并做 canonicalize
+//! 前缀校验）；HTTP 重定向被禁用，逐跳用 `crate::rag::crawler` 的 SSRF 规则
+//! 复检后才继续；用户取消经 `AtomicBool` 轮询，进度与状态经 `mpsc` 通道上报。
+//!
+//! 由模型管理流程调用，依赖 `crate::store::config` 提供模型目录与分卷描述。
+
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -65,18 +74,30 @@ pub(crate) fn validate_download_path(dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 下载器经 `mpsc` 通道向外上报的消息。
 #[derive(Debug)]
 pub(crate) enum DownloadMsg {
+    /// 下载进度更新。
     Progress {
+        /// 整体进度百分比（0~100）；分卷场景已按分卷数折算到全部范围。
         percent: u32,
+        /// 已下载量，单位 MB（1 MB = 1048576 字节）。
         downloaded_mb: f64,
+        /// 文件总大小，单位 MB；长度未知时为 0。
         total_mb: f64,
     },
+    /// 面向 UI 的文本状态提示（如"续传中""合并分卷"）。
     Status(String),
+    /// 下载（含分卷合并与整体校验）全部成功。
     Done,
+    /// 失败信息；发出后本次流程即终止。
     Error(String),
 }
 
+/// 模型下载入口：按模型是否配置分卷选择单文件或分卷下载流程。
+/// 单文件模型直接委托 `download_single_file`，成功后再上报 `Done`；
+/// 分卷模型委托 `download_model_parts`（逐卷校验 + 合并产物整体校验）。
+/// 进度与错误均经 `tx` 上报，调用方只需消费通道消息。
 pub(crate) fn download_model(
     url: &str,
     dest: PathBuf,
@@ -260,6 +281,8 @@ fn staging_meta_path(dest: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// 读取续传校验器（`ETag` 或 `Last-Modified`）。文件不存在、读取失败或内容
+/// 仅空白时返回 `None`，调用方据此按"无校验器"处理（放弃 `If-Range`）。
 fn read_validator(meta: &Path) -> Option<String> {
     std::fs::read_to_string(meta)
         .ok()
@@ -267,6 +290,8 @@ fn read_validator(meta: &Path) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// 记录本次响应的续传校验器：`etag` 优先，其次 `last_modified`；两者皆无则
+/// 不写（保留已有旁路文件）。写失败仅告警，不影响下载主流程。
 fn write_validator(meta: &Path, etag: Option<&str>, last_modified: Option<&str>) {
     if let Some(v) = etag.or(last_modified) {
         if let Err(e) = std::fs::write(meta, v) {
@@ -556,6 +581,8 @@ fn download_single_file(
     Ok(())
 }
 
+/// 流式计算文件的 SHA-256，返回小写十六进制摘要。分块读取（64 KiB）避免
+/// 将整个模型文件一次性载入内存。
 fn compute_sha256(path: &Path) -> Result<String, String> {
     let mut file = File::open(path).map_err(|e| format!("打开文件失败: {}", e))?;
     let mut hasher = Sha256::new();

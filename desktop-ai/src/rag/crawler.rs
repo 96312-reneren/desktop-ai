@@ -1,3 +1,11 @@
+//! 网页与本地文件抓取、链接解析。
+//!
+//! 对外两类入口：`crawl_url` / `crawl_with_depth` 供知识库索引（`kb_job`）
+//! 调用；`extract_pdf_safe`、`pin_host`、`validate_redirect_target` 被 search
+//! 与 downloader 复用。本模块是全项目的安全防线核心：用户可控 URL 在发起请求
+//! 前必须经 `is_ssrf_url` 校验，DNS 解析后由 `pin_host` 固定地址防重绑定，
+//! 重定向逐跳复检，响应体按字节上限流式截断。
+
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::PathBuf;
@@ -5,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// 单页抓取结果：URL、标题与清洗后的正文，供知识库入库。
 #[allow(dead_code)]
 pub(crate) struct CrawledPage {
     pub url: String,
@@ -13,6 +22,7 @@ pub(crate) struct CrawledPage {
     pub text_size: usize,
 }
 
+/// 爬取行为配置：深度/页数/单页体积/超时，以及可选的取消标志。
 pub(crate) struct CrawlConfig {
     pub max_depth: u32,
     pub max_pages: usize,
@@ -22,6 +32,7 @@ pub(crate) struct CrawlConfig {
 }
 
 impl Default for CrawlConfig {
+    /// 默认配置：深度 2、最多 20 页、单页 3 MB、超时 15 秒、不设置取消标志。
     fn default() -> Self {
         Self {
             max_depth: 2,
@@ -33,6 +44,7 @@ impl Default for CrawlConfig {
     }
 }
 
+/// 查询取消标志；未配置取消标志时视为未取消。
 fn is_stopped(cfg: &CrawlConfig) -> bool {
     cfg.stop_flag
         .as_ref()
@@ -40,10 +52,12 @@ fn is_stopped(cfg: &CrawlConfig) -> bool {
         .unwrap_or(false)
 }
 
+/// 判断字符串是否为以 `http://` 或 `https://` 开头的可抓取 URL。
 fn is_url(src: &str) -> bool {
     src.starts_with("http://") || src.starts_with("https://")
 }
 
+/// 判断字符串是否为 `file://` 前缀或真实存在的绝对本地路径。
 fn is_file(src: &str) -> bool {
     if src.starts_with("file://") {
         return true;
@@ -55,6 +69,7 @@ fn is_file(src: &str) -> bool {
     false
 }
 
+/// 去掉 `file://` / `file:` 前缀返回裸路径；无前缀则原样返回。
 fn strip_file_prefix(s: &str) -> &str {
     if let Some(rest) = s.strip_prefix("file://") {
         rest
@@ -182,6 +197,10 @@ fn embedded_ipv4(v6: std::net::Ipv6Addr) -> Option<[u8; 4]> {
     None
 }
 
+/// 判断 IPv6 地址是否属于回环/未指定/链路本地/ULA/组播/Teredo 等内网或保留段。
+///
+/// 隧道与转换形态（IPv4 映射/兼容、NAT64、6to4）先解出内嵌 IPv4 再按 IPv4
+/// 规则判断，否则 `http://[::ffff:10.0.0.1]/` 之类会绕过防护。
 fn is_private_ipv6(v6: std::net::Ipv6Addr) -> bool {
     if v6.is_loopback() || v6.is_unspecified() {
         return true;
@@ -210,6 +229,10 @@ fn is_private_ipv6(v6: std::net::Ipv6Addr) -> bool {
     false
 }
 
+/// 从 URL 中提取主机名（含可能带方括号的 IPv6 字面量）。
+///
+/// 先剥离 `http(s)://` 与用户信息段，再按 URL 规范截至首个路径/端口/查询/片段
+/// 分隔符；无法识别的 URL 返回 `None`。取自末端 `@` 之后，避免 userinfo 干扰。
 fn extract_host(url: &str) -> Option<&str> {
     let rest = url
         .strip_prefix("http://")
@@ -379,6 +402,12 @@ pub(crate) fn validate_redirect_target(
     Ok(next)
 }
 
+/// 抓取单个 URL 的响应体，返回 `(content_type, body)`。
+///
+/// 手动逐跳处理重定向（最多 5 跳）：每跳都新建 `reqwest` 客户端并由
+/// `pin_host` 重新固定 DNS，禁用代理与自动跳转——否则代理会自行解析 DNS、
+/// 绕过固定地址。每跳复检 SSRF 与 `robots.txt`；对 429/503 做指数退避；
+/// 响应体按 `max_size_per_page` 流式截断，防止超长响应体造成内存 DoS。
 fn fetch_url(
     url: &str,
     cfg: &CrawlConfig,
@@ -501,10 +530,15 @@ fn fetch_url(
     }
 }
 
+/// 依据 `Content-Type` 判断是否按 HTML 清洗；类型为空时按 HTML 兜底。
 fn is_html_content(ct: &str) -> bool {
     ct.contains("text/html") || ct.is_empty()
 }
 
+/// 从 HTML 中提取绝对 URL 链接（相对路径按 `base_url` 解析）。
+///
+/// 用 `to_ascii_lowercase` 定位 `href` 以保持字节偏移一致，从而可安全切片原文；
+/// 跳过锚点与 `javascript:` 链接，去重，最多返回 50 条；畸形未闭合标签不 panic。
 pub(crate) fn extract_links(html: &str, base_url: &str) -> Vec<String> {
     let mut links = Vec::new();
     // to_ascii_lowercase keeps byte offsets identical to the original string
@@ -565,6 +599,8 @@ pub(crate) fn extract_links(html: &str, base_url: &str) -> Vec<String> {
     links
 }
 
+/// 将链接解析为绝对 URL，按四种形态处理：完整 URL、协议相对 `//`、
+/// 根路径 `/`、相对路径。对畸形输入不 panic（无 scheme/越界时退化为拼接）。
 pub(crate) fn resolve_url(link: &str, base: &str) -> String {
     if link.starts_with("http://") || link.starts_with("https://") {
         return link.to_string();
@@ -600,12 +636,18 @@ pub(crate) fn resolve_url(link: &str, base: &str) -> String {
     format!("{}/{}", base_dir, link.trim_start_matches("./"))
 }
 
+/// 抓取单个来源（URL 或本地路径）并返回清洗后的页面，不递归子链接。
+/// 供知识库单页索引与 `crawl_multiple` 调用，内部使用默认配置与新建的机器人缓存。
 pub(crate) fn crawl_url(src: &str) -> Result<CrawledPage, String> {
     let cfg = CrawlConfig::default();
     let robots = super::robots::RobotsCache::new();
     crawl_single(src, &cfg, Some(&robots)).map(|(page, _)| page)
 }
 
+/// 单页抓取核心：识别来源并读取、清洗正文，返回 `(页面, 原始响应体)`。
+///
+/// 原始体回传给调用方复用提取链接，避免二次请求。种子 URL 本身也做 SSRF 校验；
+/// 正文过短或 Unicode 替换字符（U+FFFD）占比超 10% 视为脏数据而拒绝。
 fn crawl_single(
     src: &str,
     cfg: &CrawlConfig,
@@ -676,6 +718,11 @@ fn crawl_single(
     ))
 }
 
+/// 以 `start_url` 为种子做带深度限制的遍历，按 `config` 限制深度与页数，
+/// 逐页返回结果（每页成功或错误各一条）。
+///
+/// 整个会话共用一个 `robots.txt` 缓存；排队前对每个链接复检 SSRF，`visited`
+/// 去重避免回环重复抓取。
 pub(crate) fn crawl_with_depth(
     start_url: &str,
     config: CrawlConfig,
@@ -728,6 +775,7 @@ pub(crate) fn crawl_with_depth(
     results
 }
 
+/// 逐个抓取给定 URL 列表，返回与输入等长的结果集合（顺序一致）。
 #[allow(dead_code)]
 pub(crate) fn crawl_multiple(urls: &[String]) -> Vec<Result<CrawledPage, String>> {
     urls.iter().map(|url| crawl_url(url)).collect()

@@ -1,9 +1,24 @@
+//! DuckDuckGo HTML 端点的联网搜索实现。
+//!
+//! `search_duckduckgo` 是主要入口（由 `ui::app::handlers` 调用）：构建固定端点
+//! URL、抓取结果页、解析为 `SearchResult` 列表供 UI 展示与后续抓取使用；
+//! `build_search_url` 与 `parse_ddg_html` 另暴露给 redteam 用例以锁定安全性质。
+//!
+//! 安全边界：本模块是项目直接访问外部网络的出口之一，因此复用 `crawler`
+//! 的 SSRF 防护——种子校验、逐跳 `validate_redirect_target`、`pin_host`
+//! 域名固定——并对响应体施加字节上限，防护策略与 `crawler::fetch_url`
+//! 保持一致。`parse_ddg_html` 直接消费不可信 HTML，须对敌意输入健壮、不 panic。
+
 use std::io::Read;
 use std::time::Duration;
 
+/// 单条搜索结果的规范化视图。
 pub(crate) struct SearchResult {
+    /// 结果标题（已剥离 HTML 标签与实体）。
     pub title: String,
+    /// 结果链接（来自锚点 `href`，为原始字符串，未做安全过滤）。
     pub url: String,
+    /// 结果摘要文本（已剥离 HTML 标签与实体）。
     pub snippet: String,
 }
 
@@ -30,6 +45,13 @@ pub(crate) fn build_search_url(query: &str) -> String {
     format!("https://html.duckduckgo.com/html/?q={}", urlencoding(query))
 }
 
+/// 抓取搜索端点 HTML 并返回解码后的正文。
+///
+/// 与本项目其他网络出口同构的防护：入参先做 SSRF 校验；每跳禁用自动重定向
+/// 并重建 client（`pin_host` 固定 DNS，防 rebinding），`validate_redirect_target`
+/// 复检跳转目标，最多 5 跳；429 映射为"过于频繁"，其余非 2xx 映射为服务异常；
+/// 正文按 `MAX_SEARCH_HTML_BYTES` 流式截断后做 UTF-8 有损解码。
+/// 返回 `Err` 时错误信息已经是可直接展示给用户的中文文案。
 fn fetch_search_html(url: &str) -> Result<String, String> {
     // 种子校验：固定端点本应恒为公网，保留此检查使本函数对任意入参
     // 安全，防御未来调用方传入不可信 URL。
@@ -100,6 +122,8 @@ fn fetch_search_html(url: &str) -> Result<String, String> {
     }
 }
 
+/// 对查询串做保守的百分号编码：仅保留 RFC 3986 未保留字符，空格编码为 `+`，
+/// 其余字节逐字节大写十六进制转义。逐字节处理可安全覆盖多字节 UTF-8 输入。
 fn urlencoding(s: &str) -> String {
     let mut result = String::with_capacity(s.len() * 3);
     for byte in s.bytes() {
@@ -118,6 +142,7 @@ fn urlencoding(s: &str) -> String {
     result
 }
 
+/// 将半字节（0–15）转为大写十六进制字符，供 `urlencoding` 拼接转义序列。
 fn hex(n: u8) -> char {
     match n {
         0..=9 => (b'0' + n) as char,
@@ -193,6 +218,11 @@ pub(crate) fn parse_ddg_html(html: &str) -> Result<Vec<SearchResult>, String> {
     }
 }
 
+/// 返回 `s` 中首个 `start_marker` 与紧随其后的首个 `end_marker` 之间的子串。
+///
+/// 任一标记缺失（或 `start_marker` 之后已无 `end_marker`）时返回 `None`。
+/// 仅做朴素顺序查找、不处理嵌套；切片边界均由 `find` 的匹配位置决定，
+/// 必落在字符边界上，因此对任意字节内容都不会 panic。
 fn extract_between<'a>(s: &'a str, start_marker: &str, end_marker: &str) -> Option<&'a str> {
     let start = s.find(start_marker)? + start_marker.len();
     let slice = &s[start..];
@@ -200,6 +230,10 @@ fn extract_between<'a>(s: &'a str, start_marker: &str, end_marker: &str) -> Opti
     Some(&slice[..end])
 }
 
+/// 剥离 HTML 标签并还原常见实体，得到纯文本。
+///
+/// 采用单遍状态机而非正则，能正确处理标签外的 `<`/`>`（如出现在文本中），
+/// 也是"敌意 HTML 不 panic"的保证之一；实体集只覆盖 DDG 结果页实际出现的几种。
 fn strip_html(s: &str) -> String {
     let mut result = String::new();
     let mut in_tag = false;

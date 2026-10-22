@@ -1,9 +1,19 @@
+//! 手写的 llama.cpp C ABI FFI 绑定与安全封装。
+//!
+//! 全项目唯一的动态库加载点：用 `libloading` 运行时加载 `llama.dll` /
+//! `libllama.so` / `libllama.dylib`，并以函数指针手工镜像 `llama.h` 导出符号。
+//! 上层 [`crate::llm`] 经由这里的安全包装调用推理、分词与嵌入能力。
+//!
+//! 安全边界：加载时校验文件大小与 SHA-256 基线（供应链完整性监控），Windows
+//! 下把 CWD 移出 DLL 搜索路径消除同名 DLL 劫持面；裸指针调用均标 `unsafe`。
 use libloading::{Library, Symbol};
 use once_cell::sync::OnceCell;
 use std::ffi::{c_char, c_void, CStr, CString};
 
 // ─── C types ──────────────────────────────────────────
 
+/// llama.cpp `llama_model_params` 的 `#[repr(C)]` 镜像；字段顺序与类型
+/// 必须与目标 `llama.h` 一致，否则 ABI 错位会引发未定义行为。
 #[repr(C)]
 #[derive(Clone)]
 pub(crate) struct LlamaModelParams {
@@ -27,11 +37,14 @@ pub(crate) struct LlamaModelParams {
 }
 
 impl Default for LlamaModelParams {
+    /// 整块清零（`std::mem::zeroed`），对应 llama.cpp 的“全部使用默认值”。
     fn default() -> Self {
         unsafe { std::mem::zeroed() }
     }
 }
 
+/// llama.cpp `llama_context_params` 的 `#[repr(C)]` 镜像；字段顺序与类型
+/// 必须与目标 `llama.h` 一致，否则 ABI 错位会引发未定义行为。
 #[repr(C)]
 #[derive(Clone)]
 pub(crate) struct LlamaContextParams {
@@ -70,6 +83,7 @@ pub(crate) struct LlamaContextParams {
 }
 
 impl Default for LlamaContextParams {
+    /// 构造与 `llama_context_default_params()` 对齐的默认参数（原因见下方注释）。
     fn default() -> Self {
         // Match llama_context_default_params() so model-provided settings
         // (RoPE/YaRN, KV cache type, attention type) are NOT overridden:
@@ -113,11 +127,16 @@ impl Default for LlamaContextParams {
     }
 }
 
+/// llama.cpp 的 token ID（`int32_t`）。
 pub(crate) type LlamaToken = i32;
+/// 不透明的模型句柄（`llama_model*`）。
 pub(crate) type LlamaModel = c_void;
+/// 不透明的上下文句柄（`llama_context*`）。
 pub(crate) type LlamaContext = c_void;
+/// 不透明的采样器句柄（`llama_sampler*`）。
 pub(crate) type LlamaSampler = c_void;
 
+/// llama.cpp `llama_batch` 的 `#[repr(C)]` 镜像，供 `llama_decode` 传批使用。
 #[repr(C)]
 pub(crate) struct LlamaBatch {
     pub n_tokens: i32,
@@ -131,6 +150,8 @@ pub(crate) struct LlamaBatch {
 
 // ─── API function pointer types ───────────────────────
 
+// 以下函数指针类型逐一镜像 `llama.h` 的导出签名；参数/返回值类型或调用
+// 约定（`extern "C"`）任何偏差都会导致 UB，须与目标 llama.cpp 版本严格一致。
 type PfnLoadModelFromFile =
     unsafe extern "C" fn(*const c_char, LlamaModelParams) -> *mut LlamaModel;
 type PfnNewContextWithModel =
@@ -159,6 +180,7 @@ type PfnPrintSystemInfo = unsafe extern "C" fn() -> *const c_char;
 
 // ─── Vocab API (llama.cpp ≥ b4xxx) ─────────────────────
 
+// 新版把词表抽成 `llama_vocab*`，分词相关符号改收 vocab 句柄而非 `llama_model*`。
 type PfnGetVocab = unsafe extern "C" fn(*const LlamaModel) -> *const c_void;
 type PfnVocabNTokens = unsafe extern "C" fn(*const c_void) -> i32;
 type PfnBackendInit = unsafe extern "C" fn();
@@ -173,11 +195,13 @@ type PfnMemorySeqPosMax = unsafe extern "C" fn(*const c_void, i32) -> i32;
 
 // ─── Modern sampler API (llama.cpp ≥ b4xxx) ─────────────
 
+// 新版以采样器链（penalties / top-k / temp / dist）取代旧的 `llama_sample_token_*`。
 type PfnSamplerFree = unsafe extern "C" fn(*mut LlamaSampler);
 /// Sample and accept a token from the idx-th output of the last evaluation.
 type PfnSamplerSample =
     unsafe extern "C" fn(*mut LlamaSampler, *mut LlamaContext, i32) -> LlamaToken;
 
+/// llama.cpp `llama_sampler_chain_params` 的 `#[repr(C)]` 镜像。
 #[repr(C)]
 pub(crate) struct LlamaSamplerChainParams {
     pub no_perf: bool,
@@ -209,6 +233,8 @@ static SAMPLER_REGISTRY: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<usize, usize>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
+/// 返回 `SAMPLING_V2` 当前值（由 `check_dll_version` 在加载时置位），
+/// 供诊断代码判断运行时库用的是新版还是旧版采样 API。
 // 预留：采样器 API 版本探测（诊断用，暂未接入调用方）
 #[allow(dead_code)]
 pub(crate) fn sampling_is_v2() -> bool {
@@ -263,8 +289,13 @@ pub fn llama_library_name() -> &'static str {
 
 // ─── DLL integrity ────────────────────────────────────
 
+/// 判定 llama 库文件是否明显损坏的最小字节数阈值；小于此值直接拒载。
 const LLAMA_DLL_MIN_SIZE: u64 = 1_000_000;
 
+/// 快速校验库文件的完整性：文件可访问且大小不低于 [`LLAMA_DLL_MIN_SIZE`]。
+///
+/// 只拦截被截断或明显损坏的文件，用来尽早给出可读错误；来源完整性交由
+/// `init` 中的 SHA-256 基线比对负责。失败时返回面向用户的中文原因。
 fn verify_dll(path: &str) -> Result<(), String> {
     let meta = std::fs::metadata(path).map_err(|e| format!("cannot access {}: {}", path, e))?;
     if meta.len() < LLAMA_DLL_MIN_SIZE {
@@ -300,8 +331,10 @@ fn sha256_of_file(path: &std::path::Path) -> Result<String, String> {
 
 // ─── Global API ───────────────────────────────────────
 
+/// 进程内唯一的已加载 llama 库句柄，由 `init` 首次成功加载时填充。
 static LLAMA_LIB: OnceCell<Library> = OnceCell::new();
 
+/// 取回全局已加载库；未调用 `init`（或加载失败）时 panic。
 fn lib() -> &'static Library {
     LLAMA_LIB.get().expect("llama library not loaded")
 }
@@ -364,6 +397,7 @@ fn add_dll_search_dir(lib_path: &std::path::Path) {
     }
 }
 
+/// 非 Windows 平台无需调整 DLL 搜索路径（`dlopen` 语义不同）。
 #[cfg(not(windows))]
 fn add_dll_search_dir(_lib_path: &std::path::Path) {}
 
@@ -374,6 +408,11 @@ fn add_dll_search_dir(_lib_path: &std::path::Path) {}
 /// 2. Successful `dlopen` via libloading.
 /// 3. Calls `llama_print_system_info()` — if the symbol is missing, returns NULL,
 ///    or returns an empty string, the DLL is rejected as incompatible.
+///
+/// 除上述三项拒载检查外，还会记录/比对库文件 SHA-256 与基线
+/// （`data_root()/llama_library.sha256`）：失配时置位
+/// [`integrity_alert_triggered`] 并刷新基线，而不是拒载——用户可能只是合法地
+/// 更换了库文件。
 ///
 /// # Safety
 ///
@@ -572,6 +611,8 @@ fn check_dll_version(lib: &Library) -> Result<(), String> {
     Ok(())
 }
 
+// 解析并调用 `lib()` 中的 C 符号：符号缺失时记录错误并返回 `Default::default()`
+// （0 / 空值），让调用方在库不完整时优雅降级而不 panic。
 macro_rules! call {
     ($name:ident, $type:ty, $($arg:expr),*) => {{
         let sym: Symbol<$type> = match unsafe { lib().get(stringify!($name).as_bytes()) } {
@@ -585,6 +626,8 @@ macro_rules! call {
     }};
 }
 
+/// 把 Rust 字符串转成 C 字符串，先把内嵌 `\0` 替换为空格，
+/// 规避 `CString::new` 因内含 NUL 而失败；极端情况下退回空串。
 fn to_cstring_safe(s: &str) -> CString {
     let filtered: String = s.chars().map(|c| if c == '\0' { ' ' } else { c }).collect();
     CString::new(filtered).unwrap_or_else(|_| CString::new("").unwrap())
@@ -776,8 +819,8 @@ pub(crate) unsafe fn n_vocab(model: *const LlamaModel) -> i32 {
     }
 }
 
-/// End-of-sentence token of the model's vocabulary
-/// (`LLAMA_TOKEN_NULL` = -1 when the model has none).
+/// 读取指定 `seq_id` 在上下文 KV 缓存中的最大 token 位置；上下文无
+/// 记忆句柄时返回 -1（`LLAMA_TOKEN_NULL` 语义）。
 ///
 /// # Safety
 ///
@@ -792,6 +835,9 @@ pub(crate) unsafe fn memory_seq_pos_max(ctx: *mut LlamaContext, seq_id: i32) -> 
     call!(llama_memory_seq_pos_max, PfnMemorySeqPosMax, memory, seq_id)
 }
 
+/// 返回模型词表的句末（EOS）token；无则返回 `LLAMA_TOKEN_NULL`（-1）。
+/// 现代 vocab API 走 `llama_vocab_eos`，旧库走 `llama_token_eos`。
+///
 /// # Safety
 ///
 /// `model` must be a valid, non-null pointer.

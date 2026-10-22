@@ -1,10 +1,20 @@
 // DesktopAI sub-module: model select window
+//!
+//! 模型选择窗口渲染：设备信息、模型目录、下载进度与内存不足警告。
+//!
+//! 由顶层 `DesktopAI::update` 在 `show_model_select` 为真时调用；读取
+//! `platform::hardware` 的 CPU/GPU 信息，按模型体积估算内存需求并提示，
+//! 经 `start_download`/`cancel_download`/`load_selected_model` 驱动下载与加载。
 use super::DesktopAI;
 use crate::platform::hardware::get_total_ram_gb;
 use crate::store::config;
 use egui::{Color32, RichText};
 
 impl DesktopAI {
+    /// 渲染模型选择窗口：设备信息、可滚动模型目录、下载状态与内存警告。
+    ///
+    /// 目录列表限制在固定高度内滚动，避免长目录把底部关闭按钮挤出窗口；
+    /// 每个模型按其下载/选中状态展示对应操作（下载、取消、使用、重新加载）。
     pub(crate) fn render_model_select(&mut self, ui: &mut egui::Ui) {
         ui.label(
             RichText::new("选择一个模型（可同时下载多个）")

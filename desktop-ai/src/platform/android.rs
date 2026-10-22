@@ -18,6 +18,7 @@ use crate::store::config;
 
 #[link(name = "log")]
 extern "C" {
+    /// logcat 原生打印函数，由 Android 的 liblog 提供。
     fn __android_log_print(
         prio: i32,
         tag: *const std::os::raw::c_char,
@@ -154,6 +155,12 @@ pub extern "C" fn Java_com_desktopai_android_MainActivity_startRust(
     port as jni::sys::jint
 }
 
+/// Android 后台服务主体：选模型、加载模型、启动本地 API server，并让进程保持存活。
+///
+/// 取 `models_dir` 下首个 `.gguf` 文件作为模型；找不到模型或加载失败时仅记录日志并返回，
+/// 不 panic。`api_token` 由 Java 侧生成并透传，用于本地 API 鉴权，绝不写入 APK。
+/// 启动成功后会进入永久 `sleep` 循环：因为丢弃 `ApiServer` 会置停止标志并让监听线程退出，
+/// 进程存活即依赖此循环（在 `startRust` 派生的线程中调用）。
 fn start_service(api_port: u16, api_token: String) {
     // 1. Pick the first downloaded model.
     let models_dir = config::models_dir();

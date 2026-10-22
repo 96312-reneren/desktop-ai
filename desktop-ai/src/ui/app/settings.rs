@@ -1,3 +1,9 @@
+//! 设置窗口子模块：渲染设置面板，并为破坏性操作提供二次确认对话框。
+//!
+//! `render_settings` 就地编辑 `config::Config`（主题、字号、上下文、RAG 参数、
+//! API 端口/令牌等），仅在“保存并关闭”时调用 `config::save_config` 落盘；
+//! `render_confirm_dialog` 依据 `ConfirmAction` 弹出确认框，避免误触删除全部模型/
+//! 对话或重置、卸载应用。敏感令牌经 `mask_sensitive` 脱敏后再展示。
 // DesktopAI sub-module: settings window
 use super::{apply_theme, ConfirmAction, DesktopAI};
 use crate::llm::model_catalog::find_model;
@@ -16,6 +22,12 @@ pub(crate) fn mask_sensitive(s: &str) -> String {
 }
 
 impl DesktopAI {
+    /// 渲染设置窗口主体：主题、字号、上下文/输出上限、RAG、线程与 GPU、系统提示词、
+    /// API 服务、搜索引擎，以及模型与数据管理。
+    ///
+    /// 直接就地修改 `self.config` 字段；点击“保存并关闭”才通过 `config::save_config`
+    /// 持久化。删除/重置/卸载等破坏性操作不立即执行，只设置 `self.confirm_action`
+    /// 交由 `render_confirm_dialog` 二次确认，从而降低误操作风险。
     pub(crate) fn render_settings(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         ScrollArea::vertical().max_height(500.0).show(ui, |ui| {
             ui.label(RichText::new("主题外观").strong());

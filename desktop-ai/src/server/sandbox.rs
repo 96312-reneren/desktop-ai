@@ -1,7 +1,18 @@
+//! 本地文件沙盒：把 AI 发起的文件读写限制在单一根目录内。
+//!
+//! 对外关系：`Sandbox` 由 UI 应用状态持有（`ui/app/state.rs`），`kb_panel`
+//! 只读调用 `list` / `root_path` 展示，红队用例（`redteam.rs`）针对关卡做攻击
+//! 探测；当前生产路径没有 `write` 调用点，其余方法为后续 `Agent` 工具调用协议预留。
+//!
+//! 安全边界：核心关卡 `safe_path` 拦截 `..` 穿越与指向沙盒外的链接/联接；
+//! 校验与创建之间存在 TOCTOU 窗口，属威胁模型外的接受项。
+
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
+/// 文本读写（`read` / `write`）的默认大小上限：500 KB；
+/// 配置 [`Sandbox::with_max_size`] 后可被覆盖。
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 #[allow(dead_code)]
 const MAX_FILE_SIZE: u64 = 500_000;
@@ -11,17 +22,26 @@ const MAX_FILE_SIZE: u64 = 500_000;
 #[allow(dead_code)]
 const MAX_BINARY_FILE_SIZE: u64 = 256 * 1024 * 1024;
 
+/// 目录列举返回的单个条目（文件或子目录）。
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct FileEntry {
+    /// 条目的文件（末段）名，经有损 UTF-8 转换。
     pub name: String,
+    /// 条目在文件系统中的绝对路径。
     pub path: PathBuf,
+    /// 文件字节数；目录恒为 0。
     pub size: u64,
+    /// 是否为目录。
     pub is_dir: bool,
 }
 
+/// 根目录受限的文件沙盒；所有路径先经 [`Sandbox::safe_path`] 归一，落点限在根内。
 pub(crate) struct Sandbox {
+    /// 沙盒根目录（调用方传入，可能为相对路径或含未解析的链接）。
     root: PathBuf,
+    /// `root` 经 `canonicalize` 归一后的真实路径，用于组件级边界比较；
+    /// 无法解析时回退为 `root` 的克隆。
     resolved_root: PathBuf,
     /// Optional size cap for binary read/write operations.
     /// `None` = unlimited (current default); set via [`Sandbox::with_max_size`].
@@ -29,6 +49,8 @@ pub(crate) struct Sandbox {
 }
 
 impl Sandbox {
+    /// 创建沙盒：确保根目录存在，并记录归一化后的真实路径用于后续边界校验。
+    /// 目录创建失败被忽略，留待具体操作报错。
     pub(crate) fn new(dir: PathBuf) -> Self {
         fs::create_dir_all(&dir).ok();
         let resolved = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
@@ -66,6 +88,11 @@ impl Sandbox {
     /// aware) rather than a string prefix check. The previous string-prefix
     /// fallback accepted `root/../escape.txt` because it textually started
     /// with `root` — a path-traversal bug.
+    ///
+    /// 不存在的路径同样要过链接关：`..` 已被拒，但沙盒内的符号链接/目录联接
+    /// 仍会把 `File::create` 引到沙盒外，故对最深的已存在祖先再补做一次
+    /// `canonicalize` 取真实路径比较。已知边界：Win32 设备保留名（`CON` /
+    /// `NUL` 等）、尾点/尾空格变体与 NTFS 备用数据流不在本关卡范围内。
     pub(crate) fn safe_path(&self, relative: &str) -> Result<PathBuf, String> {
         let cleaned = relative.replace('\\', "/").trim_matches('/').to_string();
         if cleaned.is_empty() || cleaned == "." {
@@ -141,6 +168,9 @@ impl Sandbox {
         Ok(buf)
     }
 
+    /// 写入沙盒内文本文件；父目录不存在时自动创建。内容受 `MAX_FILE_SIZE`
+    /// （或 [`Sandbox::with_max_size`]）上限约束，路径先经 [`Sandbox::safe_path`] 归一。
+    /// 为 `Agent` 工具调用协议预留，测试覆盖，勿删。
     #[allow(dead_code)]
     pub(crate) fn write(&self, relative: &str, content: &str) -> Result<(), String> {
         let path = self.safe_path(relative)?;
@@ -154,6 +184,8 @@ impl Sandbox {
         Ok(())
     }
 
+    /// 列举沙盒内某目录的直接子项；目录不存在返回空表，传入文件则报错。
+    /// 结果按“目录在前，再按名称升序”排序。
     pub(crate) fn list(&self, relative: &str) -> Result<Vec<FileEntry>, String> {
         let dir = self.safe_path(relative)?;
         if !dir.exists() {
@@ -165,6 +197,7 @@ impl Sandbox {
         self._list_impl(dir)
     }
 
+    /// `list` 的目录遍历实现；单个条目读取失败时跳过而非整体报错。
     fn _list_impl(&self, dir: PathBuf) -> Result<Vec<FileEntry>, String> {
         let mut entries = Vec::new();
         let iter = match fs::read_dir(&dir) {
@@ -196,6 +229,7 @@ impl Sandbox {
         Ok(entries)
     }
 
+    /// 将目录清单渲染为供模型阅读的纯文本；空目录给出占位文案。
     #[allow(dead_code)]
     fn list_text(&self, relative: &str) -> Result<String, String> {
         let entries = self.list(relative)?;
@@ -210,6 +244,7 @@ impl Sandbox {
         Ok(s)
     }
 
+    /// 返回沙盒根目录（未归一化），供 UI 展示。
     pub(crate) fn root_path(&self) -> &PathBuf {
         &self.root
     }

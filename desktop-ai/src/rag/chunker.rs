@@ -1,3 +1,9 @@
+/// 按句边界把长文本切分为带重叠的定长片段，供向量化与检索使用。
+///
+/// `chunk_size` 是每段允许的字符数上限（按 Unicode 字符计，非字节），
+/// `overlap` 是相邻段之间从上一段末尾保留的字符数，用于避免上下文刚好被
+/// 切在段边界处而丢失。输入为空或纯空白时返回空 `Vec`；这是 crate 对外
+/// 导出的 API，对任意输入不 panic 且每个片段都不超过 `chunk_size` 字符。
 /// Sentence-aware text chunking with character-based sizing.
 /// Splits by sentence boundaries (。！？.!?\n), then assembles chunks
 /// up to chunk_size chars with overlap between adjacent chunks.
@@ -40,10 +46,12 @@ pub fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> 
     chunks
 }
 
+/// 返回字符串的字符数（Unicode 标量值个数），与字节长度无关。
 fn char_len(s: &str) -> usize {
     s.chars().count()
 }
 
+/// 按中英文句末标点及换行把文本切成句子，返回已去除首尾空白的非空句子列表。
 fn split_sentences(text: &str) -> Vec<String> {
     let mut sentences = Vec::new();
     let mut current = String::new();
@@ -79,6 +87,8 @@ fn split_sentences(text: &str) -> Vec<String> {
     sentences
 }
 
+/// 取上一段末尾 `overlap` 个字符作为新段的重叠前缀；`overlap` 为 0、
+/// 无历史段或历史段不足 `overlap` 字符时，返回整段或空串。
 fn build_overlap(chunks: &[String], overlap: usize) -> String {
     if overlap == 0 || chunks.is_empty() {
         return String::new();
@@ -91,6 +101,8 @@ fn build_overlap(chunks: &[String], overlap: usize) -> String {
     prev.chars().skip(cc - overlap).collect()
 }
 
+/// 在不超过 `max_chars` 字符的范围内为超长句寻找切分点，返回字节偏移：
+/// 优先句末标点，其次空格，最后按字符硬切，保证始终落在 UTF-8 字符边界上。
 fn find_split_point(text: &str, max_chars: usize) -> usize {
     let indices: Vec<(usize, char)> = text.char_indices().collect();
     if indices.len() <= max_chars {

@@ -1,3 +1,9 @@
+/// 将原始输入（`HTML`、markdown 或纯文本）统一清洗为可入库的纯文本。
+///
+/// 按 `source_format` 分派：`"html"` 提取 `<title>` 并剥离标签；`"markdown"`/`"md"`
+/// 取首个标题行、正文保留原文；其余格式（如 `"text"`）取首行作标题、正文保留原文。
+/// 返回 `(标题, 正文)`，二者均经 `normalize_text` 归一化空白与换行。这是 crate 对外
+/// 导出的 API，对任意字节输入均不 panic。
 /// Unified text cleaning pipeline.
 /// Converts raw input (HTML, markdown, plain text) into clean JSON-ready plain text.
 pub fn clean_text(raw: &str, source_format: &str) -> (String, String) {
@@ -19,6 +25,8 @@ pub fn clean_text(raw: &str, source_format: &str) -> (String, String) {
     (normalize_text(&title), normalize_text(&body))
 }
 
+/// 剥离 `HTML` 标签得到纯文本：丢弃 `<script>`/`<style>` 内容，为块级标签
+/// 补换行，再解码 `HTML` 实体并去除回车符。
 fn html_to_text(html: &str) -> String {
     let mut output = String::new();
     let mut in_script = false;
@@ -82,6 +90,7 @@ fn html_to_text(html: &str) -> String {
     decode_entities(&output).replace("\r", "")
 }
 
+/// 从文档的 `<title>` 标签提取标题并做实体解码；标签或内容缺失时返回空串。
 fn extract_title(html: &str) -> String {
     // to_ascii_lowercase keeps byte offsets identical to the original string
     // (only ASCII changes; multi-byte UTF-8 untouched), so every slice below
@@ -98,6 +107,7 @@ fn extract_title(html: &str) -> String {
     String::new()
 }
 
+/// 取 markdown 首个一级或二级标题文本；无标题时退回首行，仍为空则返回 `"未命名"`。
 fn extract_first_heading(md: &str) -> String {
     for line in md.lines() {
         let trimmed = line.trim();
@@ -111,6 +121,8 @@ fn extract_first_heading(md: &str) -> String {
     md.lines().next().unwrap_or("未命名").to_string()
 }
 
+/// 归一化空白：剔除控制字符，折叠连续空格与换行（3 个及以上换行压成 2 个），
+/// 并去除首尾空白。
 pub(crate) fn normalize_text(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     let mut prev_was_newline = false;
@@ -151,6 +163,7 @@ pub(crate) fn normalize_text(text: &str) -> String {
     output.trim().to_string()
 }
 
+/// 把常见 `HTML` 实体（`&amp;`、`&lt;`、`&nbsp;` 等）解码为对应字符。
 fn decode_entities(text: &str) -> String {
     text.replace("&amp;", "&")
         .replace("&lt;", "<")

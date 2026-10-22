@@ -7,6 +7,7 @@
 
 use eframe::egui::{self, Color32, CornerRadius, Margin, Stroke};
 
+/// Material Design 3 的配色角色集合（暗/亮两套共用此结构），字段名沿用 M3 语义命名。
 #[derive(Clone, Copy)]
 #[allow(dead_code)] // full M3 role set; only some roles are used so far
 pub(crate) struct M3 {
@@ -35,6 +36,7 @@ pub(crate) struct M3 {
     pub success: Color32,
 }
 
+/// M3 紫色基线暗色配色。
 pub(crate) const DARK: M3 = M3 {
     primary: Color32::from_rgb(0xD0, 0xBC, 0xFF),
     on_primary: Color32::from_rgb(0x38, 0x1E, 0x72),
@@ -61,6 +63,7 @@ pub(crate) const DARK: M3 = M3 {
     success: Color32::from_rgb(0xB6, 0xCC, 0xB2),
 };
 
+/// M3 紫色基线亮色配色。
 pub(crate) const LIGHT: M3 = M3 {
     primary: Color32::from_rgb(0x67, 0x50, 0xA4),
     on_primary: Color32::from_rgb(0xFF, 0xFF, 0xFF),
@@ -87,6 +90,7 @@ pub(crate) const LIGHT: M3 = M3 {
     success: Color32::from_rgb(0x3B, 0x69, 0x37),
 };
 
+/// 按是否暗色返回对应的静态配色表。
 pub(crate) fn palette(dark: bool) -> &'static M3 {
     if dark {
         &DARK

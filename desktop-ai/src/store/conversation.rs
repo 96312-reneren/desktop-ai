@@ -1,3 +1,10 @@
+//! 对话历史的 SQLite 持久化层。
+//!
+//! 对外提供会话的创建、加载、增量保存、删除与 JSON 导入导出，并向上层
+//! 提供会话列表查询。底层复用 [`crate::store::db`] 中带互斥锁的 `Db` 连接。
+//! 安全边界：所有会话 id 在使用前都经 [`sanitize_id`] 校验，防止路径穿越；
+//! 首次打开数据库时会把遗留的 JSON 文件一次性迁移进 `messages` 表。
+
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -5,16 +12,19 @@ use serde::{Deserialize, Serialize};
 use crate::store::config::conversations_dir;
 use crate::store::db::Db;
 
+/// 校验对话 id 仅由 ASCII 字母、数字和下划线组成，用于阻断路径穿越等注入。
 fn sanitize_id(id: &str) -> bool {
     id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// 单条对话消息：`role` 为角色（user/assistant/system），`content` 为正文。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
     pub content: String,
 }
 
+/// 会话列表项摘要，供 UI 展示，不含具体消息体。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ConversationMeta {
     pub id: String,
@@ -23,6 +33,7 @@ pub(crate) struct ConversationMeta {
     pub message_count: usize,
 }
 
+/// JSON 导入导出用的序列化载体，字段与 [`Conversation`] 一一对应。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ConversationData {
     id: String,
@@ -31,6 +42,7 @@ struct ConversationData {
     messages: Vec<Message>,
 }
 
+/// 单个对话的内存表示，承载消息序列并支持增量持久化。
 #[derive(Debug, Clone)]
 pub struct Conversation {
     pub id: String,
@@ -84,6 +96,7 @@ static CONV_DB: once_cell::sync::Lazy<Option<Db>> = once_cell::sync::Lazy::new(|
     Some(db)
 });
 
+/// 取首条 user 消息的前 50 个字符作为会话标题，无 user 消息时回退为“新对话”。
 fn conversation_title(messages: &[Message]) -> String {
     messages
         .iter()
@@ -101,6 +114,7 @@ fn conversation_title(messages: &[Message]) -> String {
 
 #[allow(clippy::new_without_default)]
 impl Conversation {
+    /// 创建一个空对话，并生成进程内唯一的 id。
     pub fn new() -> Self {
         // 微秒时间戳 + 进程内序列号：紧密循环或并发创建时也不会撞 id。
         // （仅用 %f 微秒时，同一微秒内创建的两个会话会共享 id，其消息按
@@ -119,6 +133,7 @@ impl Conversation {
         }
     }
 
+    /// 按 id 从 SQLite 加载对话及其全部消息；id 非法或不存在时返回 `None`。
     pub fn load(id: &str) -> Option<Self> {
         if !sanitize_id(id) {
             return None;
@@ -159,6 +174,7 @@ impl Conversation {
         })
     }
 
+    /// 在单个事务内增量写入尚未落盘的消息，并 upsert 会话元信息（标题、更新时间）。
     pub(crate) fn save(&mut self) {
         if !sanitize_id(&self.id) {
             log::warn!("refusing to save conversation with unsafe id: {}", self.id);
@@ -206,6 +222,7 @@ impl Conversation {
         }
     }
 
+    /// 追加一条消息并立即持久化。
     pub fn add_message(&mut self, role: &str, content: &str) {
         self.messages.push(Message {
             role: role.into(),
@@ -214,6 +231,7 @@ impl Conversation {
         self.save();
     }
 
+    /// 按 id 删除对话（消息由外键级联删除）；id 非法时静默忽略。
     pub fn delete(id: &str) {
         if !sanitize_id(id) {
             return;
@@ -246,6 +264,7 @@ impl Conversation {
         }
     }
 
+    /// 列出全部会话摘要，按最近更新时间倒序，并附带每个会话的消息条数。
     pub(crate) fn list_all() -> Vec<ConversationMeta> {
         let Some(db) = CONV_DB.as_ref() else {
             return Vec::new();
@@ -271,6 +290,7 @@ impl Conversation {
         .unwrap_or_default()
     }
 
+    /// 构造送入模型的消息上下文：可选前置 system 提示，且只保留最近 `max` 条消息。
     pub(crate) fn context_messages(&self, system_prompt: Option<&str>, max: usize) -> Vec<Message> {
         let mut msgs = vec![];
         if let Some(sp) = system_prompt {

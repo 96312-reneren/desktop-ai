@@ -2,15 +2,24 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// 模型目录中的单个条目：展示信息，外加下载与完整性校验所需的数据。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
+    /// 稳定标识，用于被引用；配置回填 `parts` 时按此匹配默认目录。
     pub id: String,
+    /// 展示名。
     pub name: String,
+    /// 一句话描述，仅用于 UI。
     pub desc: String,
+    /// 大致体积（GB），仅用于 UI 展示。
     pub size_gb: f64,
+    /// 分类标签（如「推荐」）。
     pub tags: Vec<String>,
+    /// 单文件下载 URL；分卷模型指向首卷（`parts` 非空时实际走 `parts`）。
     pub url: String,
+    /// 本地保存的文件名（分卷模型为合并后的产物名）。
     pub filename: String,
+    /// 整包 SHA-256；分卷模型是合并产物的哈希，而非单卷哈希。
     #[serde(default)]
     pub expected_sha256: Option<String>,
     /// Split-file model parts (e.g. HF multi-part GGUF). When non-empty,
@@ -24,33 +33,51 @@ pub struct ModelInfo {
 /// SHA-256 for integrity verification of that part).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelPart {
+    /// 该分卷的下载 URL。
     pub url: String,
+    /// 该分卷保存到本地的文件名。
     pub filename: String,
+    /// 该分卷自身的 SHA-256，用于逐卷完整性校验。
     #[serde(default)]
     pub sha256: Option<String>,
 }
 
+/// 应用配置：持久化为 `data_root` 下的 `config.json`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// UI 主题，仅接受 "dark" / "light"。
     pub theme: String,
+    /// 界面字号；越界值在 `load_config` 中收敛。
     pub font_size: u32,
+    /// 上下文窗口大小（token）。
     pub n_ctx: u32,
+    /// 推理线程数，可为 "auto" 或数字字符串。
     pub n_threads: String,
+    /// 上次打开的对话 id，用于启动时恢复。
     pub last_conversation_id: Option<String>,
+    /// 当前选中的模型 id。
     pub selected_model_id: Option<String>,
+    /// 系统提示词。
     pub system_prompt: String,
+    /// 可用模型目录；旧配置缺失时回填默认目录。
     #[serde(default)]
     pub model_catalog: Vec<ModelInfo>,
+    /// 是否启用本地 HTTP API 服务。
     #[serde(default)]
     pub api_enabled: bool,
+    /// API 监听端口。
     #[serde(default = "default_api_port")]
     pub api_port: u16,
+    /// 是否启用联网搜索。
     #[serde(default)]
     pub search_enabled: bool,
+    /// 是否启用知识库（检索增强）。
     #[serde(default)]
     pub kb_enabled: bool,
+    /// 卸载到 GPU 的层数（0 表示全部走 CPU）。
     #[serde(default)]
     pub gpu_layers: i32,
+    /// API 鉴权 token；空串会在加载时重新生成，防止接口裸奔。
     #[serde(default)]
     pub api_token: String,
     /// Max tokens generated per reply (prompt budget = n_ctx - this - margin).
@@ -72,22 +99,30 @@ pub struct Config {
     pub reasoning_expanded: bool,
 }
 
+/// 推理过程区段的默认展开状态（默认收起）。
 fn default_reasoning_expanded() -> bool {
     false
 }
 
+/// API 默认监听端口。
 fn default_api_port() -> u16 {
     11434
 }
 
+/// 单次回复默认可生成的最大 token 数。
 fn default_max_output_tokens() -> u32 {
     2048
 }
 
+/// 每次查询默认召回的知识库片段数。
 fn default_rag_top_k() -> usize {
     3
 }
 
+/// 生成一个强随机 API token（`da-` 前缀 + 128-bit 十六进制）。
+///
+/// 首启时写入 `config.json` 并保持稳定；若系统随机源不可用，则回退到
+/// 纳秒时间戳（熵较弱，但仍避免 API 完全无鉴权）。
 fn default_api_token() -> String {
     // Cryptographically random token generated on first startup so the API
     // is not wide-open. Written to config.json and stays stable across
@@ -125,6 +160,7 @@ pub(crate) fn strip_zero_width(s: &str) -> String {
 }
 
 impl Default for Config {
+    /// 构造默认配置（含随机 `api_token` 与默认模型目录）。
     fn default() -> Self {
         Self {
             theme: "dark".into(),
@@ -150,11 +186,13 @@ impl Default for Config {
     }
 }
 
+/// 桌面平台：定位系统标准数据/配置目录。
 #[cfg(not(target_os = "android"))]
 pub(crate) fn app_dirs() -> ProjectDirs {
     ProjectDirs::from("com", "desktopai", "DesktopAI").expect("failed to get project directories")
 }
 
+/// Android：无标准目录，返回占位 `ProjectDirs`（真实路径见 `data_root`）。
 #[cfg(target_os = "android")]
 pub(crate) fn app_dirs() -> ProjectDirs {
     // On Android the directories crate has no standard locations; the data
@@ -162,6 +200,7 @@ pub(crate) fn app_dirs() -> ProjectDirs {
     ProjectDirs::from("", "", "").expect("failed to get project directories")
 }
 
+/// 尽力创建目录；失败仅记日志告警，不中断调用方（仍会返回原路径）。
 fn ensure_dir(dir: &std::path::Path, label: &str) {
     if let Err(e) = std::fs::create_dir_all(dir) {
         log::warn!("failed to create {} dir {:?}: {}", label, dir, e);
@@ -222,6 +261,7 @@ pub(crate) fn data_root() -> PathBuf {
     }
 }
 
+/// `config.json` 的完整路径，并确保其父目录已存在。
 pub(crate) fn config_path() -> PathBuf {
     #[cfg(target_os = "android")]
     {
@@ -243,6 +283,7 @@ pub(crate) fn config_path() -> PathBuf {
     }
 }
 
+/// 模型存放目录（Android 优先应用专属外部目录），并确保目录存在。
 pub fn models_dir() -> PathBuf {
     // Android: prefer the app-specific external dir (Android/data/<pkg>/files
     // — writable without permissions, adb-pushable); fall back to user-visible
@@ -267,24 +308,28 @@ pub fn models_dir() -> PathBuf {
     dir
 }
 
+/// 对话历史数据库所在目录，并确保目录存在。
 pub(crate) fn conversations_dir() -> PathBuf {
     let dir = data_root().join("conversations");
     ensure_dir(&dir, "conversations");
     dir
 }
 
+/// 知识库数据目录，并确保目录存在。
 pub(crate) fn kb_dir() -> PathBuf {
     let dir = data_root().join("knowledge_base");
     ensure_dir(&dir, "knowledge_base");
     dir
 }
 
+/// 沙箱/临时工作目录，并确保目录存在。
 pub(crate) fn sandbox_dir() -> PathBuf {
     let dir = data_root().join("sandbox");
     ensure_dir(&dir, "sandbox");
     dir
 }
 
+/// 日志目录，并确保目录存在；Unix 下收紧到仅属主可访问。
 pub(crate) fn log_dir() -> PathBuf {
     let dir = data_root().join("logs");
     ensure_dir(&dir, "logs");
@@ -333,6 +378,10 @@ pub(crate) fn should_show_crash_notice() -> bool {
     true
 }
 
+/// 从 `config_path()` 读取并反序列化配置；缺失时用默认值并落盘。
+///
+/// 会为旧配置回填缺失字段（模型 `parts`、空 `api_token`），并对越界值做
+/// 收敛式校验；读取或解析失败时回退默认配置而非报错。
 pub fn load_config() -> Config {
     let path = config_path();
     let mut config = if path.exists() {
@@ -418,6 +467,10 @@ pub fn load_config() -> Config {
     config
 }
 
+/// 将配置以 JSON 原子写入 `config_path()`。
+///
+/// 先写临时文件再重命名，避免写入中途崩溃损坏正式配置；写入前后收紧文件
+/// 权限（配置内含 API token）。任何失败只告警，不打断调用方。
 pub fn save_config(config: &Config) {
     let path = config_path();
     if let Ok(data) = serde_json::to_string_pretty(config) {

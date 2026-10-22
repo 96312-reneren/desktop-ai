@@ -1,3 +1,11 @@
+//! 本地 OpenAI 兼容 HTTP API 服务器，仅绑定 127.0.0.1。
+//!
+//! 对外暴露 `/health`、`/ready`、`/v1/models` 与 `/v1/chat/completions`，
+//! 供桌面端 UI 及其它本地进程调用，内部经 `run_inference` 转发到
+//! `LlamaInference` 进行推理。本模块是安全敏感面：连接数与请求体/URI/请求头
+//! 均有硬上限，`/v1/*` 用 `Bearer` 常量时间比较认证，浏览器 Origin 走白名单，
+//! 且恒 `Connection: close`（无 keep-alive，故不存在连接复用与请求走私面）。
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{
@@ -9,6 +17,10 @@ use std::thread;
 use crate::llm::inference::{LlamaInference, StreamToken};
 
 /// 常量时间字符串比较，防止时序攻击
+///
+/// 用于 `/v1/*` 的 `Bearer` 令牌校验：普通 `==` 会在首个不相等字节处提前返回，
+/// 攻击者可通过测量响应耗时逐字节推断正确令牌（时序侧信道）。此处按两输入
+/// 最大长度遍历，对长度差和每个字节逐位累积 XOR，全程不短路，使耗时与内容无关。
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     let max_len = a.len().max(b.len());
     let mut diff = (a.len() ^ b.len()) as u8;
@@ -45,14 +57,25 @@ const MAX_HEADER_SECTION_SIZE: usize = 65536;
 /// 允许的 HTTP 方法白名单。
 const ALLOWED_METHODS: &[&str] = &["GET", "POST", "OPTIONS"];
 
+/// 本地 API 服务器的控制句柄，持有监听线程与协作式停止标志。
 pub struct ApiServer {
+    /// 协作式停止标志：置 `true` 后监听线程的 accept 循环退出。
     stop_flag: Arc<AtomicBool>,
+    /// 监听线程句柄，`stop()` 时取走并 join。
     handle: Option<thread::JoinHandle<()>>,
     /// 实际绑定的端口（bind 成功后由监听线程回传；0 = OS 分配临时端口）。
     port: Option<u16>,
 }
 
 impl ApiServer {
+    /// 启动本地 API 监听线程并返回服务器句柄。
+    ///
+    /// `port` 为 0 时由 OS 分配临时端口（测试借此避免用例间端口冲突）。`inf` 为
+    /// `None` 表示模型未加载，`/v1/chat/completions` 将返回 503；`api_token` 为空时
+    /// `/v1/*` 一律 401（空令牌无法认证）；`active_model` 供 `/v1/models` 回显。
+    ///
+    /// 经 `mpsc` 通道同步 bind 结果：监听线程 bind 成功即回传实际端口、失败回传
+    /// `None`，本函数最多等待 2 秒，故返回时端口状态已确定（`port()` 立即可用）。
     pub fn start(
         inf: Option<Arc<Mutex<LlamaInference>>>,
         port: u16,
@@ -161,6 +184,7 @@ impl ApiServer {
         self.port
     }
 
+    /// 请求停止服务器并等待监听线程结束；幂等（`handle` 已被取走时直接返回）。
     pub fn stop(&mut self) {
         self.stop_flag.store(true, Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
@@ -170,11 +194,16 @@ impl ApiServer {
 }
 
 impl Drop for ApiServer {
+    /// 析构时自动停止监听线程，避免句柄被丢弃后遗留后台线程。
     fn drop(&mut self) {
         self.stop();
     }
 }
 
+/// 处理单个已接入的客户端连接：设置读超时、解析请求、鉴权、路由并写出响应。
+///
+/// 运行在 `start` accept 循环为每个连接派生的独立线程上。一连接一请求、响应后
+/// 即关闭；函数返回表示连接结束，调用方随即递减在飞连接计数。
 fn handle_client(
     mut stream: TcpStream,
     inf: Option<Arc<Mutex<LlamaInference>>>,
@@ -506,6 +535,7 @@ fn sse_chunk(id: &str, text: &str) -> String {
     )
 }
 
+/// 取请求 JSON 中的 `messages` 数组；缺失或类型非数组时返回 `None`。
 fn extract_messages(req: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
     req["messages"].as_array().cloned()
 }
@@ -692,6 +722,9 @@ pub(crate) fn parse_http_validated(raw: &str) -> Result<ParsedRequest, (u16, &'s
     })
 }
 
+/// 构造 JSON HTTP 响应字符串，附 `Content-Length` 与 `Connection: close`。
+///
+/// 状态码文本恒写为 `OK`（与具体 `code` 无关，测试依赖此行为）。
 fn json_response(code: u16, body: &str) -> String {
     format!(
         "HTTP/1.1 {code} OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {len}\r\n\r\n{body}",
@@ -810,6 +843,8 @@ fn read_http_request(
     Ok(buf)
 }
 
+/// 在 `haystack` 中查找 `needle` 首次出现的起始下标（朴素窗口匹配）；
+/// 未找到或 `needle` 为空/过长时返回 `None`。
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || needle.len() > haystack.len() {
         return None;
@@ -817,6 +852,8 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// 从请求头文本中解析 `Content-Length`：大小写不敏感，重复出现则返回 `None`
+/// （HTTP 请求走私防护），缺失或非数字同样返回 `None`。
 fn parse_content_length(headers: &str) -> Option<usize> {
     let mut found: Option<usize> = None;
     let mut count = 0usize;

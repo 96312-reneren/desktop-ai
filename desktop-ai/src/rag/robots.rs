@@ -38,15 +38,21 @@ const UA_TOKEN: &str = "DesktopAI";
 /// The User-Agent header the crawler sends; also used for robots matching.
 pub(crate) const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DesktopAI/5.7";
 
+/// 单条 `Allow`/`Disallow` 指令。
 #[derive(Debug, Clone)]
 struct Rule {
+    /// 为真表示 `Allow`，否则表示 `Disallow`。
     allow: bool,
+    /// 指令路径模式，可能含 `*`/`$` 通配；大小写与末尾 `$` 均保留原文。
     path: String,
 }
 
+/// 一个 `User-agent` 组：共享同一批规则的 UA 模式集合。
 #[derive(Debug, Default, Clone)]
 struct Group {
+    /// 该组声明的 UA 模式（已转小写），`*` 代表任意爬虫。
     agents: Vec<String>,
+    /// 该组的规则，评估时按最长匹配优先、同长 `Allow` 胜出。
     rules: Vec<Rule>,
 }
 
@@ -148,6 +154,11 @@ impl RobotsRules {
     }
 }
 
+/// 判断 robots.txt 的一条 UA 模式是否命中我们的爬虫。
+///
+/// 按约定做大小写不敏感的子串匹配：同时对照完整 `USER_AGENT` 与短 token
+/// `UA_TOKEN`，使 `User-agent: DesktopAI` 这类写法也能命中。通配 `*` 不作为
+/// 具体匹配（返回 `false`），由 `is_allowed` 作为兜底单独处理。
 fn ua_matches(pattern: &str) -> bool {
     // robots UA tokens match case-insensitively as substrings of our UA.
     let p = pattern.trim().to_ascii_lowercase();
@@ -225,6 +236,7 @@ pub(crate) struct RobotsCache {
 }
 
 impl RobotsCache {
+    /// 创建空的按源缓存。一个爬取会话通常复用一个实例，以摊薄每个源一次抓取。
     pub(crate) fn new() -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
@@ -245,6 +257,12 @@ impl RobotsCache {
         }
     }
 
+    /// 返回 `origin` 的规则：命中缓存直接复用，否则抓取一次 `robots.txt` 并缓存。
+    ///
+    /// `client` 必须已对目标主机做好 DNS 固定（SSRF 安全）且禁用自动重定向
+    /// （配合 `rules_from_status` 对 3xx 的放行语义）。抓取过程中的网络错误按
+    /// "临时不可用"处理，放行全部路径；状态码到规则的映射见 `rules_from_status`。
+    /// 缓存在 `Mutex` 下更新，可跨线程共享。
     fn rules_for(&self, client: &Client, origin: &str) -> Arc<RobotsRules> {
         if let Some(r) = self.entries.lock().unwrap().get(origin) {
             return Arc::clone(r);

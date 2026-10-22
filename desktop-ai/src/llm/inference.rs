@@ -1,6 +1,17 @@
+//! 流式文本生成引擎（`llama.cpp` FFI 封装）。
+//!
+//! 本模块对外提供 `LlamaInference`（持有模型与上下文句柄），以及基于检索
+//! 增强（RAG）的提示组装与流式推理入口 `run_inference`。上游由 `llm` 服务层
+//! 与命令层调用，逐 token 结果经 `std::sync::mpsc` 通道回传 UI。
+//!
+//! 设计与安全边界：`llama.cpp` 上下文非线程安全，所有 FFI 调用都必须在
+//! `Arc<Mutex<..>>` 保护下串行执行；历史与检索内容在拼入 prompt 前统一经
+//! `sanitize_chatml` 中和特殊 token，检索资料额外用不可信围栏包裹，以防范提示注入。
+
 use crate::llm::ffi;
 use std::sync::{Arc, Mutex};
 
+/// 流式生成的增量事件，经 `mpsc` 通道从后台推理线程回传到 UI。
 pub(crate) enum StreamToken {
     Text(String),
     Done,
@@ -13,6 +24,7 @@ pub(crate) enum StreamToken {
     Sources(Vec<crate::rag::vector_store::SourceRef>),
 }
 
+/// `llama.cpp` 模型与上下文的拥有者；须经 `Arc<Mutex<..>>` 串行化使用。
 pub struct LlamaInference {
     model: *mut ffi::LlamaModel,
     ctx: *mut ffi::LlamaContext,
@@ -26,11 +38,16 @@ pub struct LlamaInference {
 unsafe impl Send for LlamaInference {}
 
 impl LlamaInference {
+    /// 以默认 GPU 层数（0，纯 CPU）加载模型的便捷入口。
     #[allow(dead_code)]
     pub(crate) fn load(model_path: &str, n_ctx: u32, n_threads: u32) -> Result<Self, String> {
         Self::load_ex(model_path, n_ctx, n_threads, 0)
     }
 
+    /// 加载模型并创建推理上下文；`gpu_layers > 0` 时把对应层卸载到 GPU。
+    ///
+    /// 任一环节失败即返回错误字符串；上下文创建失败时会释放已加载的模型，
+    /// 避免资源泄漏。
     pub fn load_ex(
         model_path: &str,
         n_ctx: u32,
@@ -61,14 +78,18 @@ impl LlamaInference {
         Ok(Self { model, ctx, n_ctx })
     }
 
+    /// 返回底层模型与上下文的裸指针，供需要直接调用 FFI 的调用方使用；
+    /// 调用方必须已持有外层互斥锁。
     pub(crate) fn model_ctx(&self) -> (*mut ffi::LlamaModel, *mut ffi::LlamaContext) {
         (self.model, self.ctx)
     }
 
+    /// 返回该模型实例的上下文窗口大小（token 数）。
     pub(crate) fn n_ctx(&self) -> u32 {
         self.n_ctx
     }
 
+    /// 释放上下文与模型并将指针置空；由 `Drop` 调用，幂等（空指针会被跳过）。
     fn unload(&mut self) {
         if !self.ctx.is_null() {
             unsafe {
@@ -86,6 +107,7 @@ impl LlamaInference {
 }
 
 impl Drop for LlamaInference {
+    /// 实例析构时释放底层 `llama.cpp` 资源。
     fn drop(&mut self) {
         self.unload();
     }
@@ -306,6 +328,8 @@ pub(crate) fn run_inference(
     }
 }
 
+/// 把消息序列格式化为 ChatML 文本，并以 `assistant` 起始标记结尾；
+/// 每条消息内容先经 `sanitize_chatml` 中和特殊 token。
 #[allow(dead_code)]
 pub(crate) fn format_chatml(messages: &[crate::store::conversation::Message]) -> String {
     let mut s = String::new();

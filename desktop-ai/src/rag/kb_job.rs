@@ -68,6 +68,7 @@ pub(crate) enum KbIndexJob {
     },
 }
 
+/// 索引成功时的收尾信息：单文档状态的文案，以及 UI 需要清空的输入项。
 struct KbDoneInfo {
     single_status: String,
     single_message: String,

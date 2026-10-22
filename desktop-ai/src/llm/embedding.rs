@@ -1,8 +1,16 @@
 use crate::llm::ffi;
 
+/// 语义向量引擎：持有一份 llama.cpp embedding 模型及其推理上下文。
+///
+/// 为文本产出 L2 归一化向量，供 `vector_store` 以余弦相似度检索。句柄为
+/// 裸指针，销毁时经 [`EmbeddingEngine::unload`] 释放；不实现 `Sync`，须
+/// 在单一时刻仅由一个线程使用。
 pub(crate) struct EmbeddingEngine {
+    /// llama.cpp 模型句柄，`null` 表示未加载。
     model: *mut ffi::LlamaModel,
+    /// embedding 推理上下文，`null` 表示未创建。
     ctx: *mut ffi::LlamaContext,
+    /// 向量维度，取自模型的 `n_embd`。
     dim: usize,
 }
 
@@ -12,6 +20,11 @@ pub(crate) struct EmbeddingEngine {
 unsafe impl Send for EmbeddingEngine {}
 
 impl EmbeddingEngine {
+    /// 加载指定 GGUF 模型并创建 embedding 上下文。
+    ///
+    /// 依次初始化 FFI、加载模型、校验 `n_embd` 为正、创建嵌入上下文；任一
+    /// 步骤失败都会先释放已占用的模型句柄再返回错误，避免泄漏。成功后返回
+    /// 的引擎通过 channel 跨线程移交，但同一时刻只应被一个线程使用。
     pub(crate) fn load(model_path: &str, n_ctx: u32, n_threads: u32) -> Result<Self, String> {
         unsafe {
             ffi::init()?;
@@ -42,6 +55,11 @@ impl EmbeddingEngine {
         Ok(Self { model, ctx, dim })
     }
 
+    /// 将文本编码为 L2 归一化向量，长度固定为 [`EmbeddingEngine::dim`]。
+    ///
+    /// 分词后按 512 token 分块解码（解码器模型的隐藏态依赖最近一次前向），
+    /// 取最后一个 token 的隐藏态作为句向量。空输入或任一步失败时返回全零
+    /// 向量而非报错，调用方需自行容忍该退化结果。
     pub(crate) fn embed(&self, text: &str) -> Vec<f32> {
         unsafe {
             let tokens = ffi::tokenize(self.model, text, true);
@@ -79,11 +97,13 @@ impl EmbeddingEngine {
         }
     }
 
+    /// 返回向量维度（`n_embd`）。目前尚无调用方（见 `#[allow(dead_code)]`）。
     #[allow(dead_code)]
     pub(crate) fn dim(&self) -> usize {
         self.dim
     }
 
+    /// 释放上下文与模型句柄并将指针置空；可重复调用（幂等）。
     fn unload(&mut self) {
         if !self.ctx.is_null() {
             unsafe {
@@ -101,6 +121,7 @@ impl EmbeddingEngine {
 }
 
 impl Drop for EmbeddingEngine {
+    /// 析构时释放模型与上下文，确保 FFI 资源不泄漏。
     fn drop(&mut self) {
         self.unload();
     }
