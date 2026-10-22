@@ -82,3 +82,5 @@ System Volume Information/
 desktop-ai/fuzz/corpus/
 desktop-ai/fuzz/artifacts/
 desktop-ai/fuzz/coverage/
+# 本地文档（架构图/学习文档）——按用户要求不入库
+desktop-ai/docs/
