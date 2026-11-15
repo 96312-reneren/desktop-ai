@@ -210,7 +210,7 @@ impl Conversation {
                         self.id,
                         m.role,
                         m.content,
-                        self.persisted_count + i
+                        (self.persisted_count + i) as i64
                     ])?;
                 }
             }
