@@ -63,10 +63,7 @@ fn is_file(src: &str) -> bool {
         return true;
     }
     let p = PathBuf::from(src);
-    if p.is_absolute() && p.exists() {
-        return true;
-    }
-    false
+    p.is_absolute() && p.exists()
 }
 
 /// 去掉 `file://` / `file:` 前缀返回裸路径；无前缀则原样返回。

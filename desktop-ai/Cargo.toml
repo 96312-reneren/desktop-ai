@@ -1,6 +1,6 @@
 [package]
 name = "desktop-ai"
-version = "6.1.6"
+version = "6.2.0"
 edition = "2021"
 # MSRV: egui 0.31 requires 1.81; older toolchains get a clear error instead
 # of cryptic type-system failures.
