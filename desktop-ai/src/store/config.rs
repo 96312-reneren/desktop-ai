@@ -86,6 +86,12 @@ pub struct Config {
     /// Number of knowledge-base chunks recalled per query.
     #[serde(default = "default_rag_top_k")]
     pub rag_top_k: usize,
+    /// 是否启用混合检索（向量 + 关键词 RRF 融合）；默认开。
+    #[serde(default = "default_rag_hybrid_search")]
+    pub rag_hybrid_search: bool,
+    /// 是否启用规则化查询重写（指代消解，仅影响检索，不改变用户原文）；默认开。
+    #[serde(default = "default_query_rewrite")]
+    pub query_rewrite: bool,
     /// True once the first-run "create desktop shortcut?" prompt has been
     /// answered, so it never shows again.
     #[serde(default)]
@@ -117,6 +123,16 @@ fn default_max_output_tokens() -> u32 {
 /// 每次查询默认召回的知识库片段数。
 fn default_rag_top_k() -> usize {
     3
+}
+
+/// 混合检索默认开启（向量 + 关键词两路召回）。
+fn default_rag_hybrid_search() -> bool {
+    true
+}
+
+/// 查询重写默认开启（规则化指代消解）。
+fn default_query_rewrite() -> bool {
+    true
 }
 
 /// 生成一个强随机 API token（`da-` 前缀 + 128-bit 十六进制）。
@@ -179,6 +195,8 @@ impl Default for Config {
             api_token: default_api_token(),
             max_output_tokens: default_max_output_tokens(),
             rag_top_k: default_rag_top_k(),
+            rag_hybrid_search: default_rag_hybrid_search(),
+            query_rewrite: default_query_rewrite(),
             shortcut_prompted: false,
             sidebar_collapsed: false,
             reasoning_expanded: false,

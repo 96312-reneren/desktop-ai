@@ -279,8 +279,11 @@ impl DesktopAI {
                         .id_salt("kb_sources")
                         .show(ui, |ui| {
                             for s in sources {
+                                let badge = crate::rag::vector_store::source_type_badge(
+                                    &s.metadata.source_type,
+                                );
                                 ui.label(
-                                    RichText::new(format!("#{}  {}", s.rank, s.source))
+                                    RichText::new(format!("#{}  {}{}", s.rank, badge, s.source))
                                         .size(12.5)
                                         .color(m.on_surface),
                                 );

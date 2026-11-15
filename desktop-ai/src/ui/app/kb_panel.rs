@@ -181,8 +181,14 @@ impl DesktopAI {
                 ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
                     for hit in &self.kb_search_results {
                         ui.group(|ui| {
+                            // 用真实来源类型徽标；旧库未知来源（空串）保持 📄 兜底。
+                            let badge =
+                                crate::rag::vector_store::source_type_badge(
+                                    &hit.metadata.source_type,
+                                );
+                            let badge = if badge.is_empty() { "📄 " } else { badge };
                             ui.label(
-                                RichText::new(format!("📄 {}", hit.source))
+                                RichText::new(format!("{}{}", badge, hit.source))
                                     .size(11.0)
                                     .strong(),
                             );
@@ -218,7 +224,11 @@ impl DesktopAI {
                             let title = if doc.title.len() > 30 {
                                 format!("{}...", &doc.title[..30])
                             } else { doc.title.clone() };
-                            ui.label(RichText::new(&title).size(12.0).strong());
+                            // 旧库迁移数据 source_type 为空时不加徽标。
+                            let badge = crate::rag::vector_store::source_type_badge(
+                                &doc.metadata.source_type,
+                            );
+                            ui.label(RichText::new(format!("{}{}", badge, title)).size(12.0).strong());
                             if ui.button("删除").clicked() {
                                 let id = doc.id.clone();
                                 self.delete_kb_document(&id);

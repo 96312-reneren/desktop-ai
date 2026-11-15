@@ -508,7 +508,16 @@ impl DesktopAI {
         // 避免 UI 线程等待整个文档的向量化过程。
         let do_kb =
             self.config.kb_enabled && self.vector_store.has_engine() && self.kb_job.is_none();
+        let hybrid_enabled = self.config.rag_hybrid_search;
+        let rewrite_enabled = self.config.query_rewrite;
         let user_query = text.clone();
+        // 查询重写只影响检索（embedding / FTS / 联网搜索），用户原文与发送内容不变。
+        // 必须在 spawn 前算好：messages 稍后会被 move 进生成线程。
+        let retrieval_query = if rewrite_enabled {
+            crate::rag::query_rewrite::rewrite_query(&user_query, &messages)
+        } else {
+            user_query.clone()
+        };
 
         let kb_data = if do_kb {
             self.vector_store.documents_snapshot()
@@ -516,9 +525,17 @@ impl DesktopAI {
             Vec::new()
         };
         let query_vec = if do_kb {
-            self.vector_store.embed_query(&user_query).ok()
+            self.vector_store.embed_query(&retrieval_query).ok()
         } else {
             None
+        };
+        // 关键词路在 UI 线程完成（search_text 走库锁、开销小），结果再 move 进线程。
+        let text_hits = if do_kb && hybrid_enabled {
+            self.vector_store
+                .search_text(&retrieval_query, self.config.rag_top_k)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
         };
 
         let stop = stop_flag.clone();
@@ -535,36 +552,44 @@ impl DesktopAI {
         });
 
         let handle = thread::spawn(move || {
-            let (kb_context, kb_sources) = if let Some(ref qv) = query_vec {
-                if !kb_data.is_empty() {
-                    let results =
-                        crate::rag::vector_store::search_by_vector(&kb_data, qv, rag_top_k);
-                    if !results.is_empty() {
-                        let mut ctx = String::new();
-                        for (i, hit) in results.iter().enumerate() {
-                            // Rank only — a cosine "similarity %" would be
-                            // misleading (not a probability, can be negative).
-                            ctx.push_str(&format!(
-                                "[参考{}（按相关度排序） 来源: {}]\n{}\n\n",
-                                i + 1,
-                                hit.source,
-                                hit.chunk
-                            ));
-                        }
-                        let sources = crate::rag::vector_store::SourceRef::from_hits(&results);
-                        (Some(ctx), sources)
-                    } else {
-                        (None, Vec::new())
+            let (kb_context, kb_sources) = {
+                let vector_hits = match (&query_vec, kb_data.is_empty()) {
+                    (Some(qv), false) => {
+                        crate::rag::vector_store::search_by_vector(&kb_data, qv, rag_top_k)
                     }
+                    _ => Vec::new(),
+                };
+                // 混合检索：向量路与关键词路按 RRF 融合去重；
+                // 关闭混合时保持纯向量检索的原有行为。
+                let results = if hybrid_enabled {
+                    crate::rag::vector_store::hybrid_search(vector_hits, text_hits, rag_top_k)
                 } else {
+                    vector_hits
+                };
+                if results.is_empty() {
                     (None, Vec::new())
+                } else {
+                    let mut ctx = String::new();
+                    for (i, hit) in results.iter().enumerate() {
+                        // Rank only — a cosine "similarity %" would be
+                        // misleading (not a probability, can be negative).
+                        let badge =
+                            crate::rag::vector_store::source_type_badge(&hit.metadata.source_type);
+                        ctx.push_str(&format!(
+                            "[参考{}（按相关度排序） 来源: {}{}]\n{}\n\n",
+                            i + 1,
+                            badge,
+                            hit.source,
+                            hit.chunk
+                        ));
+                    }
+                    let sources = crate::rag::vector_store::SourceRef::from_hits(&results);
+                    (Some(ctx), sources)
                 }
-            } else {
-                (None, Vec::new())
             };
 
             let search_context = if do_search {
-                if let Ok(results) = crate::rag::search::search_duckduckgo(&user_query) {
+                if let Ok(results) = crate::rag::search::search_duckduckgo(&retrieval_query) {
                     if !results.is_empty() {
                         let mut ctx = String::new();
                         for (i, r) in results.iter().take(5).enumerate() {

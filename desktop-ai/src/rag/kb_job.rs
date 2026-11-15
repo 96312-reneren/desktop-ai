@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
 use super::crawler::extract_pdf_safe;
-use super::vector_store::VectorStore;
+use super::vector_store::{DocMetadata, VectorStore};
 
 /// 知识库文本文件大小上限（64 MiB）。超限文件在 read_to_string 之前即被
 /// 拒绝，避免把整个文件一次性读进内存（正文入库另有 KB_SINGLE_DOC_CHARS
@@ -122,7 +122,19 @@ pub(crate) fn run_kb_job(
                 frac: 0.2,
                 status: "分块中...".into(),
             });
-            let result = index_content(&store, &filename, &content, 500, 50, &cancel, &tx);
+            let result = index_content(
+                &store,
+                &filename,
+                &content,
+                500,
+                50,
+                &cancel,
+                &tx,
+                &DocMetadata {
+                    source_type: "file".into(),
+                    source_url: Some(path.display().to_string()),
+                },
+            );
             finish_kb_job(
                 &tx,
                 result,
@@ -141,7 +153,19 @@ pub(crate) fn run_kb_job(
                 frac: 0.2,
                 status: format!("分块中... ({:.0} 字符)", char_count as f64),
             });
-            let result = index_content(&store, &title, &content, 512, 64, &cancel, &tx);
+            let result = index_content(
+                &store,
+                &title,
+                &content,
+                512,
+                64,
+                &cancel,
+                &tx,
+                &DocMetadata {
+                    source_type: "paste".into(),
+                    source_url: None,
+                },
+            );
             finish_kb_job(
                 &tx,
                 result,
@@ -201,7 +225,13 @@ pub(crate) fn run_kb_job(
                                 page.title.chars().take(30).collect::<String>()
                             ),
                         });
-                        if let Err(e) = store.add_document(&page.title, &page.text, 500, 50) {
+                        let metadata = DocMetadata {
+                            source_type: "crawl".into(),
+                            source_url: Some(page.url.clone()),
+                        };
+                        if let Err(e) =
+                            store.add_document(&page.title, &page.text, 500, 50, &metadata)
+                        {
                             log::warn!("索引失败 {}: {}", page.title, e);
                         }
                         added += 1;
@@ -231,6 +261,8 @@ pub(crate) fn run_kb_job(
 
 /// 分块 + 向量化 + 入库，返回 `(成功段数, 总段数)`。
 /// 大文档自动分段并逐段上报进度；单段文档直接入库。
+/// 分段文档共享同一份来源元数据。
+#[allow(clippy::too_many_arguments)]
 fn index_content(
     store: &VectorStore,
     title: &str,
@@ -239,6 +271,7 @@ fn index_content(
     overlap: usize,
     cancel: &AtomicBool,
     tx: &mpsc::Sender<KbIndexMsg>,
+    metadata: &DocMetadata,
 ) -> Result<(usize, usize), String> {
     let char_count = content.chars().count();
     if char_count > crate::store::config::KB_SINGLE_DOC_CHARS {
@@ -254,7 +287,7 @@ fn index_content(
                 status: format!("索引分段 {}/{}", i + 1, total),
             });
             let seg_title = format!("{} 段{}", title, i + 1);
-            match store.add_document(&seg_title, chunk, chunk_size, overlap) {
+            match store.add_document(&seg_title, chunk, chunk_size, overlap, metadata) {
                 Ok(()) => added += 1,
                 Err(e) => log::warn!("索引段失败 {}: {}", seg_title, e),
             }
@@ -262,7 +295,7 @@ fn index_content(
         Ok((added, total))
     } else {
         store
-            .add_document(title, content, chunk_size, overlap)
+            .add_document(title, content, chunk_size, overlap, metadata)
             .map_err(|e| format!("索引失败: {}", e))?;
         Ok((1, 1))
     }

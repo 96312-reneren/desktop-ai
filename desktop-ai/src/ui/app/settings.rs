@@ -189,6 +189,21 @@ impl DesktopAI {
                     .size(10.0)
                     .color(Color32::GRAY),
             );
+            ui.checkbox(
+                &mut self.config.rag_hybrid_search,
+                "混合检索（向量+关键词）",
+            );
+            ui.label(
+                RichText::new("同时用语义向量与关键词两路召回，去重后注入")
+                    .size(10.0)
+                    .color(Color32::GRAY),
+            );
+            ui.checkbox(&mut self.config.query_rewrite, "查询重写（指代消解）");
+            ui.label(
+                RichText::new("短问题自动结合上一轮提问检索，不影响你看到的原文")
+                    .size(10.0)
+                    .color(Color32::GRAY),
+            );
             ui.add_space(8.0);
 
             // Current model info

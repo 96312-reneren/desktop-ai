@@ -20,6 +20,25 @@ pub(crate) struct StoredChunk {
     pub embedding: Vec<f32>,
 }
 
+/// 入库文档的来源元数据：来源类型 + 可选的定位信息（URL / 文件路径）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct DocMetadata {
+    /// 来源类型："paste" | "file" | "crawl"；旧库迁移后为空串（未知）。
+    pub source_type: String,
+    /// 抓取来源的 URL 或文件入库的原始路径；粘贴文本为 None。
+    pub source_url: Option<String>,
+}
+
+/// 来源类型的展示徽标：粘贴📋 / 文件📄 / 抓取🌐 / 未知（空串）␣
+pub(crate) fn source_type_badge(source_type: &str) -> &'static str {
+    match source_type {
+        "paste" => "📋 ",
+        "file" => "📄 ",
+        "crawl" => "🌐 ",
+        _ => "",
+    }
+}
+
 /// 一次检索命中的分块：正文、可选的相似度分数与来源标题。
 #[derive(Debug, Clone)]
 pub(crate) struct SearchHit {
@@ -31,6 +50,7 @@ pub(crate) struct SearchHit {
     #[allow(dead_code)]
     pub score: Option<f32>,
     pub source: String,
+    pub metadata: DocMetadata,
 }
 
 /// A retrieval reference surfaced to the user under an answer ("参考来源"):
@@ -42,6 +62,8 @@ pub(crate) struct SourceRef {
     pub rank: usize,
     pub source: String,
     pub snippet: String,
+    /// 来源元数据；供「参考来源」区渲染类型徽标。
+    pub metadata: DocMetadata,
 }
 
 impl SourceRef {
@@ -54,6 +76,7 @@ impl SourceRef {
                 rank: i + 1,
                 source: hit.source.clone(),
                 snippet: hit.chunk.chars().take(80).collect(),
+                metadata: hit.metadata.clone(),
             })
             .collect()
     }
@@ -66,6 +89,7 @@ pub(crate) struct StoredDocument {
     pub title: String,
     pub chunks: Vec<StoredChunk>,
     pub created_at: String,
+    pub metadata: DocMetadata,
 }
 
 /// SQLite-backed vector store.
@@ -86,16 +110,19 @@ pub(crate) struct VectorStore {
     engine: Option<Arc<Mutex<EmbeddingEngine>>>,
 }
 
-/// 当前 schema 版本；用作 `PRAGMA user_version` 门控一次性 JSON 迁移。
-const SCHEMA_VERSION: i64 = 1;
+/// 当前 schema 版本；用作 `PRAGMA user_version` 门控一次性迁移：
+/// v1 = JSON 导入，v2 = documents 增加来源元数据列。
+const SCHEMA_VERSION: i64 = 2;
 
 /// 建表 DDL：`documents`/`chunks` 双表（分块外键 `ON DELETE CASCADE`），
 /// 外加手工双写的独立 FTS5 表 `chunks_fts`（非 content-linked）。
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS documents (
-    id         TEXT PRIMARY KEY,
-    title      TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    id          TEXT PRIMARY KEY,
+    title       TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    source_type TEXT NOT NULL DEFAULT '',
+    source_url  TEXT
 );
 CREATE TABLE IF NOT EXISTS chunks (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,8 +160,9 @@ impl VectorStore {
     /// 打开（或新建）知识库并初始化 schema。
     ///
     /// `store_dir` 下的 `kb.db` 打开失败时降级到进程级临时库，保证功能可用而非崩溃。
-    /// 初始化依次执行：建表、按 `user_version` 门控的一次性 JSON 迁移、
-    /// [`rebuild_fts_if_stale`] 的 FTS 自愈重建；这些步骤出错只记日志、不阻断构造。
+    /// 初始化依次执行：建表、按 `user_version` 门控的分段迁移（v0→v1 JSON 导入、
+    /// v1→v2 补来源元数据列）、[`rebuild_fts_if_stale`] 的 FTS 自愈重建；
+    /// 这些步骤出错只记日志、不阻断构造。
     pub(crate) fn new(store_dir: &std::path::Path) -> Self {
         let db = crate::store::db::open(&store_dir.join("kb.db")).unwrap_or_else(|e| {
             log::error!("failed to open kb.db: {} — using in-memory fallback", e);
@@ -147,10 +175,18 @@ impl VectorStore {
         if let Err(e) = db.with_conn(|c| {
             c.execute_batch(SCHEMA)?;
             let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-            if version < SCHEMA_VERSION {
+            // v0 → v1：导入遗留 vector_store.json（保持原有行为）。
+            if version < 1 {
                 if let Err(e) = migrate_from_json(store_dir, c) {
                     log::error!("kb JSON migration failed: {}", e);
                 }
+            }
+            // v1 → v2：documents 增加来源元数据列。用 PRAGMA table_info 检查列
+            // 是否存在，保证上次迁移中途失败后重跑也不会因重复 ALTER 报错。
+            if version < 2 {
+                add_source_columns_if_missing(c)?;
+            }
+            if version < SCHEMA_VERSION {
                 c.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             }
             // One-time FTS backfill: index any chunks that were stored before
@@ -197,6 +233,7 @@ impl VectorStore {
         text: &str,
         chunk_size: usize,
         overlap: usize,
+        metadata: &DocMetadata,
     ) -> Result<(), String> {
         let engine = self.engine.as_ref().ok_or("embedding engine not loaded")?;
         let chunks = crate::rag::chunker::chunk_text(text, chunk_size, overlap);
@@ -221,8 +258,15 @@ impl VectorStore {
         self.db.with_conn(|c| {
             let tx = c.transaction()?;
             tx.execute(
-                "INSERT INTO documents (id, title, created_at) VALUES (?1, ?2, ?3)",
-                params![id, title, created_at],
+                "INSERT INTO documents (id, title, created_at, source_type, source_url) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    id,
+                    title,
+                    created_at,
+                    metadata.source_type,
+                    metadata.source_url
+                ],
             )?;
             {
                 let mut stmt = tx.prepare(
@@ -310,7 +354,7 @@ impl VectorStore {
         }
         self.db.with_conn(|c| {
             let mut stmt = c.prepare(
-                "SELECT f.doc_id, d.title, f.text, bm25(chunks_fts) AS rank
+                "SELECT f.doc_id, d.title, f.text, d.source_type, d.source_url, bm25(chunks_fts) AS rank
                  FROM chunks_fts f
                  JOIN documents d ON d.id = f.doc_id
                  WHERE chunks_fts MATCH ?1
@@ -322,17 +366,23 @@ impl VectorStore {
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
                 ))
             })?;
             let mut hits = Vec::new();
             for row in rows {
-                let (doc_id, title, text) = row?;
+                let (doc_id, title, text, source_type, source_url) = row?;
                 let _ = doc_id;
                 hits.push(SearchHit {
                     chunk: text,
                     // Keyword hits carry no similarity score.
                     score: None,
                     source: title,
+                    metadata: DocMetadata {
+                        source_type,
+                        source_url,
+                    },
                 });
             }
             Ok(hits)
@@ -343,12 +393,17 @@ impl VectorStore {
 /// 读取全部文档及其分块（按 `created_at`、`idx` 排序），并把 embedding
 /// BLOB 还原为向量。
 fn load_all_documents(c: &Connection) -> rusqlite::Result<Vec<StoredDocument>> {
-    let mut stmt = c.prepare("SELECT id, title, created_at FROM documents ORDER BY created_at")?;
-    let rows: Vec<(String, String, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+    let mut stmt = c.prepare(
+        "SELECT id, title, created_at, source_type, source_url \
+         FROM documents ORDER BY created_at",
+    )?;
+    let rows: Vec<(String, String, String, String, Option<String>)> = stmt
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
         .collect::<Result<_, _>>()?;
     let mut docs = Vec::with_capacity(rows.len());
-    for (id, title, created_at) in rows {
+    for (id, title, created_at, source_type, source_url) in rows {
         let mut chunks = Vec::new();
         {
             let mut stmt =
@@ -369,9 +424,41 @@ fn load_all_documents(c: &Connection) -> rusqlite::Result<Vec<StoredDocument>> {
             title,
             chunks,
             created_at,
+            metadata: DocMetadata {
+                source_type,
+                source_url,
+            },
         });
     }
     Ok(docs)
+}
+
+/// v1 → v2 迁移：为 `documents` 补上来源元数据两列。
+///
+/// 逐列用 `PRAGMA table_info` 探测，缺哪列补哪列——这样即使上次迁移在两次
+/// ALTER 之间中断，重跑也能收敛到 v2 而不会因重复列报错（幂等）。
+fn add_source_columns_if_missing(c: &Connection) -> rusqlite::Result<()> {
+    fn column_exists(c: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+        let mut stmt = c.prepare(&format!("PRAGMA table_info({})", table))?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    if !column_exists(c, "documents", "source_type")? {
+        c.execute(
+            "ALTER TABLE documents ADD COLUMN source_type TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    if !column_exists(c, "documents", "source_url")? {
+        c.execute("ALTER TABLE documents ADD COLUMN source_url TEXT", [])?;
+    }
+    Ok(())
 }
 
 /// Import the legacy `vector_store.json` (if present) into the SQLite store.
@@ -532,7 +619,7 @@ pub(crate) fn search_by_vector(
     query_vec: &[f32],
     top_k: usize,
 ) -> Vec<SearchHit> {
-    let mut scored: Vec<(String, f32, String)> = Vec::new();
+    let mut scored: Vec<(String, f32, String, DocMetadata)> = Vec::new();
     for doc in docs {
         let source = if doc.title.len() > 40 {
             format!("{}...", &doc.title[..40])
@@ -541,17 +628,89 @@ pub(crate) fn search_by_vector(
         };
         for chunk in &doc.chunks {
             let sim = cosine_similarity(query_vec, &chunk.embedding);
-            scored.push((chunk.text.clone(), sim, source.clone()));
+            scored.push((
+                chunk.text.clone(),
+                sim,
+                source.clone(),
+                doc.metadata.clone(),
+            ));
         }
     }
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(top_k);
     scored
         .into_iter()
-        .map(|(chunk, score, source)| SearchHit {
+        .map(|(chunk, score, source, metadata)| SearchHit {
             chunk,
             score: Some(score),
             source,
+            metadata,
+        })
+        .collect()
+}
+
+/// RRF 融合常数：`k = 60` 抑制名次差距的过度放大（信息检索界常用取值）。
+const RRF_K: f32 = 60.0;
+
+/// 混合检索：向量命中（cosine，0..1）与关键词命中（FTS5 顺序）按 RRF 融合。
+///
+/// RRF（Reciprocal Rank Fusion）只看名次、不看原始分数量纲，因此能把余弦相似度
+/// 与 FTS5 的 bm25 排序放在同一把尺子上比较：每路第 `rank`（从 1 开始）名贡献
+/// `weight / (k + rank)`，本实现两路权重均为 1.0、`k = 60`，总分高者排前。
+///
+/// 去重键是 `chunk` 文本：同一分块可能同时被向量与关键词命中，此时把两路贡献
+/// **相加**为一条命中，避免同一段内容在上下文里重复出现。输出 `score` 为 RRF
+/// 融合分（非余弦值），`source`/`metadata` 取先出现的那一路的值。
+///
+/// 纯函数：不触库、不嵌入；任一路为空或两路都为空都能正确工作（空进空出）。
+pub(crate) fn hybrid_search(
+    vector_hits: Vec<SearchHit>,
+    text_hits: Vec<SearchHit>,
+    top_k: usize,
+) -> Vec<SearchHit> {
+    use std::collections::HashMap;
+
+    /// 融合中间态：累计 RRF 分、首次出现顺序（用于稳定排序）与原始命中。
+    struct Fused {
+        score: f32,
+        order: usize,
+        hit: SearchHit,
+    }
+
+    let mut merged: HashMap<String, Fused> = HashMap::new();
+    let mut next_order = 0usize;
+    // 先向量路后关键词路：同分时向量路先出现（排序更稳定）。
+    for hits in [vector_hits, text_hits] {
+        for (i, hit) in hits.into_iter().enumerate() {
+            let contribution = 1.0 / (RRF_K + (i + 1) as f32);
+            if let Some(entry) = merged.get_mut(&hit.chunk) {
+                entry.score += contribution;
+            } else {
+                merged.insert(
+                    hit.chunk.clone(),
+                    Fused {
+                        score: contribution,
+                        order: next_order,
+                        hit,
+                    },
+                );
+                next_order += 1;
+            }
+        }
+    }
+
+    let mut fused: Vec<Fused> = merged.into_values().collect();
+    fused.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.order.cmp(&b.order))
+    });
+    fused.truncate(top_k);
+    fused
+        .into_iter()
+        .map(|f| SearchHit {
+            score: Some(f.score),
+            ..f.hit
         })
         .collect()
 }
@@ -584,7 +743,9 @@ mod tests {
     #[test]
     fn add_and_delete_document_without_engine_is_error() {
         let (store, _dir) = temp_store();
-        assert!(store.add_document("t", "body", 500, 50).is_err());
+        assert!(store
+            .add_document("t", "body", 500, 50, &DocMetadata::default())
+            .is_err());
         drop(store);
     }
 
@@ -594,6 +755,7 @@ mod tests {
             id: "a".into(),
             title: "文档A".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
+            metadata: DocMetadata::default(),
             chunks: vec![
                 StoredChunk {
                     text: "苹果".into(),
@@ -618,6 +780,7 @@ mod tests {
             id: "a".into(),
             title: long_title.clone(),
             created_at: "2026-01-01T00:00:00Z".into(),
+            metadata: DocMetadata::default(),
             chunks: vec![StoredChunk {
                 text: "t".into(),
                 embedding: vec![1.0, 0.0],
@@ -626,6 +789,85 @@ mod tests {
         let hits = search_by_vector(&docs, &[0.0, 1.0], 1);
         assert_eq!(hits[0].source.len(), 43);
         assert!(hits[0].source.ends_with("..."));
+    }
+
+    // ── hybrid_search（RRF 融合） ──
+
+    /// 构造向量路命中（带 cosine 分数）。
+    fn vec_hit(chunk: &str, source: &str) -> SearchHit {
+        SearchHit {
+            chunk: chunk.into(),
+            score: Some(0.5),
+            source: source.into(),
+            metadata: DocMetadata::default(),
+        }
+    }
+
+    /// 构造关键词路命中（FTS5 无相似度分数）。
+    fn kw_hit(chunk: &str, source: &str) -> SearchHit {
+        SearchHit {
+            chunk: chunk.into(),
+            score: None,
+            source: source.into(),
+            metadata: DocMetadata::default(),
+        }
+    }
+
+    #[test]
+    fn hybrid_search_merges_duplicate_chunk_and_sums_scores() {
+        let vector = vec![vec_hit("alpha", "向量源"), vec_hit("beta", "向量源")];
+        let text = vec![kw_hit("beta", "关键词源"), kw_hit("gamma", "关键词源")];
+        let fused = hybrid_search(vector, text, 10);
+
+        assert_eq!(fused.len(), 3, "重复 chunk 必须合并为一条");
+        // beta 两路都命中：1/62 + 1/61，应压过只有向量路 1/61 的 alpha。
+        assert_eq!(fused[0].chunk, "beta");
+        let beta_expected = 1.0 / 61.0 + 1.0 / 62.0;
+        assert!(matches!(fused[0].score, Some(s) if (s - beta_expected).abs() < 1e-6));
+        // source 与 metadata 取先出现的那一路（向量路）。
+        assert_eq!(fused[0].source, "向量源");
+        assert_eq!(fused[1].chunk, "alpha");
+        assert!(matches!(fused[1].score, Some(s) if (s - 1.0 / 61.0).abs() < 1e-6));
+        assert_eq!(fused[2].chunk, "gamma");
+        assert!(matches!(fused[2].score, Some(s) if (s - 1.0 / 62.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn hybrid_search_vector_only_orders_by_rank() {
+        let vector = vec![
+            vec_hit("first", "s"),
+            vec_hit("second", "s"),
+            vec_hit("third", "s"),
+        ];
+        let fused = hybrid_search(vector, Vec::new(), 3);
+        let chunks: Vec<&str> = fused.iter().map(|h| h.chunk.as_str()).collect();
+        assert_eq!(chunks, ["first", "second", "third"]);
+        assert!(matches!(fused[0].score, Some(s) if (s - 1.0 / 61.0).abs() < 1e-6));
+        assert!(matches!(fused[2].score, Some(s) if (s - 1.0 / 63.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn hybrid_search_text_only_orders_by_rank() {
+        let text = vec![kw_hit("a", "s"), kw_hit("b", "s"), kw_hit("c", "s")];
+        let fused = hybrid_search(Vec::new(), text, 3);
+        let chunks: Vec<&str> = fused.iter().map(|h| h.chunk.as_str()).collect();
+        assert_eq!(chunks, ["a", "b", "c"]);
+        assert!(matches!(fused[0].score, Some(s) if (s - 1.0 / 61.0).abs() < 1e-6));
+        assert!(fused.iter().all(|h| h.score.is_some()));
+    }
+
+    #[test]
+    fn hybrid_search_truncates_to_top_k() {
+        let vector = vec![vec_hit("v1", "s"), vec_hit("v2", "s"), vec_hit("v3", "s")];
+        let text = vec![kw_hit("t1", "s"), kw_hit("t2", "s")];
+        let fused = hybrid_search(vector, text, 2);
+        assert_eq!(fused.len(), 2, "top_k 必须截断融合结果");
+    }
+
+    #[test]
+    fn hybrid_search_empty_inputs_return_empty() {
+        assert!(hybrid_search(Vec::new(), Vec::new(), 5).is_empty());
+        assert!(hybrid_search(vec![vec_hit("x", "s")], Vec::new(), 0).is_empty());
     }
 
     #[test]
@@ -657,6 +899,126 @@ mod tests {
             let store2 = VectorStore::new(dir.path());
             assert_eq!(store2.documents().len(), 1, "迁移重复执行产生了重复文档");
         }
+    }
+
+    /// v1 形态的库（只有 id/title/created_at 三列）重开时必须自动补上
+    /// source_type/source_url 两列，老数据取默认值，且再次重开保持幂等。
+    #[test]
+    fn schema_v2_migration_adds_metadata_columns() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("kb.db");
+        {
+            let db = crate::store::db::open(&path).unwrap();
+            db.with_conn(|c| {
+                c.execute_batch(
+                    "CREATE TABLE documents (
+                        id         TEXT PRIMARY KEY,
+                        title      TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );",
+                )?;
+                c.execute(
+                    "INSERT INTO documents (id, title, created_at) \
+                     VALUES ('old', '旧库文档', '2025-01-01T00:00:00Z')",
+                    [],
+                )?;
+                c.pragma_update(None, "user_version", 1)?;
+                Ok(())
+            })
+            .unwrap();
+        }
+
+        // 重开触发 v1 → v2 迁移。
+        {
+            let store = VectorStore::new(dir.path());
+            let (columns, source_type, source_url, version) = store
+                .db
+                .with_conn(|c| {
+                    let mut stmt = c.prepare("PRAGMA table_info(documents)")?;
+                    let columns: Vec<String> = stmt
+                        .query_map([], |r| r.get::<_, String>(1))?
+                        .collect::<Result<_, _>>()?;
+                    let (source_type, source_url): (String, Option<String>) = c.query_row(
+                        "SELECT source_type, source_url FROM documents WHERE id = 'old'",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?;
+                    let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+                    Ok((columns, source_type, source_url, version))
+                })
+                .unwrap();
+            assert!(columns.iter().any(|c| c == "source_type"));
+            assert!(columns.iter().any(|c| c == "source_url"));
+            assert_eq!(source_type, "", "老行 source_type 应为空串（未知来源）");
+            assert_eq!(source_url, None, "老行 source_url 应为 NULL");
+            assert_eq!(version, 2);
+        }
+
+        // 幂等：再次重开不报错，数据保持不变。
+        {
+            let store = VectorStore::new(dir.path());
+            let docs = store.documents();
+            assert_eq!(docs.len(), 1);
+            assert_eq!(docs[0].metadata.source_type, "");
+            assert_eq!(docs[0].metadata.source_url, None);
+            let version: i64 = store
+                .db
+                .with_conn(|c| c.query_row("PRAGMA user_version", [], |r| r.get(0)))
+                .unwrap();
+            assert_eq!(version, 2);
+        }
+    }
+
+    /// 元数据经三条读取路径（documents / FTS 检索 / 向量检索）往返一致。
+    #[test]
+    fn metadata_roundtrip_through_search_paths() {
+        let (store, _dir) = temp_store();
+        store
+            .db
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT INTO documents (id, title, created_at, source_type, source_url) \
+                     VALUES ('d_meta', '网页文档', '2026-02-01', 'crawl', 'https://example.com/x')",
+                    [],
+                )?;
+                c.execute(
+                    "INSERT INTO chunks (doc_id, idx, text, embedding) \
+                     VALUES ('d_meta', 0, '元数据 往返 校验 关键词', ?1)",
+                    params![embed_to_blob(&[1.0f32, 0.0, 0.0])],
+                )?;
+                c.execute(
+                    "INSERT INTO chunks_fts (doc_id, text) \
+                     VALUES ('d_meta', '元数据 往返 校验 关键词')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let docs = store.documents();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].metadata.source_type, "crawl");
+        assert_eq!(
+            docs[0].metadata.source_url.as_deref(),
+            Some("https://example.com/x")
+        );
+
+        let hits = store.search_text("元数据", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].metadata.source_type, "crawl");
+        assert_eq!(
+            hits[0].metadata.source_url.as_deref(),
+            Some("https://example.com/x")
+        );
+
+        let vec_hits = search_by_vector(&docs, &[1.0, 0.0, 0.0], 5);
+        assert_eq!(vec_hits.len(), 1);
+        assert_eq!(vec_hits[0].metadata.source_type, "crawl");
+        assert_eq!(
+            vec_hits[0].metadata.source_url.as_deref(),
+            Some("https://example.com/x")
+        );
+        drop(store);
     }
 
     #[test]
@@ -869,7 +1231,8 @@ mod tests {
             .db
             .with_conn(|c| {
                 c.execute(
-                    "INSERT INTO documents (id, title, created_at) VALUES (?1, ?2, '2026-01-01')",
+                    "INSERT INTO documents (id, title, created_at, source_type, source_url) \
+                     VALUES (?1, ?2, '2026-01-01', 'paste', NULL)",
                     params![doc_id, title],
                 )?;
                 let emb = embed_to_blob(&[0.0f32; 4]);
