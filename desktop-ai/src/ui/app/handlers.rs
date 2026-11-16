@@ -694,6 +694,11 @@ impl DesktopAI {
             if let Some(mut conv) = Conversation::load(&conv_id) {
                 conv.add_message("assistant", &response);
                 self.conv_cache_dirty = true;
+                // 若落库的正是当前打开的会话，同步回内存态——否则聊天区
+                // 只有用户消息，助手回复要等手动切换会话刷新后才出现。
+                if self.current_conv.id == conv_id {
+                    self.current_conv = conv;
+                }
             }
 
             self.gen = None;
