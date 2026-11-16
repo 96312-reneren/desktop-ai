@@ -3,6 +3,14 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，
 版本号遵循语义化版本。最新版本号以 `desktop-ai/Cargo.toml` 为准。
 
+## [6.2.1] — 2026-11-16
+
+### 修复
+- 修复生成结束后助手回复不在聊天区显示：完成时回复只写入数据库副本、未同步回内存中的当前会话，需手动切换会话才出现；现已在落库后同步当前会话
+### 文档
+- 新增英文 README（`README_EN.md`），中英双 README 顶部加语言切换徽章
+- 新增演示 GIF（`assets/screenshots/demo.gif`），README 首页展示真实问答流程
+
 ## [6.2.0] — 2026-11-15
 
 ### 新增
