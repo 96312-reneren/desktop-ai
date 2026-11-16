@@ -6,13 +6,15 @@
 
 无需 Python / Node / CUDA / Docker，一个 exe 就是全部
 
+[![English](https://img.shields.io/badge/lang-English-blue?style=flat-square)](./README_EN.md)
+
 [![GitHub Release](https://img.shields.io/github/v/release/96312-reneren/desktop-ai?style=flat-square&color=blue)](https://github.com/96312-reneren/desktop-ai/releases)
 [![CI](https://img.shields.io/github/actions/workflow/status/96312-reneren/desktop-ai/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/96312-reneren/desktop-ai/actions)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](./desktop-ai/LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20Android-lightgrey?style=flat-square)](https://github.com/96312-reneren/desktop-ai/releases)
 [![Rust](https://img.shields.io/badge/Rust-100%25-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 
-![主界面](assets/screenshots/main-window.png)
+![演示](assets/screenshots/demo.gif)
 
 </div>
 
@@ -36,9 +38,9 @@
 
 ## 界面一览
 
-| 模型选择（自动硬件推荐） | 知识库面板（三种入库方式） |
-| --- | --- |
-| ![模型选择](assets/screenshots/model-select.png) | ![知识库](assets/screenshots/kb-panel.png) |
+| 主界面（欢迎页） | 模型选择（自动硬件推荐） | 知识库面板（三种入库方式） |
+| --- | --- | --- |
+| ![主界面](assets/screenshots/main-window.png) | ![模型选择](assets/screenshots/model-select.png) | ![知识库](assets/screenshots/kb-panel.png) |
 
 ## 三分钟上手
 
