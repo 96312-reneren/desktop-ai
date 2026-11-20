@@ -8,6 +8,8 @@
 
 #[cfg(target_os = "android")]
 pub mod android;
+// `--serve` 的控制台附加只在桌面端使用；Android 走 JNI 入口，不含命令行。
+#[cfg(not(target_os = "android"))]
 pub(crate) mod console;
 pub(crate) mod hardware;
 pub(crate) mod shortcut;
