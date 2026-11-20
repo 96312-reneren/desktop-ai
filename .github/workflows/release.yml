@@ -109,23 +109,16 @@ jobs:
         with:
           files: artifacts/*
           body: |
-            ## 桌面AI v${{ github.ref_name }}
+            ## 桌面AI ${{ github.ref_name }}
 
-            ### 新特性
-            - SQLite 存储迁移：知识库与对话改用 SQLite(WAL 事务,崩溃不丢数据,增量写入)
-            - 会话增量落盘：长对话不再全量重写
-            - 模型下载断点续传：中断后自动续传,无需重新下载
-            - 日志文件：每日滚动日志写入数据目录,崩溃可排查
-            - API token 强随机化
-
-            ### 漏洞修复
-            - 新版 llama.cpp API 适配(采样器/vocab/后端初始化),修复模型加载崩溃与空输出
-            - ChatML 注入消毒扩展至全部特殊标记 + 对话历史统一消毒
-            - SSRF 防护补强(种子 URL 校验、重定向逐跳校验、IP 编码绕过拦截)
-            - API 请求总超时防慢速滴流、CORS 白名单回显
-            - config 原子写入、tokenize 缓冲扩容、decode 错误可见
-            - 依赖安全升级:pdf-extract 0.12(lopdf 0.42)、anyhow、event-listener、memmap2
+            完整变更见 [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)。
 
             ### 安装
-            - **Windows**:解压 `windows-x86_64` 压缩包,运行 `桌面AI.exe`
+            - **Windows**:解压 `windows-x86_64` 压缩包,运行 `桌面AI.exe`(与 `llama.dll` 放同一目录)
             - **Linux**:解压 `linux-x86_64` tar.gz,运行 `desktop-ai`(需 glibc ≥ 2.35)
+
+            ### 命令行服务(可选)
+            ```
+            桌面AI.exe serve --port 8321
+            ```
+            v6.3.0 起可无界面启动本地模型与 OpenAI 兼容 API;`--help` 查看全部参数。
