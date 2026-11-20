@@ -71,27 +71,10 @@ fn load_chinese_fonts() -> Option<Vec<u8>> {
 /// cdylib 入口。
 #[cfg(not(target_os = "android"))]
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    // Structured logging via tracing-subscriber with env-filter support.
-    // Existing `log::info! / warn! / error!` macros are bridged via the
-    // `tracing-log` feature (enabled explicitly in Cargo.toml) so no source
-    // changes are needed in other modules; it must not be disabled or the
-    // 70+ log call sites go silent.
-    // Logs go to stderr AND a daily-rotating file in the data dir so
-    // crashes can be diagnosed after the fact.
-    use tracing_subscriber::fmt::writer::MakeWriterExt;
-
-    let log_dir = config::log_dir();
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "desktop-ai.log");
-    let (file_writer, log_guard) = tracing_appender::non_blocking(file_appender);
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_target(false)
-        .with_writer(std::io::stderr.and(file_writer))
-        .init();
-    let _log_guard = log_guard; // keep the non-blocking writer alive
+    // 结构化日志：stderr + 数据目录下的每日滚动文件，与 `--serve` 共用
+    // `logging::init`（tracing-log 桥接让既有 log 宏无需改动）。
+    // guard 必须持有到进程退出，否则文件写入会被截断。
+    let _log_guard = crate::logging::init();
 
     // Crash handling: route panics into the log file and clear the
     // clean-exit marker so the next launch can offer crash recovery.

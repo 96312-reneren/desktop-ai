@@ -18,7 +18,11 @@
 //! 其余实现细节通过 `pub(crate)` 限制在 crate 内部。
 
 // ── 领域模块：仅 crate 内部可见 ──
+#[cfg(not(target_os = "android"))]
+mod cli;
 mod llm;
+#[cfg(not(target_os = "android"))]
+mod logging;
 mod platform;
 mod rag;
 mod server;
@@ -36,6 +40,32 @@ pub use store::config::{load_config, models_dir, save_config, Config, ModelInfo,
 pub use store::conversation::{Conversation, Message};
 #[cfg(not(target_os = "android"))]
 pub use ui::startup::run;
+
+/// 桌面端统一入口：解析命令行后分发到图形界面或 `--serve` 无界面服务。
+///
+/// 无参数时行为与旧版完全一致（启动 GUI）；`serve` / `--serve` 走
+/// [`cli::run_serve`]，不创建任何窗口，仅加载模型并对外提供 OpenAI 兼容 API。
+#[cfg(not(target_os = "android"))]
+pub fn run_entry() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // 带参数运行意味着用户可能在终端里，先尽力挂上父进程控制台再输出。
+    if !args.is_empty() {
+        platform::console::attach_parent_console();
+    }
+    match cli::parse_cli(&args) {
+        Ok(cli::CliCommand::Gui) => ui::startup::run(),
+        Ok(cli::CliCommand::Serve(opts)) => cli::run_serve(opts),
+        Ok(cli::CliCommand::Help) => {
+            print!("{}", cli::usage());
+            Ok(())
+        }
+        Ok(cli::CliCommand::Version) => {
+            println!("桌面AI v{}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        Err(e) => Err(format!("参数错误: {}\n\n{}", e, cli::usage()).into()),
+    }
+}
 
 /// Android 原生入口所在模块（`android_main` / JNI 符号需对外可达以便导出）。
 #[cfg(target_os = "android")]
