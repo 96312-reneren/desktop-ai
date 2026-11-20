@@ -33,7 +33,7 @@
 - **Bearer Token 认证**：`/v1/*` 需携带 `Authorization: Bearer <token>`（设置中查看）
 - **CORS 白名单**：仅允许 localhost / 127.0.0.1，响应回显白名单 Origin（带 `Vary: Origin`）
 - **DoS 防护**：最大 16 并发、30 秒读超时 + 60 秒请求总超时、1 MB 请求体上限
-- **无界面模式**：`cargo run --release --example api_serve -- <模型.gguf> [端口] [token]` 可脱离 GUI 启动服务
+- **无界面模式**：`桌面AI.exe serve [--model ...] [--port ...]` 不开窗口直接提供 API（详见下方「命令行启动服务」）
 
 ### 对话管理
 
@@ -94,12 +94,17 @@
 
 - 设置面板中开启"API 服务"，默认端口 11434
 - 任何 OpenAI 客户端可指向 `http://127.0.0.1:11434/v1`，需携带 API token
-- **无界面模式**（自动化 / 中转场景）：
+- **无界面模式**（自动化 / 中转 / 接入第三方客户端）：
   ```powershell
-  cargo run --release --example api_serve -- <模型.gguf> [端口=11434] [token=da-local]
+  桌面AI.exe serve                          # 加载配置里选中的模型，端口取 config.json
+  桌面AI.exe serve --model qwen2.5-0.5b --port 8321
+  桌面AI.exe serve --model D:\models\qwen3-8b.gguf --gpu-layers 99
   ```
+  启动时终端会打印 API 地址与 token；若进程没有控制台（例如被脚本无窗口拉起），
+  同样的信息会写入数据目录下的 `serve.info`（JSON：pid / port / token / 模型）。
+  服务只监听 `127.0.0.1`，退出按 Ctrl+C。`桌面AI.exe --help` 查看全部参数。
 
-  服务只监听 `127.0.0.1`，退出按 Ctrl+C
+  > 命令行模式只提供纯对话补全（不含 RAG 知识库与联网搜索），需要知识库请用图形界面。
 
 ---
 

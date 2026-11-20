@@ -3,6 +3,23 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，
 版本号遵循语义化版本。最新版本号以 `desktop-ai/Cargo.toml` 为准。
 
+## [6.3.0] — 2026-11-20
+
+### 新增
+- `serve` 无界面模式：不开窗口直接加载模型并对外提供 OpenAI 兼容 API
+  - 参数：`--model <id|文件名|路径>`、`--port`、`--token`、`--n-ctx`、`--gpu-layers`，缺省回落到 `config.json`
+  - 启动后打印 API 地址与 token；无控制台时写入数据目录的 `serve.info`（pid / port / token / 模型）
+  - Windows GUI 子系统进程会自动附加父进程控制台，命令行可见输出
+  - 端口绑定失败时给出可操作提示（提示可能被 Ollama 等占用）
+
+### 变更
+- 日志初始化抽到 `logging` 模块，GUI 与 `serve` 共用同一条 stderr + 文件管道
+- 二进制入口改为 `run_entry()`：解析命令行后分发到 GUI 或 `serve`；`--help` / `--version` 可直接使用
+- 文档：中英 README 增加「命令行启动服务」一节，替换原先需要 cargo 的 `examples/api_serve` 用法
+
+### 测试
+- 新增 8 项 CLI 单元测试：参数解析（两种取值写法、未知/缺值报错、help/version）、模型解析优先级与错误提示
+
 ## [6.2.1] — 2026-11-16
 
 ### 修复

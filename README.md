@@ -52,6 +52,24 @@
 
 > 想用知识库 / 联网搜索？设置面板一键开启；想接入自己的程序？设置里开 API 服务，端口默认 11434。
 
+## 命令行启动服务（可选）
+
+不想挂窗口、只把 DesktopAI 当本地模型后端（Chatbox / Continue / Cline / 沉浸式翻译等客户端）时：
+
+```powershell
+桌面AI.exe serve                                    # 加载配置里选中的模型
+桌面AI.exe serve --model qwen2.5-0.5b --port 8321   # 指定模型与端口
+桌面AI.exe serve --model D:\models\qwen3-8b.gguf --gpu-layers 99
+```
+
+启动后终端打印 API 地址与 token；没有控制台时（例如脚本无窗口拉起），同样的信息写入数据目录的 `serve.info`。
+
+```bash
+curl http://127.0.0.1:8321/v1/models -H "Authorization: Bearer da-xxxx"
+```
+
+> 该模式只做纯对话补全（不含 RAG 知识库与联网搜索）；需要知识库请用图形界面。`桌面AI.exe --help` 查看全部参数。
+
 ## 仓库内容（单一 main 分支）
 
 | 目录 | 内容 |

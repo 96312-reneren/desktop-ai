@@ -52,6 +52,24 @@ No Python / Node / CUDA / Docker required. One exe is all you need.
 
 > Want the knowledge base / web search? Toggle them in the settings panel. Want to drive it from your own program? Enable the API server in settings — default port 11434.
 
+## Headless server (optional)
+
+No window needed if you just want DesktopAI as a local model backend (Chatbox, Continue, Cline, Immersive Translate, …):
+
+```powershell
+桌面AI.exe serve                                    # model currently selected in config
+桌面AI.exe serve --model qwen2.5-0.5b --port 8321   # explicit model and port
+桌面AI.exe serve --model D:\models\qwen3-8b.gguf --gpu-layers 99
+```
+
+On start the terminal prints the API endpoint and token. When the process has no console (e.g. spawned by a script), the same info lands in `serve.info` under the data directory.
+
+```bash
+curl http://127.0.0.1:8321/v1/models -H "Authorization: Bearer da-xxxx"
+```
+
+> Server mode serves plain chat completions only (no RAG knowledge base / web search) — use the GUI for those. Run `桌面AI.exe --help` for all flags.
+
 ## Repository layout (single main branch)
 
 | Directory | Contents |
